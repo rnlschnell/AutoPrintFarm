@@ -1,0 +1,42 @@
+UNIT FILE                          STATE   PRESET
+apparmor.service                   enabled enabled
+avahi-daemon.service               enabled enabled
+bambu-program.service              enabled enabled
+bluetooth.service                  enabled enabled
+console-setup.service              enabled enabled
+containerd.service                 enabled enabled
+cron.service                       enabled enabled
+docker.service                     enabled enabled
+dphys-swapfile.service             enabled enabled
+e2scrub_reap.service               enabled enabled
+fake-hwclock.service               enabled enabled
+getty@.service                     enabled enabled
+hciuart.service                    enabled enabled
+keyboard-setup.service             enabled enabled
+ModemManager.service               enabled enabled
+NetworkManager-dispatcher.service  enabled enabled
+NetworkManager-wait-online.service enabled enabled
+NetworkManager.service             enabled enabled
+rpi-display-backlight.service      enabled enabled
+rpi-eeprom-update.service          enabled enabled
+ssh.service                        enabled enabled
+sshswitch.service                  enabled enabled
+systemd-pstore.service             enabled enabled
+systemd-timesyncd.service          enabled enabled
+triggerhappy.service               enabled enabled
+udisks2.service                    enabled enabled
+wpa_supplicant.service             enabled enabled
+avahi-daemon.socket                enabled enabled
+docker.socket                      enabled enabled
+triggerhappy.socket                enabled enabled
+nfs-client.target                  enabled enabled
+remote-fs.target                   enabled enabled
+apt-daily-upgrade.timer            enabled enabled
+apt-daily.timer                    enabled enabled
+dpkg-db-backup.timer               enabled enabled
+e2scrub_all.timer                  enabled enabled
+fstrim.timer                       enabled enabled
+logrotate.timer                    enabled enabled
+man-db.timer                       enabled enabled
+
+39 unit files listed.

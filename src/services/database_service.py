@@ -1,0 +1,1198 @@
+"""
+Database service for managing local SQLite database operations
+"""
+
+import os
+import asyncio
+import logging
+from pathlib import Path
+from contextlib import asynccontextmanager
+from typing import List, Optional, Dict, Any
+from datetime import datetime
+
+from sqlalchemy import create_engine, text
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.exc import SQLAlchemyError
+
+from ..models.database import Base, Printer, ColorPreset, SyncLog, Product, ProductSku, PrintFile, PrintJob
+
+logger = logging.getLogger(__name__)
+
+# Import backup service for local-first tables
+from typing import TYPE_CHECKING
+import uuid
+if TYPE_CHECKING:
+    from .backup_service import BackupService
+
+class DatabaseService:
+    """
+    Service for managing local SQLite database operations
+    """
+    
+    def __init__(self, database_path: str = None):
+        """
+        Initialize database service
+        
+        Args:
+            database_path: Optional custom path for database file
+        """
+        if database_path is None:
+            # Default to data directory in project root
+            project_root = Path(__file__).parent.parent.parent
+            data_dir = project_root / "data"
+            data_dir.mkdir(exist_ok=True)
+            database_path = str(data_dir / "tenant.db")
+        
+        self.database_path = database_path
+        self.database_url = f"sqlite+aiosqlite:///{database_path}"
+        
+        # Create async engine with foreign key enforcement
+        self.engine = create_async_engine(
+            self.database_url,
+            echo=False,  # Set to True for SQL debugging
+            future=True,
+            pool_pre_ping=True,
+            connect_args={
+                "check_same_thread": False,
+            },
+        )
+        
+        # Create async session factory
+        self.async_session = async_sessionmaker(
+            self.engine,
+            class_=AsyncSession,
+            expire_on_commit=False
+        )
+        
+        # Set up event listener to enable foreign keys for all connections
+        from sqlalchemy import event
+        
+        @event.listens_for(self.engine.sync_engine, "connect")
+        def set_sqlite_pragma(dbapi_connection, connection_record):
+            """Enable foreign key constraints for SQLite connections"""
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
+        
+        logger.info(f"Database service initialized with path: {database_path}")
+        logger.info("Foreign key constraints will be enabled for all database connections")
+    
+    async def initialize_database(self):
+        """
+        Create database tables if they don't exist
+        """
+        try:
+            async with self.engine.begin() as conn:
+                # Enable foreign key constraints for SQLite
+                await conn.execute(text("PRAGMA foreign_keys = ON"))
+                await conn.run_sync(Base.metadata.create_all)
+            logger.info("Database tables initialized successfully with foreign key constraints enabled")
+            
+            # Log initialization
+            await self.log_sync_operation(
+                operation_type="INIT",
+                table_name="system",
+                record_id="database",
+                status="SUCCESS"
+            )
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize database: {e}")
+            raise
+    
+    async def close(self):
+        """
+        Close database connections
+        """
+        if hasattr(self, 'engine'):
+            await self.engine.dispose()
+            logger.info("Database connections closed")
+    
+    @asynccontextmanager
+    async def get_session(self):
+        """
+        Get async database session with automatic cleanup
+        """
+        async with self.async_session() as session:
+            try:
+                yield session
+            except Exception:
+                await session.rollback()
+                raise
+            finally:
+                await session.close()
+    
+    # Printer operations
+    
+    async def get_printer_by_id(self, printer_id: str) -> Optional[Printer]:
+        """
+        Get printer by ID
+        """
+        try:
+            async with self.get_session() as session:
+                result = await session.get(Printer, printer_id)
+                return result
+        except Exception as e:
+            logger.error(f"Failed to get printer {printer_id}: {e}")
+            return None
+    
+    async def get_printers_by_tenant(self, tenant_id: str) -> List[Printer]:
+        """
+        Get all active printers for a tenant
+        """
+        try:
+            async with self.get_session() as session:
+                result = await session.execute(
+                    text("SELECT * FROM printers WHERE tenant_id = :tenant_id AND is_active = 1 ORDER BY sort_order"),
+                    {"tenant_id": tenant_id}
+                )
+                rows = result.fetchall()
+                
+                printers = []
+                for row in rows:
+                    printer = Printer()
+                    for column in row._fields:
+                        setattr(printer, column, getattr(row, column))
+                    printers.append(printer)
+                
+                return printers
+        except Exception as e:
+            logger.error(f"Failed to get printers for tenant {tenant_id}: {e}")
+            return []
+    
+    async def upsert_printer(self, printer_data: Dict[str, Any], skip_backup: bool = False) -> bool:
+        """
+        Insert or update printer data (local-first)
+        
+        Args:
+            printer_data: Dictionary containing printer data
+            skip_backup: If True, skip backup to Supabase (for sync operations)
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            async with self.get_session() as session:
+                # Check if printer exists
+                existing = await session.get(Printer, printer_data.get('id'))
+                
+                if existing:
+                    # Update existing printer - properly convert datetime strings
+                    for key, value in printer_data.items():
+                        if hasattr(existing, key):
+                            # Convert datetime strings to datetime objects for timestamp fields
+                            if key in ['created_at', 'updated_at', 'last_connection_attempt'] and isinstance(value, str):
+                                try:
+                                    value = datetime.fromisoformat(value.replace('Z', '+00:00').replace('+00:00', ''))
+                                except (ValueError, AttributeError):
+                                    # If parsing fails, skip this field to avoid corruption
+                                    logger.warning(f"Failed to parse datetime field {key}: {value}")
+                                    continue
+                            elif key == 'last_maintenance_date' and isinstance(value, str):
+                                try:
+                                    from datetime import date
+                                    value = date.fromisoformat(value)
+                                except (ValueError, AttributeError):
+                                    logger.warning(f"Failed to parse date field {key}: {value}")
+                                    continue
+                            
+                            setattr(existing, key, value)
+                    existing.updated_at = datetime.utcnow()
+                    operation_type = "UPDATE"
+                else:
+                    # Create new printer from Supabase data
+                    printer = Printer.from_supabase_dict(printer_data)
+                    session.add(printer)
+                    operation_type = "INSERT"
+                
+                await session.commit()
+                
+                # Queue backup to Supabase if this is a local-first operation
+                if not skip_backup:
+                    from .backup_service import get_backup_service
+                    backup_service = get_backup_service()
+                    if backup_service:
+                        await backup_service.queue_change(
+                            'printers',
+                            operation_type.lower(),
+                            printer_data.get('id'),
+                            printer_data
+                        )
+                
+                # Log the operation
+                await self.log_sync_operation(
+                    operation_type=operation_type,
+                    table_name="printers",
+                    record_id=printer_data.get('id'),
+                    tenant_id=printer_data.get('tenant_id'),
+                    status="SUCCESS"
+                )
+                
+                logger.info(f"Successfully upserted printer {printer_data.get('id')}")
+                return True
+                
+        except Exception as e:
+            logger.error(f"Failed to upsert printer: {e}")
+            await self.log_sync_operation(
+                operation_type=operation_type,
+                table_name="printers",
+                record_id=printer_data.get('id'),
+                tenant_id=printer_data.get('tenant_id'),
+                status="FAILED",
+                error_message=str(e)
+            )
+            return False
+    
+    async def delete_printer(self, printer_id: str, tenant_id: str) -> bool:
+        """
+        Delete printer (hard delete - permanently remove from database)
+        
+        Args:
+            printer_id: ID of printer to delete
+            tenant_id: Tenant ID for logging
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        # Use hard delete to prevent UNIQUE constraint conflicts when printer IDs are reused
+        return await self.hard_delete_printer(printer_id, tenant_id)
+    
+    async def hard_delete_printer(self, printer_id: str, tenant_id: str) -> bool:
+        """
+        Permanently delete printer from database
+        """
+        try:
+            async with self.get_session() as session:
+                printer = await session.get(Printer, printer_id)
+                if printer:
+                    await session.delete(printer)
+                    await session.commit()
+                    
+                    await self.log_sync_operation(
+                        operation_type="HARD_DELETE",
+                        table_name="printers",
+                        record_id=printer_id,
+                        tenant_id=tenant_id,
+                        status="SUCCESS"
+                    )
+                    
+                    logger.info(f"Successfully hard deleted printer {printer_id}")
+                    return True
+                else:
+                    logger.warning(f"Printer {printer_id} not found for hard deletion")
+                    return False
+                    
+        except Exception as e:
+            logger.error(f"Failed to hard delete printer {printer_id}: {e}")
+            await self.log_sync_operation(
+                operation_type="HARD_DELETE",
+                table_name="printers",
+                record_id=printer_id,
+                tenant_id=tenant_id,
+                status="FAILED",
+                error_message=str(e)
+            )
+            return False
+    
+    # Color Preset operations
+    
+    async def get_color_preset_by_id(self, preset_id: str) -> Optional[ColorPreset]:
+        """
+        Get color preset by ID
+        """
+        try:
+            async with self.get_session() as session:
+                result = await session.get(ColorPreset, preset_id)
+                return result
+        except Exception as e:
+            logger.error(f"Failed to get color preset {preset_id}: {e}")
+            return None
+    
+    async def get_color_presets_by_tenant(self, tenant_id: str) -> List[ColorPreset]:
+        """
+        Get all color presets for a tenant
+        """
+        try:
+            async with self.get_session() as session:
+                result = await session.execute(
+                    text("SELECT * FROM color_presets WHERE tenant_id = :tenant_id ORDER BY color_name"),
+                    {"tenant_id": tenant_id}
+                )
+                rows = result.fetchall()
+                
+                presets = []
+                for row in rows:
+                    preset = ColorPreset()
+                    for column in row._fields:
+                        setattr(preset, column, getattr(row, column))
+                    presets.append(preset)
+                
+                return presets
+        except Exception as e:
+            logger.error(f"Failed to get color presets for tenant {tenant_id}: {e}")
+            return []
+    
+    async def upsert_color_preset(self, preset_data: Dict[str, Any], skip_backup: bool = False) -> bool:
+        """
+        Insert or update color preset data
+        
+        Args:
+            preset_data: Dictionary containing color preset data
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            async with self.get_session() as session:
+                # Check if color preset exists
+                existing = await session.get(ColorPreset, preset_data.get('id'))
+                
+                if existing:
+                    # Update existing preset
+                    for key, value in preset_data.items():
+                        if hasattr(existing, key):
+                            # Convert datetime strings to datetime objects for timestamp fields
+                            if key in ['created_at', 'updated_at'] and isinstance(value, str):
+                                try:
+                                    value = datetime.fromisoformat(value.replace('Z', '+00:00').replace('+00:00', ''))
+                                except (ValueError, AttributeError):
+                                    logger.warning(f"Failed to parse datetime field {key}: {value}")
+                                    continue
+                            
+                            setattr(existing, key, value)
+                    existing.updated_at = datetime.utcnow()
+                    operation_type = "UPDATE"
+                else:
+                    # Create new color preset from Supabase data
+                    preset = ColorPreset.from_supabase_dict(preset_data)
+                    session.add(preset)
+                    operation_type = "INSERT"
+                
+                await session.commit()
+                
+                # Queue backup to Supabase if this is a local-first operation
+                if not skip_backup:
+                    from .backup_service import get_backup_service
+                    backup_service = get_backup_service()
+                    if backup_service:
+                        await backup_service.queue_change(
+                            'color_presets',
+                            operation_type.lower(),
+                            preset_data.get('id'),
+                            preset_data
+                        )
+                
+                # Log the operation
+                await self.log_sync_operation(
+                    operation_type=operation_type,
+                    table_name="color_presets",
+                    record_id=preset_data.get('id'),
+                    tenant_id=preset_data.get('tenant_id'),
+                    status="SUCCESS"
+                )
+                
+                logger.info(f"Successfully upserted color preset {preset_data.get('id')} - {preset_data.get('color_name')}")
+                return True
+                
+        except Exception as e:
+            logger.error(f"Failed to upsert color preset: {e}")
+            await self.log_sync_operation(
+                operation_type=operation_type if 'operation_type' in locals() else "UPSERT",
+                table_name="color_presets",
+                record_id=preset_data.get('id'),
+                tenant_id=preset_data.get('tenant_id'),
+                status="FAILED",
+                error_message=str(e)
+            )
+            return False
+    
+    async def delete_color_preset(self, preset_id: str, tenant_id: str) -> bool:
+        """
+        Delete color preset (hard delete)
+        
+        Args:
+            preset_id: ID of color preset to delete
+            tenant_id: Tenant ID for logging
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            async with self.get_session() as session:
+                preset = await session.get(ColorPreset, preset_id)
+                if preset:
+                    await session.delete(preset)
+                    await session.commit()
+                    
+                    await self.log_sync_operation(
+                        operation_type="DELETE",
+                        table_name="color_presets",
+                        record_id=preset_id,
+                        tenant_id=tenant_id,
+                        status="SUCCESS"
+                    )
+                    
+                    logger.info(f"Successfully deleted color preset {preset_id}")
+                    return True
+                else:
+                    logger.warning(f"Color preset {preset_id} not found for deletion")
+                    return False
+                    
+        except Exception as e:
+            logger.error(f"Failed to delete color preset {preset_id}: {e}")
+            await self.log_sync_operation(
+                operation_type="DELETE",
+                table_name="color_presets",
+                record_id=preset_id,
+                tenant_id=tenant_id,
+                status="FAILED",
+                error_message=str(e)
+            )
+            return False
+    
+    # Product operations
+    
+    async def get_product_by_id(self, product_id: str) -> Optional[Product]:
+        """
+        Get product by ID
+        """
+        try:
+            async with self.get_session() as session:
+                result = await session.get(Product, product_id)
+                return result
+        except Exception as e:
+            logger.error(f"Failed to get product {product_id}: {e}")
+            return None
+    
+    async def get_products_by_tenant(self, tenant_id: str) -> List[Product]:
+        """
+        Get all active products for a tenant
+        """
+        try:
+            async with self.get_session() as session:
+                result = await session.execute(
+                    text("SELECT * FROM products WHERE tenant_id = :tenant_id AND is_active = 1 ORDER BY name"),
+                    {"tenant_id": tenant_id}
+                )
+                rows = result.fetchall()
+                
+                products = []
+                for row in rows:
+                    product = Product()
+                    for column in row._fields:
+                        setattr(product, column, getattr(row, column))
+                    products.append(product)
+                
+                return products
+        except Exception as e:
+            logger.error(f"Failed to get products for tenant {tenant_id}: {e}")
+            return []
+    
+    async def upsert_product(self, product_data: Dict[str, Any], skip_backup: bool = False) -> bool:
+        """
+        Insert or update product data
+        """
+        try:
+            async with self.get_session() as session:
+                existing = await session.get(Product, product_data.get('id'))
+                
+                if existing:
+                    # Update existing product
+                    for key, value in product_data.items():
+                        if hasattr(existing, key):
+                            # Convert datetime strings
+                            if key in ['created_at', 'updated_at'] and isinstance(value, str):
+                                try:
+                                    value = datetime.fromisoformat(value.replace('Z', '+00:00').replace('+00:00', ''))
+                                except (ValueError, AttributeError):
+                                    logger.warning(f"Failed to parse datetime field {key}: {value}")
+                                    continue
+                            
+                            setattr(existing, key, value)
+                    existing.updated_at = datetime.utcnow()
+                    operation_type = "UPDATE"
+                else:
+                    # Create new product
+                    product = Product.from_supabase_dict(product_data)
+                    session.add(product)
+                    operation_type = "INSERT"
+                
+                await session.commit()
+                
+                # Queue backup to Supabase if this is a local-first operation
+                if not skip_backup:
+                    from .backup_service import get_backup_service
+                    backup_service = get_backup_service()
+                    if backup_service:
+                        await backup_service.queue_change(
+                            'products',
+                            operation_type.lower(),
+                            product_data.get('id'),
+                            product_data
+                        )
+                
+                await self.log_sync_operation(
+                    operation_type=operation_type,
+                    table_name="products",
+                    record_id=product_data.get('id'),
+                    tenant_id=product_data.get('tenant_id'),
+                    status="SUCCESS"
+                )
+                
+                logger.info(f"Successfully upserted product {product_data.get('id')}")
+                return True
+                
+        except Exception as e:
+            logger.error(f"Failed to upsert product: {e}")
+            await self.log_sync_operation(
+                operation_type="UPSERT",
+                table_name="products",
+                record_id=product_data.get('id'),
+                tenant_id=product_data.get('tenant_id'),
+                status="FAILED",
+                error_message=str(e)
+            )
+            return False
+    
+    async def delete_product(self, product_id: str, tenant_id: str) -> bool:
+        """
+        Delete product (hard delete) - matches Supabase CASCADE behavior
+        """
+        try:
+            async with self.get_session() as session:
+                product = await session.get(Product, product_id)
+                if product:
+                    # Hard delete to match Supabase CASCADE behavior
+                    await session.delete(product)
+                    await session.commit()
+                    
+                    await self.log_sync_operation(
+                        operation_type="DELETE",
+                        table_name="products",
+                        record_id=product_id,
+                        tenant_id=tenant_id,
+                        status="SUCCESS"
+                    )
+                    
+                    logger.info(f"Successfully hard deleted product {product_id}")
+                    return True
+                else:
+                    logger.warning(f"Product {product_id} not found for deletion (already deleted)")
+                    # Return True for idempotent deletes - if already gone, that's fine
+                    return True
+                    
+        except Exception as e:
+            logger.error(f"Failed to delete product {product_id}: {e}")
+            return False
+    
+    # Product SKU operations
+    
+    async def get_product_sku_by_id(self, sku_id: str) -> Optional[ProductSku]:
+        """
+        Get product SKU by ID
+        """
+        try:
+            async with self.get_session() as session:
+                result = await session.get(ProductSku, sku_id)
+                return result
+        except Exception as e:
+            logger.error(f"Failed to get product SKU {sku_id}: {e}")
+            return None
+    
+    async def get_product_skus_by_tenant(self, tenant_id: str) -> List[ProductSku]:
+        """
+        Get all active product SKUs for a tenant
+        """
+        try:
+            async with self.get_session() as session:
+                result = await session.execute(
+                    text("SELECT * FROM product_skus WHERE tenant_id = :tenant_id AND is_active = 1 ORDER BY sku"),
+                    {"tenant_id": tenant_id}
+                )
+                rows = result.fetchall()
+                
+                skus = []
+                for row in rows:
+                    sku = ProductSku()
+                    for column in row._fields:
+                        setattr(sku, column, getattr(row, column))
+                    skus.append(sku)
+                
+                return skus
+        except Exception as e:
+            logger.error(f"Failed to get product SKUs for tenant {tenant_id}: {e}")
+            return []
+    
+    async def get_product_skus_by_product(self, product_id: str) -> List[ProductSku]:
+        """
+        Get all active SKUs for a specific product
+        """
+        try:
+            async with self.get_session() as session:
+                result = await session.execute(
+                    text("SELECT * FROM product_skus WHERE product_id = :product_id AND is_active = 1 ORDER BY sku"),
+                    {"product_id": product_id}
+                )
+                rows = result.fetchall()
+                
+                skus = []
+                for row in rows:
+                    sku = ProductSku()
+                    for column in row._fields:
+                        setattr(sku, column, getattr(row, column))
+                    skus.append(sku)
+                
+                return skus
+        except Exception as e:
+            logger.error(f"Failed to get SKUs for product {product_id}: {e}")
+            return []
+    
+    async def upsert_product_sku(self, sku_data: Dict[str, Any], skip_backup: bool = False) -> bool:
+        """
+        Insert or update product SKU data
+        """
+        try:
+            async with self.get_session() as session:
+                existing = await session.get(ProductSku, sku_data.get('id'))
+                
+                if existing:
+                    # Update existing SKU
+                    for key, value in sku_data.items():
+                        if hasattr(existing, key):
+                            # Convert datetime strings
+                            if key in ['created_at', 'updated_at'] and isinstance(value, str):
+                                try:
+                                    value = datetime.fromisoformat(value.replace('Z', '+00:00').replace('+00:00', ''))
+                                except (ValueError, AttributeError):
+                                    logger.warning(f"Failed to parse datetime field {key}: {value}")
+                                    continue
+                            
+                            setattr(existing, key, value)
+                    existing.updated_at = datetime.utcnow()
+                    operation_type = "UPDATE"
+                else:
+                    # Create new SKU
+                    sku = ProductSku.from_supabase_dict(sku_data)
+                    session.add(sku)
+                    operation_type = "INSERT"
+                
+                await session.commit()
+                
+                # Queue backup to Supabase if this is a local-first operation
+                if not skip_backup:
+                    from .backup_service import get_backup_service
+                    backup_service = get_backup_service()
+                    if backup_service:
+                        await backup_service.queue_change(
+                            'product_skus',
+                            operation_type.lower(),
+                            sku_data.get('id'),
+                            sku_data
+                        )
+                
+                await self.log_sync_operation(
+                    operation_type=operation_type,
+                    table_name="product_skus",
+                    record_id=sku_data.get('id'),
+                    tenant_id=sku_data.get('tenant_id'),
+                    status="SUCCESS"
+                )
+                
+                logger.info(f"Successfully upserted product SKU {sku_data.get('id')}")
+                return True
+                
+        except Exception as e:
+            logger.error(f"Failed to upsert product SKU: {e}")
+            return False
+    
+    async def delete_product_sku(self, sku_id: str, tenant_id: str) -> bool:
+        """
+        Delete product SKU (hard delete) - matches Supabase CASCADE behavior
+        """
+        try:
+            async with self.get_session() as session:
+                sku = await session.get(ProductSku, sku_id)
+                if sku:
+                    # Hard delete to match Supabase CASCADE behavior
+                    await session.delete(sku)
+                    await session.commit()
+                    
+                    await self.log_sync_operation(
+                        operation_type="DELETE",
+                        table_name="product_skus",
+                        record_id=sku_id,
+                        tenant_id=tenant_id,
+                        status="SUCCESS"
+                    )
+                    
+                    logger.info(f"Successfully hard deleted product SKU {sku_id}")
+                    return True
+                else:
+                    logger.warning(f"Product SKU {sku_id} not found for deletion (already deleted)")
+                    # Return True for idempotent deletes - if already gone, that's fine
+                    return True
+                    
+        except Exception as e:
+            logger.error(f"Failed to delete product SKU {sku_id}: {e}")
+            return False
+    
+    # Print File operations
+    
+    async def get_print_file_by_id(self, file_id: str) -> Optional[PrintFile]:
+        """
+        Get print file by ID
+        """
+        try:
+            async with self.get_session() as session:
+                result = await session.get(PrintFile, file_id)
+                return result
+        except Exception as e:
+            logger.error(f"Failed to get print file {file_id}: {e}")
+            return None
+    
+    async def get_print_files_by_tenant(self, tenant_id: str) -> List[PrintFile]:
+        """
+        Get all print files for a tenant
+        """
+        try:
+            async with self.get_session() as session:
+                result = await session.execute(
+                    text("SELECT * FROM print_files WHERE tenant_id = :tenant_id ORDER BY name"),
+                    {"tenant_id": tenant_id}
+                )
+                rows = result.fetchall()
+                
+                files = []
+                for row in rows:
+                    file = PrintFile()
+                    for column in row._fields:
+                        setattr(file, column, getattr(row, column))
+                    files.append(file)
+                
+                return files
+        except Exception as e:
+            logger.error(f"Failed to get print files for tenant {tenant_id}: {e}")
+            return []
+    
+    async def create_print_file(self, file_data: dict) -> Optional[PrintFile]:
+        """Create a new print file in the local database"""
+        try:
+            # Generate UUID for the file if not provided
+            if 'id' not in file_data or not file_data['id']:
+                file_data['id'] = str(uuid.uuid4())
+            
+            # Set default values
+            if 'created_at' not in file_data:
+                file_data['created_at'] = datetime.utcnow()
+            if 'updated_at' not in file_data:
+                file_data['updated_at'] = datetime.utcnow()
+                
+            # Use async session context manager
+            async with self.get_session() as session:
+                # Create PrintFile object
+                new_file = PrintFile(**file_data)
+                
+                # Add to session and commit
+                session.add(new_file)
+                await session.commit()
+                
+                logger.info(f"Created print file {new_file.id} for tenant {file_data.get('tenant_id')}")
+                return new_file
+            
+        except Exception as e:
+            logger.error(f"Failed to create print file: {e}")
+            return None
+    
+    async def upsert_print_file(self, file_data: Dict[str, Any], skip_backup: bool = False) -> bool:
+        """
+        Insert or update print file data
+        """
+        try:
+            async with self.get_session() as session:
+                existing = await session.get(PrintFile, file_data.get('id'))
+                
+                if existing:
+                    # Update existing file
+                    for key, value in file_data.items():
+                        if hasattr(existing, key):
+                            # Convert datetime strings
+                            if key in ['created_at', 'updated_at'] and isinstance(value, str):
+                                try:
+                                    value = datetime.fromisoformat(value.replace('Z', '+00:00').replace('+00:00', ''))
+                                except (ValueError, AttributeError):
+                                    logger.warning(f"Failed to parse datetime field {key}: {value}")
+                                    continue
+                            
+                            setattr(existing, key, value)
+                    existing.updated_at = datetime.utcnow()
+                    operation_type = "UPDATE"
+                else:
+                    # Create new file
+                    file = PrintFile.from_supabase_dict(file_data)
+                    session.add(file)
+                    operation_type = "INSERT"
+                
+                await session.commit()
+                
+                # Queue backup to Supabase if this is a local-first operation
+                if not skip_backup:
+                    from .backup_service import get_backup_service
+                    backup_service = get_backup_service()
+                    if backup_service:
+                        await backup_service.queue_change(
+                            'print_files',
+                            operation_type.lower(),
+                            file_data.get('id'),
+                            file_data
+                        )
+                
+                await self.log_sync_operation(
+                    operation_type=operation_type,
+                    table_name="print_files",
+                    record_id=file_data.get('id'),
+                    tenant_id=file_data.get('tenant_id'),
+                    status="SUCCESS"
+                )
+                
+                logger.info(f"Successfully upserted print file {file_data.get('id')}")
+                return True
+                
+        except Exception as e:
+            logger.error(f"Failed to upsert print file: {e}")
+            return False
+    
+    async def delete_print_file(self, file_id: str, tenant_id: str) -> bool:
+        """
+        Delete print file (hard delete)
+        """
+        try:
+            async with self.get_session() as session:
+                file = await session.get(PrintFile, file_id)
+                if file:
+                    await session.delete(file)
+                    await session.commit()
+                    
+                    await self.log_sync_operation(
+                        operation_type="DELETE",
+                        table_name="print_files",
+                        record_id=file_id,
+                        tenant_id=tenant_id,
+                        status="SUCCESS"
+                    )
+                    
+                    logger.info(f"Successfully deleted print file {file_id}")
+                    return True
+                else:
+                    logger.warning(f"Print file {file_id} not found for deletion")
+                    return False
+                    
+        except Exception as e:
+            logger.error(f"Failed to delete print file {file_id}: {e}")
+            return False
+    
+    # Print Job operations
+    
+    async def get_print_job_by_id(self, job_id: str) -> Optional[PrintJob]:
+        """
+        Get print job by ID
+        """
+        try:
+            async with self.get_session() as session:
+                result = await session.get(PrintJob, job_id)
+                return result
+        except Exception as e:
+            logger.error(f"Failed to get print job {job_id}: {e}")
+            return None
+    
+    async def get_print_jobs_by_tenant(self, tenant_id: str) -> List[PrintJob]:
+        """
+        Get all print jobs for a tenant
+        """
+        try:
+            async with self.get_session() as session:
+                result = await session.execute(
+                    text("SELECT * FROM print_jobs WHERE tenant_id = :tenant_id ORDER BY time_submitted DESC"),
+                    {"tenant_id": tenant_id}
+                )
+                rows = result.fetchall()
+                
+                jobs = []
+                for row in rows:
+                    job = PrintJob()
+                    for column in row._fields:
+                        setattr(job, column, getattr(row, column))
+                    jobs.append(job)
+                
+                return jobs
+        except Exception as e:
+            logger.error(f"Failed to get print jobs for tenant {tenant_id}: {e}")
+            return []
+    
+    async def create_print_job(self, job_data: dict) -> Optional[PrintJob]:
+        """Create a new print job in the local database"""
+        try:
+            # Generate UUID for the job
+            job_id = str(uuid.uuid4())
+            
+            # Ensure required fields
+            job_data['id'] = job_id
+            if 'time_submitted' not in job_data:
+                job_data['time_submitted'] = datetime.utcnow()
+            if 'status' not in job_data:
+                job_data['status'] = 'queued'
+            if 'progress_percentage' not in job_data:
+                job_data['progress_percentage'] = 0
+                
+            # Use async session context manager
+            async with self.get_session() as session:
+                # Create PrintJob object
+                new_job = PrintJob(**job_data)
+                
+                # Add to session and commit
+                session.add(new_job)
+                await session.commit()
+                
+                logger.info(f"Created print job {job_id} for tenant {job_data.get('tenant_id')}")
+                return new_job
+            
+        except Exception as e:
+            logger.error(f"Failed to create print job: {e}")
+            return None
+
+    async def get_print_jobs_by_status(self, tenant_id: str, status: str) -> List[PrintJob]:
+        """
+        Get print jobs by status
+        """
+        try:
+            async with self.get_session() as session:
+                result = await session.execute(
+                    text("SELECT * FROM print_jobs WHERE tenant_id = :tenant_id AND status = :status ORDER BY priority DESC, time_submitted"),
+                    {"tenant_id": tenant_id, "status": status}
+                )
+                rows = result.fetchall()
+                
+                jobs = []
+                for row in rows:
+                    job = PrintJob()
+                    for column in row._fields:
+                        setattr(job, column, getattr(row, column))
+                    jobs.append(job)
+                
+                return jobs
+        except Exception as e:
+            logger.error(f"Failed to get print jobs by status {status}: {e}")
+            return []
+    
+    async def upsert_print_job(self, job_data: Dict[str, Any], skip_backup: bool = False) -> Optional[PrintJob]:
+        """
+        Insert or update print job data
+        Returns the created/updated PrintJob object
+        """
+        try:
+            async with self.get_session() as session:
+                existing = await session.get(PrintJob, job_data.get('id'))
+                
+                if existing:
+                    # Update existing job
+                    for key, value in job_data.items():
+                        if hasattr(existing, key):
+                            # Convert datetime strings
+                            if key in ['created_at', 'updated_at', 'time_submitted', 'time_started', 'time_completed'] and isinstance(value, str):
+                                try:
+                                    value = datetime.fromisoformat(value.replace('Z', '+00:00').replace('+00:00', ''))
+                                except (ValueError, AttributeError):
+                                    logger.warning(f"Failed to parse datetime field {key}: {value}")
+                                    continue
+                            
+                            setattr(existing, key, value)
+                    existing.updated_at = datetime.utcnow()
+                    operation_type = "UPDATE"
+                    job_obj = existing
+                else:
+                    # Create new job - generate UUID if not provided
+                    import uuid
+                    if not job_data.get('id'):
+                        job_data['id'] = str(uuid.uuid4())
+                    
+                    job = PrintJob.from_supabase_dict(job_data)
+                    session.add(job)
+                    operation_type = "INSERT"
+                    job_obj = job
+                
+                await session.commit()
+                
+                # Refresh the object to get the latest state from DB
+                await session.refresh(job_obj)
+                
+                # Queue backup to Supabase if this is a local-first operation
+                if not skip_backup:
+                    from .backup_service import get_backup_service
+                    backup_service = get_backup_service()
+                    if backup_service:
+                        # Convert job_obj back to dict for backup
+                        job_dict = job_obj.to_dict() if hasattr(job_obj, 'to_dict') else job_data
+                        await backup_service.queue_change(
+                            'print_jobs',
+                            operation_type.lower(),
+                            job_obj.id,
+                            job_dict
+                        )
+                
+                await self.log_sync_operation(
+                    operation_type=operation_type,
+                    table_name="print_jobs",
+                    record_id=job_obj.id,
+                    tenant_id=job_obj.tenant_id,
+                    status="SUCCESS"
+                )
+                
+                logger.info(f"Successfully upserted print job {job_obj.id}")
+                return job_obj
+                
+        except Exception as e:
+            logger.error(f"Failed to upsert print job: {e}")
+            return None
+    
+    async def delete_print_job(self, job_id: str, tenant_id: str) -> bool:
+        """
+        Delete print job (hard delete)
+        """
+        try:
+            async with self.get_session() as session:
+                job = await session.get(PrintJob, job_id)
+                if job:
+                    await session.delete(job)
+                    await session.commit()
+                    
+                    await self.log_sync_operation(
+                        operation_type="DELETE",
+                        table_name="print_jobs",
+                        record_id=job_id,
+                        tenant_id=tenant_id,
+                        status="SUCCESS"
+                    )
+                    
+                    logger.info(f"Successfully deleted print job {job_id}")
+                    return True
+                else:
+                    logger.warning(f"Print job {job_id} not found for deletion")
+                    return False
+                    
+        except Exception as e:
+            logger.error(f"Failed to delete print job {job_id}: {e}")
+            return False
+    
+    # Sync logging operations
+    
+    async def log_sync_operation(
+        self, 
+        operation_type: str, 
+        table_name: str, 
+        record_id: str = None,
+        tenant_id: str = None,
+        status: str = "SUCCESS", 
+        error_message: str = None
+    ):
+        """
+        Log sync operation for monitoring and debugging
+        """
+        try:
+            async with self.get_session() as session:
+                sync_log = SyncLog(
+                    operation_type=operation_type,
+                    table_name=table_name,
+                    record_id=record_id,
+                    tenant_id=tenant_id,
+                    status=status,
+                    error_message=error_message
+                )
+                session.add(sync_log)
+                await session.commit()
+        except Exception as e:
+            # Don't let logging failures break the main operation
+            logger.error(f"Failed to log sync operation: {e}")
+    
+    async def get_sync_stats(self) -> Dict[str, Any]:
+        """
+        Get synchronization statistics
+        """
+        try:
+            async with self.get_session() as session:
+                # Get recent sync activity
+                recent_logs = await session.execute(
+                    text("""
+                        SELECT operation_type, status, COUNT(*) as count
+                        FROM sync_logs 
+                        WHERE created_at >= datetime('now', '-1 hour')
+                        GROUP BY operation_type, status
+                        ORDER BY count DESC
+                    """)
+                )
+                
+                # Get total printer count
+                printer_count = await session.execute(
+                    text("SELECT COUNT(*) FROM printers WHERE is_active = 1")
+                )
+                
+                # Get last sync time
+                last_sync = await session.execute(
+                    text("SELECT MAX(created_at) FROM sync_logs WHERE status = 'SUCCESS'")
+                )
+                
+                return {
+                    'total_printers': printer_count.scalar() or 0,
+                    'last_sync': last_sync.scalar(),
+                    'recent_activity': [
+                        {
+                            'operation': row[0],
+                            'status': row[1],
+                            'count': row[2]
+                        } 
+                        for row in recent_logs.fetchall()
+                    ]
+                }
+        except Exception as e:
+            logger.error(f"Failed to get sync stats: {e}")
+            return {
+                'total_printers': 0,
+                'last_sync': None,
+                'recent_activity': []
+            }
+    
+    async def cleanup_old_logs(self, days_to_keep: int = 7):
+        """
+        Clean up old sync logs to prevent database bloat
+        """
+        try:
+            async with self.get_session() as session:
+                result = await session.execute(
+                    text(f"DELETE FROM sync_logs WHERE created_at < datetime('now', '-{days_to_keep} days')")
+                )
+                await session.commit()
+                logger.info(f"Cleaned up {result.rowcount} old sync logs")
+        except Exception as e:
+            logger.error(f"Failed to cleanup old logs: {e}")
+
+
+# Global database service instance
+db_service: Optional[DatabaseService] = None
+
+async def get_database_service() -> DatabaseService:
+    """
+    Get or create global database service instance
+    """
+    global db_service
+    if db_service is None:
+        db_service = DatabaseService()
+        await db_service.initialize_database()
+    return db_service
+
+async def close_database_service():
+    """
+    Close the global database service
+    """
+    global db_service
+    if db_service is not None:
+        await db_service.close()
+        db_service = None

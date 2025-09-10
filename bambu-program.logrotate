@@ -1,0 +1,20 @@
+# Log rotation configuration for Bambu Program
+# Copy to /etc/logrotate.d/bambu-program
+
+# Application logs (if file logging is enabled)
+/home/pi/bambu-program/logs/*.log {
+    daily
+    missingok
+    rotate 7
+    compress
+    delaycompress
+    notifempty
+    create 644 pi pi
+    postrotate
+        /bin/systemctl reload bambu-program.service > /dev/null 2>&1 || true
+    endscript
+}
+
+# Systemd journal logs for the service
+# (Managed automatically by systemd, but you can configure retention)
+# To configure: sudo journalctl --vacuum-time=7d --vacuum-size=100M

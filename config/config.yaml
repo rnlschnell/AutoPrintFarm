@@ -1,0 +1,18 @@
+server:
+  host: "0.0.0.0"  # Bind to all interfaces for network access
+  port: 8080
+  title: "Bambu Program API"
+  description: "Complete Bambu Lab Printer Control API - Raspberry Pi"
+  
+# Production settings
+production:
+  cors_origins: ["*"]  # Configure specific origins for security in production
+  log_level: "info"
+  max_connections: 100
+  timeout: 30
+
+# Raspberry Pi optimizations
+hardware:
+  memory_limit: "512M"
+  worker_connections: 50
+  keep_alive: 60

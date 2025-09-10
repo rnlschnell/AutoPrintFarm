@@ -1,0 +1,276 @@
+import { useState, useEffect } from 'react';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { CheckCircle, Clock, ClipboardList, User, Printer, Package, Wrench, X, Plus } from 'lucide-react';
+import { useWorklistTasks, WorklistTask } from '@/hooks/useWorklistTasks';
+import { useToast } from '@/hooks/use-toast';
+import CreateTaskModal from '@/components/CreateTaskModal';
+
+const Worklist = () => {
+  const { tasks, loading, startTask, completeTask, cancelTask, getElapsedTime, createTask } = useWorklistTasks();
+  const { toast } = useToast();
+  const [elapsedTimes, setElapsedTimes] = useState<Record<string, number>>({});
+  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+
+  // Update elapsed times for in-progress tasks
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const newElapsedTimes: Record<string, number> = {};
+      tasks.filter(task => task.status === 'in_progress' && task.started_at).forEach(task => {
+        newElapsedTimes[task.id] = getElapsedTime(task.started_at!);
+      });
+      setElapsedTimes(newElapsedTimes);
+    }, 60000); // Update every minute
+
+    return () => clearInterval(interval);
+  }, [tasks]);
+
+  // Initialize elapsed times
+  useEffect(() => {
+    const newElapsedTimes: Record<string, number> = {};
+    tasks.filter(task => task.status === 'in_progress' && task.started_at).forEach(task => {
+      newElapsedTimes[task.id] = getElapsedTime(task.started_at!);
+    });
+    setElapsedTimes(newElapsedTimes);
+  }, [tasks]);
+
+  const getPriorityColor = (priority: string) => {
+    switch (priority) {
+      case 'high': return 'destructive';
+      case 'medium': return 'warning';
+      case 'low': return 'secondary';
+      default: return 'secondary';
+    }
+  };
+
+  const getStatusIcon = (status: string) => {
+    switch (status) {
+      case 'completed': return <CheckCircle className="h-4 w-4 text-green-500" />;
+      case 'in_progress': return <Clock className="h-4 w-4 text-blue-500" />;
+      case 'pending': return <ClipboardList className="h-4 w-4 text-yellow-500" />;
+      case 'cancelled': return <X className="h-4 w-4 text-red-500" />;
+      default: return <Clock className="h-4 w-4" />;
+    }
+  };
+
+  const getTypeIcon = (task_type: string) => {
+    switch (task_type) {
+      case 'filament_change': return <Printer className="h-4 w-4" />;
+      case 'collection': return <Package className="h-4 w-4" />;
+      case 'assembly': return <Wrench className="h-4 w-4" />;
+      case 'maintenance': return <Wrench className="h-4 w-4" />;
+      case 'quality_check': return <CheckCircle className="h-4 w-4" />;
+      default: return <Clock className="h-4 w-4" />;
+    }
+  };
+
+  const formatDueDate = (dateString?: string) => {
+    if (!dateString) return 'No due date';
+    const date = new Date(dateString);
+    const now = new Date();
+    const diffHours = Math.ceil((date.getTime() - now.getTime()) / (1000 * 60 * 60));
+    
+    if (diffHours < 0) return 'Overdue';
+    if (diffHours < 1) return 'Due now';
+    if (diffHours < 24) return `Due in ${diffHours}h`;
+    return `Due ${date.toLocaleDateString()}`;
+  };
+
+  const formatElapsedTime = (minutes: number) => {
+    if (minutes < 60) return `${minutes}m`;
+    const hours = Math.floor(minutes / 60);
+    const remainingMinutes = minutes % 60;
+    return `${hours}h ${remainingMinutes}m`;
+  };
+
+  const TaskCard = ({ task }: { task: WorklistTask }) => (
+    <Card className="mb-4">
+      <CardHeader className="pb-3">
+        <div className="flex items-start justify-between">
+          <div className="flex items-center gap-3">
+            {getTypeIcon(task.task_type)}
+            <div>
+              <CardTitle className="text-lg">{task.title}</CardTitle>
+              <div className="flex items-center gap-2 mt-1">
+                <Badge variant={getPriorityColor(task.priority)}>
+                  {task.priority.toUpperCase()}
+                </Badge>
+                <div className="flex items-center gap-1">
+                  {getStatusIcon(task.status)}
+                  <span className="text-sm text-muted-foreground capitalize">
+                    {task.status === 'pending' ? 'To Do' : task.status.replace('_', ' ')}
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div className="text-right text-sm text-muted-foreground">
+            <div>{formatDueDate(task.due_date)}</div>
+            <div>~{task.estimated_time_minutes || 'N/A'} min</div>
+            {task.status === 'in_progress' && elapsedTimes[task.id] && (
+              <div className="font-medium text-blue-600">
+                Elapsed: {formatElapsedTime(elapsedTimes[task.id])}
+              </div>
+            )}
+            {task.status === 'completed' && task.actual_time_minutes && (
+              <div className="font-medium text-green-600">
+                Completed in: {formatElapsedTime(task.actual_time_minutes)}
+              </div>
+            )}
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent>
+        <p className="text-muted-foreground mb-4">{task.description}</p>
+        
+
+        {task.status !== 'completed' && task.status !== 'cancelled' && (
+          <div className="flex gap-2">
+            {task.status === 'pending' && (
+              <Button onClick={() => startTask(task.id)} variant="outline">
+                Start Task
+              </Button>
+            )}
+            {task.status === 'in_progress' && (
+              <>
+                <Button onClick={() => cancelTask(task.id)} variant="outline">
+                  Cancel
+                </Button>
+                <Button onClick={() => completeTask(task.id)}>
+                  Complete
+                </Button>
+              </>
+            )}
+            {task.status === 'pending' && (
+              <Button onClick={() => completeTask(task.id)} variant="secondary">
+                Mark Complete
+              </Button>
+            )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+
+  const pendingTasks = tasks.filter(task => task.status === 'pending');
+  const inProgressTasks = tasks.filter(task => task.status === 'in_progress');
+  const completedTasks = tasks.filter(task => task.status === 'completed');
+
+  if (loading) {
+    return <div>Loading worklist...</div>;
+  }
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h1 className="text-3xl font-bold">Worklist</h1>
+        <p className="text-muted-foreground">Tasks and actions that require human intervention</p>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+        <Card>
+          <CardContent className="pt-6">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-2xl font-bold">{pendingTasks.length}</p>
+                <p className="text-sm text-muted-foreground">To Do Tasks</p>
+              </div>
+              <ClipboardList className="h-8 w-8 text-yellow-500" />
+            </div>
+          </CardContent>
+        </Card>
+        
+        <Card>
+          <CardContent className="pt-6">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-2xl font-bold">{inProgressTasks.length}</p>
+                <p className="text-sm text-muted-foreground">In Progress</p>
+              </div>
+              <Clock className="h-8 w-8 text-blue-500" />
+            </div>
+          </CardContent>
+        </Card>
+        
+        <Card>
+          <CardContent className="pt-6">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-2xl font-bold">{completedTasks.length}</p>
+                <p className="text-sm text-muted-foreground">Completed Today</p>
+              </div>
+              <CheckCircle className="h-8 w-8 text-green-500" />
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+
+      <Tabs defaultValue="pending">
+        <div className="flex items-center justify-between">
+          <TabsList>
+            <TabsTrigger value="pending">
+              To Do ({pendingTasks.length})
+            </TabsTrigger>
+            <TabsTrigger value="in_progress">
+              In Progress ({inProgressTasks.length})
+            </TabsTrigger>
+            <TabsTrigger value="completed">
+              Completed ({completedTasks.length})
+            </TabsTrigger>
+          </TabsList>
+          
+          <Button onClick={() => setIsCreateModalOpen(true)}>
+            <Plus className="mr-2 h-4 w-4" />
+            Create Task
+          </Button>
+        </div>
+
+        <TabsContent value="pending" className="mt-6">
+          {pendingTasks.length === 0 ? (
+            <Card>
+              <CardContent className="pt-6 text-center">
+                <p className="text-muted-foreground">No tasks to do</p>
+              </CardContent>
+            </Card>
+          ) : (
+            pendingTasks.map((task) => <TaskCard key={task.id} task={task} />)
+          )}
+        </TabsContent>
+
+        <TabsContent value="in_progress" className="mt-6">
+          {inProgressTasks.length === 0 ? (
+            <Card>
+              <CardContent className="pt-6 text-center">
+                <p className="text-muted-foreground">No tasks in progress</p>
+              </CardContent>
+            </Card>
+          ) : (
+            inProgressTasks.map((task) => <TaskCard key={task.id} task={task} />)
+          )}
+        </TabsContent>
+
+        <TabsContent value="completed" className="mt-6">
+          {completedTasks.length === 0 ? (
+            <Card>
+              <CardContent className="pt-6 text-center">
+                <p className="text-muted-foreground">No completed tasks today</p>
+              </CardContent>
+            </Card>
+          ) : (
+            completedTasks.map((task) => <TaskCard key={task.id} task={task} />)
+          )}
+        </TabsContent>
+      </Tabs>
+
+      <CreateTaskModal
+        isOpen={isCreateModalOpen}
+        onClose={() => setIsCreateModalOpen(false)}
+        onTaskCreated={createTask}
+      />
+    </div>
+  );
+};
+
+export default Worklist;

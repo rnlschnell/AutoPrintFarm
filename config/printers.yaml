@@ -1,0 +1,15 @@
+printers:
+- access_code: '37284012'
+  enabled: true
+  id: '1'
+  ip: 192.168.4.24
+  model: A1
+  name: reconnecta1
+  serial: 03919C452802615
+- access_code: '11104364'
+  enabled: true
+  id: '2'
+  ip: 192.168.4.48
+  model: A1
+  name: MicahsA1
+  serial: 03919C461200853

@@ -1,0 +1,28 @@
+[Unit]
+Description=Bambu Program Auto-Install Service
+Documentation=https://github.com/your-repo/bambu-program
+After=network.target
+Wants=network.target
+Before=bambu-program.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=pi
+Group=pi
+WorkingDirectory=/home/pi
+ExecStart=/home/pi/bambu-program/auto-install.sh
+StandardOutput=journal
+StandardError=journal
+TimeoutSec=600
+
+# Disable service after successful run
+ExecStartPost=/bin/bash -c "sudo systemctl disable bambu-auto-install.service"
+
+# Environment variables
+Environment=BAMBU_AUTO_INSTALL=1
+Environment=HOME=/home/pi
+Environment=USER=pi
+
+[Install]
+WantedBy=multi-user.target

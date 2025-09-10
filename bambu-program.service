@@ -1,0 +1,33 @@
+[Unit]
+Description=Bambu Program API Service
+Documentation=https://github.com/your-repo/bambu-program
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/bambu-program
+Environment=PATH=/home/pi/bambu-program/venv/bin
+ExecStart=/home/pi/bambu-program/start_service.sh
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bambu-program
+
+# Security measures (relaxed for initial setup)
+NoNewPrivileges=true
+PrivateTmp=false
+ProtectSystem=false
+ProtectHome=false
+ReadWritePaths=/home/pi/bambu-program
+
+# Resource limits
+LimitNOFILE=1024
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target
