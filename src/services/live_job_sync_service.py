@@ -72,20 +72,26 @@ class LiveJobSyncService:
     async def _sync_live_jobs(self):
         """Sync current printer jobs with database"""
         try:
+            logger.debug("Starting live job sync cycle")
+
             # Get live status from all printers
             all_live_status = await printer_manager.get_all_live_status()
-            
+            logger.debug(f"Retrieved live status from {len(all_live_status)} printers")
+
             current_jobs: Dict[str, LiveJobInfo] = {}
-            
+
             for status_data in all_live_status:
                 printer_id = status_data.get("printer_id")
                 if not printer_id:
+                    logger.debug("Skipping status data without printer_id")
                     continue
-                
+
                 job_status = status_data.get("status", "idle")
                 current_job = status_data.get("current_job")
                 progress_data = status_data.get("progress")
-                
+
+                logger.debug(f"Printer {printer_id} status: {job_status}, has_current_job: {bool(current_job)}")
+
                 # Only track active printing jobs
                 if job_status in ["printing", "paused"] and current_job:
                     filename = current_job.get("filename", "")
@@ -94,13 +100,13 @@ class LiveJobSyncService:
                         current_layer = None
                         total_layers = None
                         remaining_time = None
-                        
+
                         if progress_data:
                             progress_percentage = progress_data.get("percentage", 0.0)
                             current_layer = progress_data.get("current_layer")
                             total_layers = progress_data.get("total_layers")
                             remaining_time = progress_data.get("remaining_time")
-                        
+
                         job_info = LiveJobInfo(
                             printer_id=printer_id,
                             filename=filename,
@@ -111,17 +117,25 @@ class LiveJobSyncService:
                             remaining_time=remaining_time,
                             print_id=current_job.get("print_id", "")
                         )
-                        
+
                         current_jobs[printer_id] = job_info
-            
+                        logger.debug(f"Tracking job on printer {printer_id}: {filename} at {progress_percentage}%")
+                    else:
+                        logger.debug(f"Printer {printer_id} has current_job but no filename")
+                else:
+                    logger.debug(f"Printer {printer_id} not printing or no current_job (status: {job_status})")
+
+            logger.debug(f"Found {len(current_jobs)} active print jobs")
+
             # Process job changes
             await self._process_job_changes(current_jobs)
-            
+
             # Update tracked jobs
             self.tracked_jobs = current_jobs
-            
+            logger.debug("Live job sync cycle completed successfully")
+
         except Exception as e:
-            logger.error(f"Failed to sync live jobs: {e}")
+            logger.error(f"Failed to sync live jobs: {e}", exc_info=True)
     
     async def _process_job_changes(self, current_jobs: Dict[str, LiveJobInfo]):
         """Process changes in active jobs"""

@@ -6,15 +6,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { InventoryType } from "@/lib/data";
-import { supabase } from "@/integrations/supabase/client";
+import { useColorPresetsContext } from "@/contexts/ColorPresetsContext";
 import { useToast } from "@/hooks/use-toast";
-
-interface ColorPreset {
-  id: string;
-  color_name: string;
-  hex_code: string;
-  filament_type: string;
-}
 
 interface MaterialFormModalProps {
   isOpen: boolean;
@@ -54,20 +47,22 @@ const MaterialFormModal = ({
   onRemoveType,
   isEditMode = false
 }: MaterialFormModalProps) => {
-  const [colorPresets, setColorPresets] = useState<ColorPreset[]>([]);
+  const { colorPresets } = useColorPresetsContext();
   const [availableTypes, setAvailableTypes] = useState<string[]>([]);
-  const [availableColors, setAvailableColors] = useState<ColorPreset[]>([]);
+  const [availableColors, setAvailableColors] = useState<any[]>([]);
   const { toast } = useToast();
 
   useEffect(() => {
-    if (isOpen && activeTab === 'Filament') {
-      fetchColorPresets();
+    if (activeTab === 'Filament' && colorPresets.length > 0) {
+      // Extract unique types from color presets
+      const types = [...new Set(colorPresets.map(preset => preset.filament_type))];
+      setAvailableTypes(types);
     }
-  }, [isOpen, activeTab]);
+  }, [activeTab, colorPresets]);
 
   useEffect(() => {
     // Update available colors when type changes
-    if (materialData.type) {
+    if (materialData.type && activeTab === 'Filament') {
       const colorsForType = colorPresets.filter(preset => preset.filament_type === materialData.type);
       setAvailableColors(colorsForType);
       
@@ -78,33 +73,7 @@ const MaterialFormModal = ({
     } else {
       setAvailableColors([]);
     }
-  }, [materialData.type, colorPresets]);
-
-  const fetchColorPresets = async () => {
-    try {
-      const { data, error } = await supabase
-        .from('color_presets')
-        .select('*')
-        .eq('is_active', true)
-        .order('filament_type', { ascending: true })
-        .order('color_name', { ascending: true });
-
-      if (error) throw error;
-      
-      setColorPresets(data || []);
-      
-      // Extract unique types
-      const types = [...new Set((data || []).map(preset => preset.filament_type))];
-      setAvailableTypes(types);
-    } catch (error) {
-      console.error('Error fetching color presets:', error);
-      toast({
-        title: "Error",
-        description: "Failed to load color presets.",
-        variant: "destructive",
-      });
-    }
-  };
+  }, [materialData.type, colorPresets, activeTab, materialData.color, onMaterialDataChange]);
   return (
     <Dialog open={isOpen} onOpenChange={onClose}>
       <DialogContent className="sm:max-w-[500px] max-h-[80vh] overflow-y-auto">

@@ -8,14 +8,14 @@ import logging
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import List, Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.exc import SQLAlchemyError
 
-from ..models.database import Base, Printer, ColorPreset, SyncLog, Product, ProductSku, PrintFile, PrintJob
+from ..models.database import Base, Printer, ColorPreset, SyncLog, Product, ProductSku, PrintFile, PrintJob, FinishedGoods
 
 logger = logging.getLogger(__name__)
 
@@ -1054,6 +1054,60 @@ class DatabaseService:
             logger.error(f"Failed to upsert print job: {e}")
             return None
     
+    async def update_print_job(self, job_id: str, updates: Dict[str, Any], tenant_id: str) -> bool:
+        """
+        Update a specific print job by ID and tenant
+        Returns True if successful, False otherwise
+        """
+        try:
+            async with self.get_session() as session:
+                # Get the existing job
+                result = await session.execute(
+                    text("""
+                        SELECT * FROM print_jobs 
+                        WHERE id = :job_id AND tenant_id = :tenant_id
+                    """),
+                    {"job_id": job_id, "tenant_id": tenant_id}
+                )
+                job_row = result.fetchone()
+                
+                if not job_row:
+                    logger.warning(f"Print job {job_id} not found for tenant {tenant_id}")
+                    return False
+                
+                # Build update query
+                set_clauses = []
+                params = {"job_id": job_id, "tenant_id": tenant_id}
+                
+                for key, value in updates.items():
+                    if key not in ['id', 'tenant_id']:  # Don't allow updating these fields
+                        set_clauses.append(f"{key} = :{key}")
+                        params[key] = value
+                
+                if not set_clauses:
+                    logger.warning(f"No valid updates provided for job {job_id}")
+                    return True
+                
+                # Add updated_at timestamp
+                set_clauses.append("updated_at = :updated_at")
+                params["updated_at"] = datetime.now(timezone.utc)
+                
+                update_query = f"""
+                    UPDATE print_jobs 
+                    SET {', '.join(set_clauses)}
+                    WHERE id = :job_id AND tenant_id = :tenant_id
+                """
+                
+                await session.execute(text(update_query), params)
+                await session.commit()
+                
+                logger.info(f"Updated print job {job_id} for tenant {tenant_id}")
+                return True
+                
+        except Exception as e:
+            logger.error(f"Error updating print job {job_id}: {e}")
+            return False
+
     async def delete_print_job(self, job_id: str, tenant_id: str) -> bool:
         """
         Delete print job (hard delete)
@@ -1081,6 +1135,42 @@ class DatabaseService:
                     
         except Exception as e:
             logger.error(f"Failed to delete print job {job_id}: {e}")
+            return False
+    
+    async def delete_print_job_simple(self, job_id: str) -> bool:
+        """
+        Delete print job - simplified version without complex validation
+        Just deletes the job if it exists, no tenant checks
+        """
+        try:
+            async with self.get_session() as session:
+                job = await session.get(PrintJob, job_id)
+                if job:
+                    tenant_id = job.tenant_id  # Get tenant_id before deletion
+                    await session.delete(job)
+                    await session.commit()
+                    
+                    # Still log the operation for sync purposes
+                    try:
+                        await self.log_sync_operation(
+                            operation_type="DELETE",
+                            table_name="print_jobs",
+                            record_id=job_id,
+                            tenant_id=tenant_id,
+                            status="SUCCESS"
+                        )
+                    except Exception as log_error:
+                        # Don't fail the deletion if logging fails
+                        logger.warning(f"Failed to log sync operation for deleted job {job_id}: {log_error}")
+                    
+                    logger.info(f"Successfully deleted print job {job_id}")
+                    return True
+                else:
+                    logger.info(f"Print job {job_id} not found - treating as success (already deleted)")
+                    return True  # If it's not there, mission accomplished
+                    
+        except Exception as e:
+            logger.error(f"Failed to delete print job {job_id}: {e}", exc_info=True)
             return False
     
     # Sync logging operations
@@ -1174,6 +1264,181 @@ class DatabaseService:
         except Exception as e:
             logger.error(f"Failed to cleanup old logs: {e}")
 
+    # =================== Finished Goods Methods ===================
+    
+    async def get_finished_goods_by_tenant(self, tenant_id: str) -> List[FinishedGoods]:
+        """
+        Get all finished goods for a tenant
+        """
+        try:
+            async with self.get_session() as session:
+                result = await session.execute(
+                    select(FinishedGoods)
+                    .filter(FinishedGoods.tenant_id == tenant_id)
+                    .filter(FinishedGoods.is_active == True)
+                    .order_by(FinishedGoods.created_at.desc())
+                )
+                return list(result.scalars().all())
+        except Exception as e:
+            logger.error(f"Failed to get finished goods for tenant {tenant_id}: {e}")
+            return []
+    
+    async def get_finished_good_by_id(self, finished_good_id: str) -> Optional[FinishedGoods]:
+        """
+        Get a specific finished good by ID
+        """
+        try:
+            async with self.get_session() as session:
+                result = await session.execute(
+                    select(FinishedGoods).filter(FinishedGoods.id == finished_good_id)
+                )
+                return result.scalar_one_or_none()
+        except Exception as e:
+            logger.error(f"Failed to get finished good {finished_good_id}: {e}")
+            return None
+    
+    async def get_finished_good_by_sku_id(self, product_sku_id: str) -> Optional[FinishedGoods]:
+        """
+        Get finished good by product SKU ID
+        """
+        try:
+            async with self.get_session() as session:
+                result = await session.execute(
+                    select(FinishedGoods).filter(FinishedGoods.product_sku_id == product_sku_id)
+                )
+                return result.scalar_one_or_none()
+        except Exception as e:
+            logger.error(f"Failed to get finished good for SKU {product_sku_id}: {e}")
+            return None
+    
+    async def create_finished_good(self, finished_good: FinishedGoods) -> Optional[FinishedGoods]:
+        """
+        Create a new finished good
+        """
+        try:
+            async with self.get_session() as session:
+                session.add(finished_good)
+                await session.commit()
+                await session.refresh(finished_good)
+                
+                # Queue for backup to Supabase
+                
+                logger.info(f"Created finished good: {finished_good.id}")
+                return finished_good
+        except Exception as e:
+            logger.error(f"Failed to create finished good: {e}")
+            return None
+    
+    async def update_finished_good(self, finished_good_id: str, update_data: dict) -> Optional[FinishedGoods]:
+        """
+        Update a finished good
+        """
+        try:
+            async with self.get_session() as session:
+                result = await session.execute(
+                    select(FinishedGoods).filter(FinishedGoods.id == finished_good_id)
+                )
+                finished_good = result.scalar_one_or_none()
+                
+                if not finished_good:
+                    return None
+                
+                # Update fields
+                for key, value in update_data.items():
+                    if hasattr(finished_good, key):
+                        # Convert dollar values to cents if needed
+                        if key in ['unit_price', 'extra_cost'] and value is not None:
+                            value = int(float(value) * 100)
+                        elif key == 'profit_margin' and value is not None:
+                            value = int(float(value) * 100)
+                        setattr(finished_good, key, value)
+                
+                finished_good.updated_at = datetime.utcnow()
+                
+                await session.commit()
+                await session.refresh(finished_good)
+                
+                # Queue for backup to Supabase
+                
+                logger.info(f"Updated finished good: {finished_good_id}")
+                return finished_good
+        except Exception as e:
+            logger.error(f"Failed to update finished good {finished_good_id}: {e}")
+            return None
+    
+    async def update_finished_good_stock(self, finished_good_id: str, new_stock: int) -> Optional[FinishedGoods]:
+        """
+        Update stock level for a finished good
+        """
+        try:
+            # Determine status based on stock level
+            if new_stock == 0:
+                status = 'out_of_stock'
+            elif new_stock < 5:
+                status = 'low_stock'
+            else:
+                status = 'in_stock'
+            
+            return await self.update_finished_good(
+                finished_good_id,
+                {
+                    'current_stock': new_stock,
+                    'status': status
+                }
+            )
+        except Exception as e:
+            logger.error(f"Failed to update stock for finished good {finished_good_id}: {e}")
+            return None
+    
+    async def delete_finished_good(self, finished_good_id: str) -> bool:
+        """
+        Delete a finished good (soft delete by setting is_active to False)
+        """
+        try:
+            result = await self.update_finished_good(
+                finished_good_id,
+                {'is_active': False}
+            )
+            
+            if result:
+                # Queue for backup to Supabase
+                
+                logger.info(f"Soft deleted finished good: {finished_good_id}")
+                return True
+            
+            return False
+        except Exception as e:
+            logger.error(f"Failed to delete finished good {finished_good_id}: {e}")
+            return False
+    
+    async def sync_finished_goods_from_supabase(self, tenant_id: str, supabase_data: List[dict]) -> int:
+        """
+        Sync finished goods from Supabase to local SQLite
+        One-time migration helper
+        """
+        try:
+            count = 0
+            async with self.get_session() as session:
+                for data in supabase_data:
+                    # Check if already exists
+                    existing = await session.execute(
+                        select(FinishedGoods).filter(FinishedGoods.id == data.get('id'))
+                    )
+                    if existing.scalar_one_or_none():
+                        continue
+                    
+                    # Create new finished good from Supabase data
+                    finished_good = FinishedGoods.from_supabase(data)
+                    session.add(finished_good)
+                    count += 1
+                
+                await session.commit()
+                logger.info(f"Synced {count} finished goods from Supabase")
+                return count
+        except Exception as e:
+            logger.error(f"Failed to sync finished goods from Supabase: {e}")
+            return 0
+
 
 # Global database service instance
 db_service: Optional[DatabaseService] = None
@@ -1196,3 +1461,4 @@ async def close_database_service():
     if db_service is not None:
         await db_service.close()
         db_service = None
+    

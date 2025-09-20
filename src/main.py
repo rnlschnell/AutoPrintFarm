@@ -18,7 +18,7 @@ from src.core.printer_client import printer_manager
 from src.utils.exceptions import BambuProgramError, PrinterNotFoundError, PrinterConnectionError, ValidationError
 
 # Import all API routers
-from src.api import printers, print_control, movement, temperature, filament, maintenance, files, camera, system, websocket, object_manipulation, sync, auth, color_presets, products_sync, product_skus_sync, print_files_sync, print_jobs_sync, file_operations, available_files, enhanced_print_jobs, connection_status, printers_sync
+from src.api import printers, print_control, finished_goods_sync, movement, temperature, filament, maintenance, files, camera, system, websocket, object_manipulation, sync, auth, color_presets, products_sync, product_skus_sync, print_files_sync, print_jobs_sync, file_operations, available_files, enhanced_print_jobs, connection_status, printers_sync
 
 # Import sync services
 from src.services.config_service import get_config_service
@@ -28,6 +28,7 @@ from src.services.auth_service import initialize_auth_service
 from src.services.printer_connection_service import initialize_printer_connection_service, shutdown_printer_connection_service
 from src.services.startup_service import startup_service
 from src.services.live_job_sync_service import live_job_sync_service
+from src.services.print_job_sync_service import print_job_sync_service
 from src.services.backup_service import initialize_backup_service, get_backup_service
 
 logger = logging.getLogger(__name__)
@@ -142,6 +143,14 @@ async def lifespan(app: FastAPI):
             logger.error(f"Failed to start live job sync service: {e}")
             # Continue startup even if sync service fails
         
+        # Start print job status synchronizer service
+        try:
+            await print_job_sync_service.start()
+            logger.info("Print job sync service started")
+        except Exception as e:
+            logger.error(f"Failed to start print job sync service: {e}")
+            # Continue startup even if sync service fails
+        
         logger.info("Bambu Program API started successfully")
         
     except Exception as e:
@@ -153,6 +162,13 @@ async def lifespan(app: FastAPI):
     # Shutdown
     try:
         logger.info("Shutting down Bambu Program API...")
+        
+        # Shutdown print job sync service
+        try:
+            await print_job_sync_service.stop()
+            logger.info("Print job sync service shutdown complete")
+        except Exception as e:
+            logger.error(f"Error shutting down print job sync service: {e}")
         
         # Shutdown live job sync service
         try:
@@ -377,6 +393,7 @@ app.include_router(color_presets.router, prefix="/api", tags=["Color Presets Man
 # Include Realtime sync routers for new tables
 app.include_router(products_sync.router, prefix="/api", tags=["Products Sync Management"])
 app.include_router(product_skus_sync.router, prefix="/api", tags=["Product SKUs Sync Management"])
+app.include_router(finished_goods_sync.router, prefix="/api", tags=["Finished Goods Sync Management"])
 app.include_router(print_files_sync.router, prefix="/api", tags=["Print Files Sync Management"])
 app.include_router(print_jobs_sync.router, prefix="/api", tags=["Print Jobs Sync Management"])
 

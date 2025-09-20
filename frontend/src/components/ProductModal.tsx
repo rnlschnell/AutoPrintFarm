@@ -15,7 +15,7 @@ import DeferredPrintFileUpload from './DeferredPrintFileUpload';
 import { useTenant } from '@/hooks/useTenant';
 import { useToast } from '@/hooks/use-toast';
 import { tempFileManager } from '@/lib/tempFileManager';
-import { File } from 'lucide-react';
+import { File, Trash2 } from 'lucide-react';
 
 interface ComponentData {
   id?: string;
@@ -42,10 +42,11 @@ interface ProductModalProps {
     components?: ComponentData[];
     skus?: SkuData[];
   }) => void;
+  onDelete?: (productId: string) => void;
   initialEditMode?: boolean;
 }
 
-export const ProductModal = ({ product, isOpen, onClose, onSave, initialEditMode = false }: ProductModalProps) => {
+export const ProductModal = ({ product, isOpen, onClose, onSave, onDelete, initialEditMode = false }: ProductModalProps) => {
   const { tenantId } = useTenant();
   const { toast } = useToast();
   const [isEditing, setIsEditing] = useState(false);
@@ -54,7 +55,6 @@ export const ProductModal = ({ product, isOpen, onClose, onSave, initialEditMode
     description: '',
     requires_assembly: false,
     image_url: '',
-    is_active: true,
     print_file_id: null as string | null,
     file_name: null as string | null
   });
@@ -63,6 +63,7 @@ export const ProductModal = ({ product, isOpen, onClose, onSave, initialEditMode
   const [tempImageId, setTempImageId] = useState<string | null>(null);
   const [tempPrintFileId, setTempPrintFileId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
   useEffect(() => {
     if (isOpen) {
@@ -87,7 +88,6 @@ export const ProductModal = ({ product, isOpen, onClose, onSave, initialEditMode
           description: '',
           requires_assembly: false,
           image_url: '',
-          is_active: true,
           print_file_id: null,
           file_name: null
         });
@@ -99,6 +99,7 @@ export const ProductModal = ({ product, isOpen, onClose, onSave, initialEditMode
       setTempImageId(null);
       setTempPrintFileId(null);
       setSaving(false);
+      setShowDeleteConfirm(false);
     }
   }, [product, isOpen, initialEditMode]);
 
@@ -113,7 +114,15 @@ export const ProductModal = ({ product, isOpen, onClose, onSave, initialEditMode
   const handleClose = () => {
     // Always clean up temp files when closing
     tempFileManager.clearAll();
+    setShowDeleteConfirm(false);
     onClose();
+  };
+
+  const handleDeleteProduct = () => {
+    if (product && onDelete) {
+      onDelete(product.id);
+      handleClose();
+    }
   };
 
   const handleImageChange = (tempFileId: string | null, previewUrl: string | null) => {
@@ -205,19 +214,25 @@ export const ProductModal = ({ product, isOpen, onClose, onSave, initialEditMode
       // Clear temp files after successful save
       tempFileManager.clearAll();
       
-      onClose();
+      // Only close modal if save was successful
+      handleClose();
     } catch (error) {
       console.error('Error saving product:', error);
       
       // If product save failed, we should clean up any uploaded files
       // This is handled by the error boundary, but we can add specific cleanup here
       
+      const errorMessage = error instanceof Error ? error.message : "Failed to save product";
       toast({
         title: "Error",
-        description: "Failed to save product",
+        description: errorMessage,
         variant: "destructive",
       });
+      
+      // Keep the modal open so user can retry
+      // Don't clear temp files in case user wants to retry
     } finally {
+      // ALWAYS reset saving state
       setSaving(false);
     }
   };
@@ -235,9 +250,22 @@ export const ProductModal = ({ product, isOpen, onClose, onSave, initialEditMode
               </DialogDescription>
             </div>
             {product && !isEditing && (
-              <Button onClick={() => setIsEditing(true)} variant="outline" size="sm">
-                Edit Product
-              </Button>
+              <div className="flex gap-2">
+                <Button onClick={() => setIsEditing(true)} variant="outline" size="sm">
+                  Edit Product
+                </Button>
+                {onDelete && (
+                  <Button 
+                    onClick={() => setShowDeleteConfirm(true)} 
+                    variant="outline" 
+                    size="sm"
+                    className="text-destructive hover:text-destructive"
+                  >
+                    <Trash2 className="h-4 w-4 mr-1" />
+                    Delete
+                  </Button>
+                )}
+              </div>
             )}
           </div>
         </DialogHeader>
@@ -369,6 +397,27 @@ export const ProductModal = ({ product, isOpen, onClose, onSave, initialEditMode
           )}
         </DialogFooter>
       </DialogContent>
+
+      {/* Delete Confirmation Dialog */}
+      <Dialog open={showDeleteConfirm} onOpenChange={setShowDeleteConfirm}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete Product</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to delete "{product?.name}"? This action cannot be undone and will permanently delete the product and all associated SKUs. Components are separate and will not be affected.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowDeleteConfirm(false)}>
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={handleDeleteProduct}>
+              <Trash2 className="mr-2 h-4 w-4" />
+              Delete Product
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Dialog>
   );
 };

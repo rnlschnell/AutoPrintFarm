@@ -5,7 +5,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { ProductSku } from '@/hooks/useProductsNew';
-import { useColorPresets } from '@/hooks/useColorPresets';
+import { useColorPresetsContext } from '@/contexts/ColorPresetsContext';
 import ColorSwatch from '@/components/ColorSwatch';
 
 interface SkuModalProps {
@@ -17,7 +17,7 @@ interface SkuModalProps {
 }
 
 export const SkuModal = ({ sku, productId, isOpen, onClose, onSave }: SkuModalProps) => {
-  const { colorPresets, loading: presetsLoading } = useColorPresets();
+  const { colorPresets, loading: presetsLoading } = useColorPresetsContext();
   const [formData, setFormData] = useState({
     product_id: productId,
     sku: '',
@@ -27,7 +27,6 @@ export const SkuModal = ({ sku, productId, isOpen, onClose, onSave }: SkuModalPr
     quantity: 1,
     stock_level: 0,
     price: 0,
-    is_active: true,
   });
 
   useEffect(() => {
@@ -53,7 +52,6 @@ export const SkuModal = ({ sku, productId, isOpen, onClose, onSave }: SkuModalPr
         quantity: 1,
         stock_level: 0,
         price: 0,
-        is_active: true,
       });
     }
   }, [sku, productId, isOpen]);

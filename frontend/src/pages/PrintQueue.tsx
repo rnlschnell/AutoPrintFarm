@@ -11,6 +11,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { usePrintJobs } from "@/hooks/usePrintJobs";
+import { usePrinterWebSocket } from "@/hooks/useWebSocket";
 import { MoreHorizontal, List, Kanban, Plus } from "lucide-react";
 import {
   DropdownMenu,
@@ -23,7 +24,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Progress } from "@/components/ui/progress";
 import JobDetailsModal from "@/components/JobDetailsModal";
 import CancelJobModal from "@/components/CancelJobModal";
-import CreateJobModal from "@/components/CreateJobModal";
+import CreateJobModalEnhanced from "@/components/CreateJobModalEnhanced";
 import ColorSwatch from "@/components/ColorSwatch";
 
 // Remove old mock data
@@ -36,6 +37,10 @@ const getStatusBadge = (status: string) => {
             return <Badge className="bg-green-600 text-white hover:bg-green-700">{status}</Badge>;
         case 'queued':
             return <Badge className="bg-orange-500 text-white hover:bg-orange-600">{status}</Badge>;
+        case 'processing':
+            return <Badge className="bg-purple-500 text-white hover:bg-purple-600">{status}</Badge>;
+        case 'uploaded':
+            return <Badge className="bg-cyan-500 text-white hover:bg-cyan-600">{status}</Badge>;
         case 'failed':
             return <Badge variant="destructive">{status}</Badge>;
         case 'cancelled':
@@ -103,6 +108,7 @@ const KanbanColumn = ({ title, jobs, status, onViewDetails, onCancelJob }: { tit
 
 const PrintQueue = () => {
   const { printJobs: jobs, loading, addPrintJob } = usePrintJobs();
+  const { data: liveData } = usePrinterWebSocket(); // Get live printer data
   const [viewMode, setViewMode] = useState<'table' | 'kanban'>('table');
   const [selectedJob, setSelectedJob] = useState(null);
   const [isDetailsModalOpen, setIsDetailsModalOpen] = useState(false);
@@ -119,24 +125,74 @@ const PrintQueue = () => {
     setIsCancelModalOpen(true);
   };
 
-  const handleCreateJob = async (jobData: {
-    printFileId: string;
-    fileName: string;
-    color: string;
-    filamentType: string;
-    materialType: string;
-    printerId?: string;
-    numberOfUnits: number;
-  }) => {
-    try {
-      await addPrintJob(jobData);
-    } catch (error) {
-      // Error handled by hook
-    }
+  const handleJobCreated = () => {
+    // Jobs will automatically appear via real-time subscription
+    // No need to manually refresh
+    setIsCreateJobModalOpen(false);
   };
+
+  // Enhanced jobs with optional live data overlay for immediate feedback
+  const getEnhancedJobs = () => {
+    const enhancedJobs = [...jobs]; // Start with database jobs (now kept up-to-date by backend sync service)
+    
+    if (liveData) {
+      // Add live data overlay for immediate feedback (before database sync catches up)
+      enhancedJobs.forEach(job => {
+        const liveInfo = liveData.find(live => 
+          live.current_job?.filename === job.fileName &&
+          live.printer_id === job.printerId?.toString()
+        );
+        
+        if (liveInfo && liveInfo.status === 'printing') {
+          // Only overlay live progress if it's more recent than database
+          const liveProgress = liveInfo.progress?.percentage || 0;
+          if (liveProgress > job.progressPercentage) {
+            job.progressPercentage = liveProgress;
+          }
+          job.liveData = liveInfo; // Store for additional UI info like layer count
+        }
+      });
+      
+      // Add external jobs that aren't in database (started outside our system)
+      liveData.forEach(live => {
+        if (live.current_job && live.status === 'printing') {
+          const existingJob = enhancedJobs.find(job => 
+            job.fileName === live.current_job?.filename &&
+            job.printerId?.toString() === live.printer_id
+          );
+          
+          if (!existingJob) {
+            // Add external job as virtual entry
+            enhancedJobs.unshift({
+              id: `external_${live.printer_id}`,
+              fileName: live.current_job.filename,
+              status: 'printing',
+              progressPercentage: live.progress?.percentage || 0,
+              printerId: parseInt(live.printer_id),
+              color: 'Unknown|#808080',
+              filamentType: 'Unknown',
+              materialType: 'Unknown',
+              numberOfUnits: 1,
+              priority: 0,
+              timeSubmitted: new Date().toISOString(),
+              tenantId: '',
+              isExternalJob: true, // Mark as external
+              liveData: live
+            });
+          }
+        }
+      });
+    }
+    
+    return enhancedJobs;
+  };
+
+  const enhancedJobs = getEnhancedJobs();
 
   const statusColumns = [
     { title: 'Queued', status: 'queued' },
+    { title: 'Processing', status: 'processing' },
+    { title: 'Uploaded', status: 'uploaded' },
     { title: 'Printing', status: 'printing' },
     { title: 'Completed', status: 'completed' },
     { title: 'Failed', status: 'failed' },
@@ -193,13 +249,16 @@ const PrintQueue = () => {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {jobs.map((job) => (
+                {enhancedJobs.map((job) => (
                   <TableRow key={job.id}>
                     <TableCell 
                       className="font-medium truncate max-w-48 cursor-pointer hover:text-primary" 
                       onClick={() => handleViewDetails(job)}
                     >
                       {job.fileName}
+                      {job.isExternalJob && (
+                        <span className="ml-2 text-xs bg-blue-100 text-blue-800 px-1 rounded">Live</span>
+                      )}
                     </TableCell>
                     <TableCell>{getStatusBadge(job.status)}</TableCell>
                     <TableCell className="hidden md:table-cell">
@@ -212,6 +271,11 @@ const PrintQueue = () => {
                         <div className="flex items-center gap-2">
                             <Progress value={job.progressPercentage || 0} className="w-20" />
                             <span className="text-xs text-muted-foreground">{job.progressPercentage || 0}%</span>
+                            {job.liveData?.progress?.current_layer && job.liveData?.progress?.total_layers && (
+                              <span className="text-xs text-muted-foreground ml-1">
+                                ({job.liveData.progress.current_layer}/{job.liveData.progress.total_layers})
+                              </span>
+                            )}
                         </div>
                     </TableCell>
                     <TableCell>
@@ -225,7 +289,9 @@ const PrintQueue = () => {
                         <DropdownMenuContent align="end">
                           <DropdownMenuLabel>Actions</DropdownMenuLabel>
                           <DropdownMenuItem onClick={() => handleViewDetails(job)}>View Details</DropdownMenuItem>
-                          <DropdownMenuItem onClick={() => handleCancelJob(job)}>Cancel Job</DropdownMenuItem>
+                          {!job.isExternalJob && (
+                            <DropdownMenuItem onClick={() => handleCancelJob(job)}>Cancel Job</DropdownMenuItem>
+                          )}
                         </DropdownMenuContent>
                       </DropdownMenu>
                     </TableCell>
@@ -241,7 +307,7 @@ const PrintQueue = () => {
             <KanbanColumn
               key={column.status}
               title={column.title}
-              jobs={jobs}
+              jobs={enhancedJobs}
               status={column.status}
               onViewDetails={handleViewDetails}
               onCancelJob={handleCancelJob}
@@ -262,10 +328,10 @@ const PrintQueue = () => {
         onClose={() => setIsCancelModalOpen(false)}
       />
 
-      <CreateJobModal
+      <CreateJobModalEnhanced
         isOpen={isCreateJobModalOpen}
         onClose={() => setIsCreateJobModalOpen(false)}
-        onCreateJob={handleCreateJob}
+        onJobCreated={handleJobCreated}
       />
     </div>
   );

@@ -1,6 +1,6 @@
 
 import { cn } from "@/lib/utils";
-import { useColorPresets } from "@/hooks/useColorPresets";
+import { useColorPresetsContext } from "@/contexts/ColorPresetsContext";
 
 interface ColorSwatchProps {
   color: string;
@@ -10,7 +10,7 @@ interface ColorSwatchProps {
 }
 
 const ColorSwatch = ({ color, filamentType, size = 'sm', className }: ColorSwatchProps) => {
-  const { getColorHex } = useColorPresets();
+  const { getColorHex } = useColorPresetsContext();
 
   const getColorValue = (colorName: string) => {
     // Check if color has custom hex value (format: "colorname|#hexvalue")

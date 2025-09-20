@@ -120,6 +120,14 @@ const Products = () => {
     }
   };
 
+  const handleDeleteProduct = async (productId: string) => {
+    try {
+      await deleteProduct(productId);
+    } catch (error) {
+      console.error('Error deleting product:', error);
+    }
+  };
+
   const getStatusBadge = (stock: number) => {
     if (stock === 0) return <Badge variant="destructive">Out of Stock</Badge>;
     if (stock < 10) return <Badge className="bg-yellow-500 text-black hover:bg-yellow-600">Low Stock</Badge>;
@@ -448,6 +456,7 @@ const Products = () => {
           setIsEditMode(false);
         }}
         onSave={handleProductSave}
+        onDelete={handleDeleteProduct}
         initialEditMode={isEditMode}
       />
 
@@ -463,6 +472,7 @@ const Products = () => {
         }}
         onSave={handleSkuSave}
       />
+
     </div>
   );
 };

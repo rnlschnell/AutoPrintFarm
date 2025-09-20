@@ -40,6 +40,7 @@ class PrinterUpdateRequest(BaseModel):
     sort_order: Optional[int] = None
     status: Optional[str] = None
     current_color: Optional[str] = None
+    current_color_hex: Optional[str] = None
     current_filament_type: Optional[str] = None
 
 router = APIRouter(
@@ -177,8 +178,15 @@ async def update_printer(printer_id: str, printer_request: PrinterUpdateRequest)
             update_data['status'] = printer_request.status
         if printer_request.current_color is not None:
             update_data['current_color'] = printer_request.current_color
+        if printer_request.current_color_hex is not None:
+            update_data['current_color_hex'] = printer_request.current_color_hex
+            logger.info(f"DEBUG: Setting current_color_hex to: {printer_request.current_color_hex}")
+        else:
+            logger.info(f"DEBUG: current_color_hex is None in request")
         if printer_request.current_filament_type is not None:
             update_data['current_filament_type'] = printer_request.current_filament_type
+
+        logger.info(f"DEBUG: Full update_data: {update_data}")
         
         # Update in local SQLite
         success = await db_service.upsert_printer(update_data)

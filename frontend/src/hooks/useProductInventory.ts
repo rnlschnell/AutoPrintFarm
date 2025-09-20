@@ -1,5 +1,4 @@
 import { useState, useEffect } from 'react';
-import { supabase } from '@/integrations/supabase/client';
 import { useToast } from '@/hooks/use-toast';
 import { useTenant } from '@/hooks/useTenant';
 
@@ -31,44 +30,34 @@ export const useProductInventory = () => {
 
   const fetchProductInventory = async () => {
     if (!tenant?.id) return;
-    
+
     try {
       setLoading(true);
-      
-      // Fetch products with their SKUs and finished goods (now using current_stock from finished_goods)
-      const { data, error } = await supabase
-        .from('products')
-        .select(`
-          id,
-          name,
-          requires_assembly,
-          image_url,
-          product_skus!inner (
-            id,
-            sku,
-            color,
-            price,
-            finished_goods (
-              id,
-              current_stock,
-              unit_price,
-              assembly_status,
-              status,
-              material
-            )
-          )
-        `)
-        .eq('tenant_id', tenant?.id)
-        .eq('is_active', true)
-        .eq('product_skus.is_active', true)
-        .order('created_at', { ascending: false });
 
-      if (error) throw error;
-      
+      // Fetch products from local SQLite API
+      const productsResponse = await fetch('/api/products-sync/');
+      if (!productsResponse.ok) throw new Error('Failed to fetch products');
+      const products = await productsResponse.json();
+
+      // Fetch product SKUs from local SQLite API
+      const skusResponse = await fetch('/api/product-skus-sync/');
+      if (!skusResponse.ok) throw new Error('Failed to fetch product SKUs');
+      const skus = await skusResponse.json();
+
+      // Fetch finished goods from local SQLite API
+      const finishedGoodsResponse = await fetch('/api/finished-goods-sync/');
+      if (!finishedGoodsResponse.ok) throw new Error('Failed to fetch finished goods');
+      const finishedGoods = await finishedGoodsResponse.json();
+
       // Transform data to group SKUs under products
-      const transformedData: ProductInventoryItem[] = (data || []).map(product => {
-        const skus = product.product_skus.map(sku => {
-          const finishedGood = sku.finished_goods?.[0];
+      const transformedData: ProductInventoryItem[] = (products || []).map((product: any) => {
+        // Find SKUs for this product
+        const productSkus = skus.filter((sku: any) => sku.product_id === product.id);
+
+        const transformedSkus = productSkus.map((sku: any) => {
+          // Find finished good for this SKU
+          const finishedGood = finishedGoods.find((fg: any) => fg.product_sku_id === sku.id);
+
           return {
             id: finishedGood?.id || `sku-${sku.id}`,
             skuId: sku.id,
@@ -82,8 +71,8 @@ export const useProductInventory = () => {
           };
         });
 
-        const totalStock = skus.reduce((sum, sku) => sum + sku.currentStock, 0);
-        const totalValue = skus.reduce((sum, sku) => sum + (sku.currentStock * sku.unitPrice), 0);
+        const totalStock = transformedSkus.reduce((sum, sku) => sum + sku.currentStock, 0);
+        const totalValue = transformedSkus.reduce((sum, sku) => sum + (sku.currentStock * sku.unitPrice), 0);
 
         return {
           productId: product.id,
@@ -92,7 +81,7 @@ export const useProductInventory = () => {
           totalStock,
           totalValue,
           imageUrl: product.image_url,
-          skus
+          skus: transformedSkus
         };
       });
       
@@ -112,16 +101,19 @@ export const useProductInventory = () => {
 
   const updateStock = async (finishedGoodId: string, newStock: number) => {
     try {
-      const { error } = await supabase
-        .from('finished_goods')
-        .update({ 
+      const response = await fetch(`/api/finished-goods-sync/${finishedGoodId}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
           current_stock: newStock,
-          status: newStock === 0 ? 'out_of_stock' : 
+          status: newStock === 0 ? 'out_of_stock' :
                   newStock < 5 ? 'low_stock' : 'in_stock'
-        })
-        .eq('id', finishedGoodId);
+        }),
+      });
 
-      if (error) throw error;
+      if (!response.ok) throw new Error('Failed to update stock');
 
       toast({
         title: "Success",

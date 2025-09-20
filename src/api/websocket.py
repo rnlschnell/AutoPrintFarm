@@ -136,8 +136,12 @@ async def websocket_single_printer_status(websocket: WebSocket, printer_id: str)
             if printer_id in printer_manager.clients:
                 status_data = await printer_manager.get_live_print_status(printer_id)
                 live_status = convert_to_response_models(status_data)
-                update = LiveStatusUpdate(data=live_status)
-                await websocket.send_text(update.model_dump_json())
+                # Send message format expected by frontend
+                status_data = live_status.model_dump() if hasattr(live_status, 'model_dump') else live_status
+                await websocket.send_text(json.dumps({
+                    "type": "live_status",
+                    "data": status_data
+                }, default=str))
             else:
                 # Send offline status
                 await websocket.send_text(json.dumps({
@@ -168,10 +172,13 @@ async def websocket_single_printer_status(websocket: WebSocket, printer_id: str)
                 # Get live status
                 status_data = await printer_manager.get_live_print_status(printer_id)
                 live_status = convert_to_response_models(status_data)
-                update = LiveStatusUpdate(data=live_status)
-                
-                # Send update to this specific client
-                await websocket.send_text(update.model_dump_json())
+
+                # Send update in format expected by frontend
+                status_data = live_status.model_dump() if hasattr(live_status, 'model_dump') else live_status
+                await websocket.send_text(json.dumps({
+                    "type": "live_status",
+                    "data": status_data
+                }, default=str))
                 
             except PrinterConnectionError as e:
                 logger.warning(f"Printer connection error for {printer_id}: {e}")
@@ -214,8 +221,12 @@ async def websocket_all_printers_status(websocket: WebSocket):
         try:
             all_status_data = await printer_manager.get_all_live_status()
             live_statuses = [convert_to_response_models(status) for status in all_status_data]
-            update = LiveStatusUpdate(data=live_statuses)
-            await websocket.send_text(update.model_dump_json())
+            # Send message format expected by frontend
+            status_data = [status.model_dump() if hasattr(status, 'model_dump') else status for status in live_statuses]
+            await websocket.send_text(json.dumps({
+                "type": "live_status",
+                "data": status_data
+            }, default=str))
         except Exception as e:
             logger.error(f"Failed to get initial status for all printers: {e}")
             await websocket.send_text(json.dumps({
@@ -232,10 +243,13 @@ async def websocket_all_printers_status(websocket: WebSocket):
                 # Get live status for all printers
                 all_status_data = await printer_manager.get_all_live_status()
                 live_statuses = [convert_to_response_models(status) for status in all_status_data]
-                update = LiveStatusUpdate(data=live_statuses)
-                
-                # Send update to this specific client
-                await websocket.send_text(update.model_dump_json())
+
+                # Send update in format expected by frontend
+                status_data = [status.model_dump() if hasattr(status, 'model_dump') else status for status in live_statuses]
+                await websocket.send_text(json.dumps({
+                    "type": "live_status",
+                    "data": status_data
+                }, default=str))
                 
             except Exception as e:
                 logger.error(f"Error in all printers live status stream: {e}")
@@ -263,8 +277,12 @@ async def get_all_printers_live_status():
     try:
         all_status_data = await printer_manager.get_all_live_status()
         live_statuses = [convert_to_response_models(status) for status in all_status_data]
-        
-        return LiveStatusUpdate(data=live_statuses)
+
+        status_data = [status.model_dump() if hasattr(status, 'model_dump') else status for status in live_statuses]
+        return {
+            "type": "live_status",
+            "data": status_data
+        }
         
     except Exception as e:
         logger.error(f"Failed to get live status for all printers: {e}")
@@ -287,8 +305,12 @@ async def get_single_printer_live_status(printer_id: str):
         
         status_data = await printer_manager.get_live_print_status(printer_id)
         live_status = convert_to_response_models(status_data)
-        
-        return LiveStatusUpdate(data=live_status)
+
+        status_data = live_status.model_dump() if hasattr(live_status, 'model_dump') else live_status
+        return {
+            "type": "live_status",
+            "data": status_data
+        }
         
     except Exception as e:
         logger.error(f"Failed to get live status for printer {printer_id}: {e}")

@@ -4,9 +4,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Trash2, Plus, Edit, Palette } from "lucide-react";
+import { Trash2, Plus, Edit, Palette, AlertTriangle } from "lucide-react";
 import { HexColorPicker } from "react-colorful";
-import { useColorPresets } from "@/hooks/useColorPresets";
+import { useColorPresetsContext } from "@/contexts/ColorPresetsContext";
 
 interface ColorPreset {
   id: string;
@@ -22,7 +22,7 @@ interface FilamentColorTypeModalProps {
 }
 
 const FilamentColorTypeModal = ({ isOpen, onClose }: FilamentColorTypeModalProps) => {
-  const { colorPresets, loading, createColorPreset, updateColorPreset, deleteColorPreset, refetch } = useColorPresets();
+  const { colorPresets, loading, createColorPreset, updateColorPreset, deleteColorPreset, refetch } = useColorPresetsContext();
   const [editingPreset, setEditingPreset] = useState<ColorPreset | null>(null);
   const [formData, setFormData] = useState({
     colorName: "",
@@ -30,14 +30,14 @@ const FilamentColorTypeModal = ({ isOpen, onClose }: FilamentColorTypeModalProps
     filamentType: ""
   });
   const [showColorPicker, setShowColorPicker] = useState(false);
+  const [deleteConfirmation, setDeleteConfirmation] = useState<ColorPreset | null>(null);
 
   const filamentTypes = ['PLA', 'ABS', 'PETG', 'TPU', 'ASA', 'PC', 'Nylon', 'PVA', 'HIPS', 'Wood Fill', 'Metal Fill'];
 
   useEffect(() => {
-    if (isOpen) {
-      refetch();
-    }
-  }, [isOpen, refetch]);
+    // Removed automatic refetch to prevent infinite loop
+    // The hook already fetches data when tenant.id is available
+  }, [isOpen]);
 
   const handleSubmit = async () => {
     if (!formData.colorName.trim() || !formData.filamentType) {
@@ -77,8 +77,19 @@ const FilamentColorTypeModal = ({ isOpen, onClose }: FilamentColorTypeModalProps
     setShowColorPicker(true);
   };
 
-  const handleDelete = async (preset: ColorPreset) => {
-    await deleteColorPreset(preset.id);
+  const handleDelete = (preset: ColorPreset) => {
+    setDeleteConfirmation(preset);
+  };
+
+  const confirmDelete = async () => {
+    if (deleteConfirmation) {
+      await deleteColorPreset(deleteConfirmation.id);
+      setDeleteConfirmation(null);
+    }
+  };
+
+  const cancelDelete = () => {
+    setDeleteConfirmation(null);
   };
 
   const resetForm = () => {
@@ -88,11 +99,12 @@ const FilamentColorTypeModal = ({ isOpen, onClose }: FilamentColorTypeModalProps
   };
 
   return (
-    <Dialog open={isOpen} onOpenChange={onClose}>
-      <DialogContent className="sm:max-w-[600px] max-h-[80vh] overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle>Manage Filament Colors & Types</DialogTitle>
-        </DialogHeader>
+    <>
+      <Dialog open={isOpen} onOpenChange={onClose}>
+        <DialogContent className="sm:max-w-[600px] max-h-[80vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Manage Filament Colors & Types</DialogTitle>
+          </DialogHeader>
         
         <div className="space-y-6">
           <div className="space-y-4">
@@ -223,6 +235,52 @@ const FilamentColorTypeModal = ({ isOpen, onClose }: FilamentColorTypeModalProps
         </DialogFooter>
       </DialogContent>
     </Dialog>
+
+    {/* Delete Confirmation Dialog */}
+    <Dialog open={!!deleteConfirmation} onOpenChange={() => setDeleteConfirmation(null)}>
+      <DialogContent className="sm:max-w-[400px]">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2 text-destructive">
+            <AlertTriangle className="h-5 w-5" />
+            Delete Color Preset
+          </DialogTitle>
+        </DialogHeader>
+        
+        <div className="space-y-4">
+          <p className="text-sm text-muted-foreground">
+            Are you sure you want to permanently delete this color preset?
+          </p>
+          
+          {deleteConfirmation && (
+            <div className="flex items-center gap-3 p-3 bg-muted/50 rounded-lg">
+              <div
+                className="w-6 h-6 rounded-full border border-border"
+                style={{ backgroundColor: deleteConfirmation.hex_code }}
+              />
+              <div>
+                <div className="font-medium text-sm">{deleteConfirmation.color_name}</div>
+                <div className="text-xs text-muted-foreground">{deleteConfirmation.filament_type}</div>
+              </div>
+            </div>
+          )}
+          
+          <p className="text-xs text-muted-foreground">
+            This action cannot be undone. The color preset will be permanently removed from your account.
+          </p>
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={cancelDelete}>
+            Cancel
+          </Button>
+          <Button variant="destructive" onClick={confirmDelete}>
+            <Trash2 className="mr-2 h-4 w-4" />
+            Delete Permanently
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+    </>
   );
 };
 

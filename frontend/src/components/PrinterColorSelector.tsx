@@ -8,7 +8,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import ColorSwatch from "@/components/ColorSwatch";
-import { useColorPresets } from "@/hooks/useColorPresets";
+import { useColorPresetsContext } from "@/contexts/ColorPresetsContext";
 import { usePrinters, type Printer } from "@/hooks/usePrinters";
 import { useToast } from "@/hooks/use-toast";
 
@@ -18,7 +18,7 @@ interface PrinterColorSelectorProps {
 
 const PrinterColorSelector = ({ printer }: PrinterColorSelectorProps) => {
   const [isOpen, setIsOpen] = useState(false);
-  const { colorPresets, loading } = useColorPresets();
+  const { colorPresets, loading } = useColorPresetsContext();
   const { updatePrinter } = usePrinters();
   const { toast } = useToast();
 

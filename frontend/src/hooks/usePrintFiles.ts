@@ -33,13 +33,30 @@ export const usePrintFiles = () => {
     if (!tenant?.id) return;
     
     try {
-      const { data: filesData, error: filesError } = await supabase
-        .from('print_files')
-        .select('*')
-        .eq('tenant_id', tenant?.id)
-        .order('created_at', { ascending: false });
+      // Get active products from local-first API
+      const productsResponse = await fetch('/api/products-sync/');
+      if (!productsResponse.ok) {
+        throw new Error(`Failed to fetch products: ${productsResponse.statusText}`);
+      }
+      const productsData = await productsResponse.json();
+      
+      // Filter active products with print files
+      const activeProducts = productsData.filter(p => p.is_active && p.print_file_id);
+      const activePrintFileIds = activeProducts.map(p => p.print_file_id);
+      const productFileMap = new Map(activeProducts.map(p => [p.print_file_id, { productName: p.name, originalFileName: p.file_name }]));
 
-      if (filesError) throw filesError;
+      // Get all print files from local-first API
+      const printFilesResponse = await fetch('/api/print-files-sync/');
+      if (!printFilesResponse.ok) {
+        throw new Error(`Failed to fetch print files: ${printFilesResponse.statusText}`);
+      }
+      const allFilesData = await printFilesResponse.json();
+      
+      // Filter to only files linked to active products
+      const filesData = allFilesData.filter(file => activePrintFileIds.includes(file.id));
+      
+      // Sort by created_at descending
+      filesData.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
 
       const { data: versionsData, error: versionsError } = await supabase
         .from('print_file_versions')
@@ -48,12 +65,20 @@ export const usePrintFiles = () => {
 
       if (versionsError) throw versionsError;
 
-      // Combine files with their versions
+      // Combine files with their versions and friendly names
       const extendedFiles: ExtendedPrintFile[] = (filesData || []).map(file => {
         const fileVersions = (versionsData || []).filter(v => v.print_file_id === file.id);
         const transformedFile = transformPrintFileFromDb(file as DbPrintFile);
+        const productInfo = productFileMap.get(file.id);
+        
+        // Use product name + original file name for display
+        const displayName = productInfo 
+          ? `${productInfo.productName} (${productInfo.originalFileName || file.name})`
+          : file.name;
+        
         return {
           ...transformedFile,
+          name: displayName, // Override with friendly name
           versions: fileVersions.map(v => ({
             id: v.id,
             printFileId: v.print_file_id,
@@ -86,20 +111,30 @@ export const usePrintFiles = () => {
     notes?: string;
   }) => {
     try {
-      const insertData = {
-        name: fileData.name,
-        file_size_bytes: fileData.fileSizeBytes,
-        number_of_units: fileData.numberOfUnits || 1,
-        tenant_id: tenant?.id
-      };
+      // Create print file via local-first API
+      const response = await fetch('/api/print-files-sync/', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          name: fileData.name,
+          file_size_bytes: fileData.fileSizeBytes,
+          number_of_units: fileData.numberOfUnits || 1
+        }),
+      });
 
-      const { data: newFile, error: fileError } = await supabase
-        .from('print_files')
-        .insert(insertData)
-        .select()
-        .single();
-
-      if (fileError) throw fileError;
+      if (!response.ok) {
+        throw new Error(`Failed to create print file: ${response.statusText}`);
+      }
+      
+      const result = await response.json();
+      
+      if (!result.success) {
+        throw new Error(result.message || 'Failed to create print file');
+      }
+      
+      const newFile = result.print_file;
 
       // Create initial version
       const { data: newVersion, error: versionError } = await supabase
@@ -150,14 +185,27 @@ export const usePrintFiles = () => {
   const updatePrintFile = async (id: string, updates: Partial<FrontendPrintFile>) => {
     try {
       const updateData = transformPrintFileToDb(updates);
-      const { data, error } = await supabase
-        .from('print_files')
-        .update(updateData)
-        .eq('id', id)
-        .select()
-        .single();
+      
+      // Update via local-first API
+      const response = await fetch(`/api/print-files-sync/${id}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(updateData),
+      });
 
-      if (error) throw error;
+      if (!response.ok) {
+        throw new Error(`Failed to update print file: ${response.statusText}`);
+      }
+      
+      const result = await response.json();
+      
+      if (!result.success) {
+        throw new Error(result.message || 'Failed to update print file');
+      }
+      
+      const data = result.print_file;
 
       const transformedFile = transformPrintFileFromDb(data as DbPrintFile);
       setPrintFiles(prev => prev.map(file => 
@@ -222,12 +270,20 @@ export const usePrintFiles = () => {
 
   const deletePrintFile = async (id: string) => {
     try {
-      const { error } = await supabase
-        .from('print_files')
-        .delete()
-        .eq('id', id);
+      // Delete via local-first API
+      const response = await fetch(`/api/print-files-sync/${id}`, {
+        method: 'DELETE',
+      });
 
-      if (error) throw error;
+      if (!response.ok) {
+        throw new Error(`Failed to delete print file: ${response.statusText}`);
+      }
+      
+      const result = await response.json();
+      
+      if (!result.success) {
+        throw new Error(result.message || 'Failed to delete print file');
+      }
 
       setPrintFiles(prev => prev.filter(file => file.id !== id));
       toast({

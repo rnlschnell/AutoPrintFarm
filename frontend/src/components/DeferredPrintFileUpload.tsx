@@ -3,26 +3,38 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { useToast } from '@/hooks/use-toast';
-import { Upload, File, X } from 'lucide-react';
+import { Upload, File, X, Replace, Trash2 } from 'lucide-react';
 import { tempFileManager, TempPrintFileData } from '@/lib/tempFileManager';
+import { useTenant } from '@/hooks/useTenant';
 
 interface DeferredPrintFileUploadProps {
   currentPrintFileId?: string | null;
   currentPrintFileName?: string;
   onPrintFileChange: (tempFileId: string | null, fileName: string | null) => void;
   value?: string | null; // Temp file ID or actual print file ID
+  allowReplace?: boolean; // Allow replacing existing files
+  allowDelete?: boolean; // Allow deleting existing files
+  onFileReplaced?: (printFileId: string) => void; // Callback when file is replaced
+  onFileDeleted?: (printFileId: string) => void; // Callback when file is deleted
 }
 
 const DeferredPrintFileUpload = ({ 
   currentPrintFileId,
   currentPrintFileName,
   onPrintFileChange,
-  value
+  value,
+  allowReplace = false,
+  allowDelete = false,
+  onFileReplaced,
+  onFileDeleted
 }: DeferredPrintFileUploadProps) => {
   const [uploading, setUploading] = useState(false);
+  const [replacing, setReplacing] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [tempFile, setTempFile] = useState<TempPrintFileData | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { toast } = useToast();
+  const { tenantId } = useTenant();
 
   // Check if we have a temp file
   const hasTempFile = value?.startsWith('temp_');
@@ -86,7 +98,71 @@ const DeferredPrintFileUpload = ({
     onPrintFileChange(null, null);
   };
 
+  const handleReplaceExistingFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file || !currentPrintFileId || !tenantId) return;
+
+    try {
+      setReplacing(true);
+      validateFile(file);
+
+      await tempFileManager.replaceExistingPrintFile(currentPrintFileId, file, tenantId);
+      
+      toast({
+        title: "File Replaced",
+        description: "Print file has been successfully replaced",
+        variant: "default",
+      });
+
+      if (onFileReplaced) {
+        onFileReplaced(currentPrintFileId);
+      }
+    } catch (error) {
+      console.error('File replacement error:', error);
+      toast({
+        title: "Replacement Failed",
+        description: error instanceof Error ? error.message : "Failed to replace file",
+        variant: "destructive",
+      });
+    } finally {
+      setReplacing(false);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    }
+  };
+
+  const handleDeleteExistingFile = async () => {
+    if (!currentPrintFileId) return;
+
+    try {
+      setDeleting(true);
+      
+      await tempFileManager.deleteExistingPrintFile(currentPrintFileId);
+      
+      toast({
+        title: "File Deleted",
+        description: "Print file has been successfully deleted",
+        variant: "default",
+      });
+
+      if (onFileDeleted) {
+        onFileDeleted(currentPrintFileId);
+      }
+    } catch (error) {
+      console.error('File deletion error:', error);
+      toast({
+        title: "Deletion Failed",
+        description: error instanceof Error ? error.message : "Failed to delete file",
+        variant: "destructive",
+      });
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   const hasFile = hasTempFile || currentPrintFileId;
+  const isProcessing = uploading || replacing || deleting;
 
   return (
     <div className="space-y-2">
@@ -99,13 +175,27 @@ const DeferredPrintFileUpload = ({
           onChange={handleFileSelect}
           className="hidden"
           id="print-file-upload"
-          disabled={uploading}
+          disabled={isProcessing}
         />
         
-        {uploading ? (
+        {/* Hidden input for replace operations */}
+        <input
+          type="file"
+          accept=".stl,.gcode,.3mf,.obj,.amf"
+          onChange={handleReplaceExistingFile}
+          className="hidden"
+          id="print-file-replace"
+          disabled={isProcessing}
+        />
+        
+        {isProcessing ? (
           <div className="flex flex-col items-center justify-center gap-2 text-blue-600">
             <div className="w-6 h-6 border-2 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
-            <span className="text-sm">Processing...</span>
+            <span className="text-sm">
+              {uploading && 'Processing...'}
+              {replacing && 'Replacing file...'}
+              {deleting && 'Deleting file...'}
+            </span>
           </div>
         ) : hasFile ? (
           <div className="flex flex-col items-center justify-center gap-2 text-green-600">
@@ -117,20 +207,61 @@ const DeferredPrintFileUpload = ({
               {displayFileName || 'File attached'}
             </span>
             <div className="flex gap-2 mt-1">
-              <Button 
-                size="sm"
-                variant="outline" 
-                onClick={() => fileInputRef.current?.click()}
-              >
-                Replace File
-              </Button>
-              <Button 
-                size="sm"
-                variant="destructive" 
-                onClick={handleRemoveFile}
-              >
-                <X className="h-4 w-4" />
-              </Button>
+              {hasTempFile ? (
+                <>
+                  <Button 
+                    size="sm"
+                    variant="outline" 
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={isProcessing}
+                  >
+                    Replace File
+                  </Button>
+                  <Button 
+                    size="sm"
+                    variant="destructive" 
+                    onClick={handleRemoveFile}
+                    disabled={isProcessing}
+                  >
+                    <X className="h-4 w-4" />
+                  </Button>
+                </>
+              ) : (
+                <>
+                  {allowReplace && (
+                    <Button 
+                      size="sm"
+                      variant="outline" 
+                      onClick={() => document.getElementById('print-file-replace')?.click()}
+                      disabled={isProcessing}
+                    >
+                      <Replace className="h-4 w-4 mr-1" />
+                      Replace
+                    </Button>
+                  )}
+                  {allowDelete && (
+                    <Button 
+                      size="sm"
+                      variant="destructive" 
+                      onClick={handleDeleteExistingFile}
+                      disabled={isProcessing}
+                    >
+                      <Trash2 className="h-4 w-4 mr-1" />
+                      Delete
+                    </Button>
+                  )}
+                  {!allowReplace && !allowDelete && (
+                    <Button 
+                      size="sm"
+                      variant="outline" 
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={isProcessing}
+                    >
+                      Replace File
+                    </Button>
+                  )}
+                </>
+              )}
             </div>
           </div>
         ) : (
@@ -143,7 +274,7 @@ const DeferredPrintFileUpload = ({
               size="sm"
               variant="outline" 
               onClick={() => fileInputRef.current?.click()}
-              disabled={uploading}
+              disabled={isProcessing}
             >
               Choose File
             </Button>

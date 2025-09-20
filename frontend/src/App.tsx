@@ -19,30 +19,37 @@ import Products from "./pages/Products";
 import Orders from "./pages/Orders";
 import Analytics from "./pages/Analytics";
 import ProductDetail from "./pages/ProductDetail";
+import ErrorBoundary from "./components/ErrorBoundary";
 
 import SimpleAuthPage from "./components/auth/SimpleAuthPage";
 import { AuthProvider } from "./contexts/AuthContext";
 import SimpleProtectedRoute from "./components/auth/SimpleProtectedRoute";
+import { ColorPresetsProvider } from "./contexts/ColorPresetsContext";
 const queryClient = new QueryClient();
 
 const App = () => {
   console.log('=== APP COMPONENT RENDERING ===');
   
   return (
-      <ThemeProvider attribute="class" defaultTheme="dark" enableSystem>
-      <QueryClientProvider client={queryClient}>
-        <TooltipProvider>
-          <Toaster />
-          <Sonner />
-          <BrowserRouter>
-            <AuthProvider>
-            <Routes>
-              {/* Protected routes wrapped in Layout */}
-              <Route path="/" element={
-                <SimpleProtectedRoute>
-                  <Layout />
-                </SimpleProtectedRoute>
-              }>
+      <ErrorBoundary>
+        <ThemeProvider attribute="class" defaultTheme="dark" enableSystem>
+        <QueryClientProvider client={queryClient}>
+          <TooltipProvider>
+            <Toaster />
+            <Sonner />
+            <BrowserRouter>
+              <AuthProvider>
+              <Routes>
+                {/* Protected routes wrapped in Layout */}
+                <Route path="/" element={
+                  <SimpleProtectedRoute>
+                    <ColorPresetsProvider>
+                      <ErrorBoundary>
+                        <Layout />
+                      </ErrorBoundary>
+                    </ColorPresetsProvider>
+                  </SimpleProtectedRoute>
+                }>
                 <Route index element={<Index />} />
                 <Route path="printers" element={<Printers />} />
                 <Route path="worklist" element={<Worklist />} />
@@ -63,11 +70,12 @@ const App = () => {
               {/* 404 route */}
               <Route path="*" element={<NotFound />} />
             </Routes>
-            </AuthProvider>
-          </BrowserRouter>
-        </TooltipProvider>
-      </QueryClientProvider>
-      </ThemeProvider>
+              </AuthProvider>
+            </BrowserRouter>
+          </TooltipProvider>
+        </QueryClientProvider>
+        </ThemeProvider>
+      </ErrorBoundary>
   );
 };
 

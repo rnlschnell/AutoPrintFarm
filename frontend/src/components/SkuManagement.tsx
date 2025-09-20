@@ -9,7 +9,7 @@ import { Plus, Edit2, Trash2, Tag } from 'lucide-react';
 import { ProductSku, useProductsNew } from '@/hooks/useProductsNew';
 import { supabase } from '@/integrations/supabase/client';
 import { useTenant } from '@/hooks/useTenant';
-import { useColorPresets } from '@/hooks/useColorPresets';
+import { useColorPresetsContext } from '@/contexts/ColorPresetsContext';
 import ColorSwatch from '@/components/ColorSwatch';
 import { useToast } from '@/hooks/use-toast';
 
@@ -34,7 +34,7 @@ interface SkuManagementProps {
 
 export const SkuManagement = ({ productId, skus, onSkusChange, readOnly = false }: SkuManagementProps) => {
   const { tenant } = useTenant();
-  const { colorPresets, loading: presetsLoading } = useColorPresets();
+  const { colorPresets, loading: presetsLoading } = useColorPresetsContext();
   const { addSku, updateSku, deleteSku } = useProductsNew();
   const { toast } = useToast();
   const [localSkus, setLocalSkus] = useState<SkuData[]>([]);
@@ -339,7 +339,7 @@ const SkuEditForm = ({
   onCancel: () => void;
 }) => {
   const [editSku, setEditSku] = useState<SkuData>(sku);
-  const { colorPresets, loading: presetsLoading } = useColorPresets();
+  const { colorPresets, loading: presetsLoading } = useColorPresetsContext();
 
   return (
     <div className="w-full">

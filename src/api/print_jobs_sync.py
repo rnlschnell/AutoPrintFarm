@@ -170,55 +170,62 @@ async def update_print_job(job_id: str, updates: dict):
 @router.delete("/{job_id}")
 async def delete_print_job(job_id: str):
     """
-    Delete a specific print job by ID from local SQLite
-    This completely removes the job from the database
+    Delete a specific print job by ID from local SQLite - SIMPLIFIED ROBUST VERSION
+    This completely removes the job from the database and stops any active print
     """
     try:
-        # Get tenant ID from config
-        config_service = get_config_service()
-        tenant_config = config_service.get_tenant_config()
-        tenant_id = tenant_config.get('id', '').strip()
+        logger.info(f"Attempting to delete print job: {job_id}")
         
-        if not tenant_id:
-            raise HTTPException(status_code=400, detail="Tenant not configured")
-        
-        # First check if job exists and belongs to this tenant
+        # Get database service
         db_service = await get_database_service()
+        
+        # Get the job to check if it exists and get printer info
         job = await db_service.get_print_job_by_id(job_id)
         
         if not job:
-            raise HTTPException(status_code=404, detail="Print job not found")
-            
-        if job.tenant_id != tenant_id:
-            raise HTTPException(status_code=403, detail="Access denied to this print job")
+            logger.warning(f"Print job {job_id} not found - may have been already deleted")
+            # Return success anyway - if it's not there, mission accomplished
+            return {
+                "success": True,
+                "message": "Print job not found (may have been already deleted)",
+                "deleted_job_id": job_id
+            }
         
-        # Prevent deletion of actively printing jobs, but allow deletion of stuck jobs
-        if job.status == 'printing':
-            # Smart detection: If job shows 100% progress, it's likely stuck and completed
-            if job.progress_percentage == 100:
-                logger.warning(f"Found stuck job {job_id} with 'printing' status but 100% progress - allowing deletion")
-            else:
-                raise HTTPException(status_code=400, detail="Cannot delete a job that is currently printing. Stop the print first.")
+        # If job is actively printing, try to stop it first
+        if job.status == 'printing' and job.printer_id:
+            try:
+                logger.info(f"Job {job_id} is printing - attempting to stop printer {job.printer_id}")
+                # Import here to avoid circular imports
+                from ..core.printer_client_manager import get_printer_client_manager
+                printer_manager = get_printer_client_manager()
+                printer_client = printer_manager.get_client(str(job.printer_id))
+                if printer_client:
+                    await printer_client.stop_print()
+                    logger.info(f"Successfully sent stop command to printer {job.printer_id}")
+                else:
+                    logger.warning(f"Could not get printer client for printer {job.printer_id}")
+            except Exception as e:
+                logger.warning(f"Failed to stop printer for job {job_id}: {e} - continuing with deletion anyway")
         
-        # Delete the job from local database
-        success = await db_service.delete_print_job(job_id, tenant_id)
+        # Delete the job from local database - simplified call
+        success = await db_service.delete_print_job_simple(job_id)
         
-        if not success:
-            raise HTTPException(status_code=500, detail="Failed to delete print job")
-        
-        logger.info(f"Print job {job_id} deleted successfully for tenant {tenant_id}")
-        
-        return {
-            "success": True,
-            "message": "Print job deleted successfully",
-            "deleted_job_id": job_id
-        }
+        if success:
+            logger.info(f"Print job {job_id} deleted successfully")
+            return {
+                "success": True,
+                "message": "Print job deleted successfully",
+                "deleted_job_id": job_id
+            }
+        else:
+            logger.error(f"Database deletion failed for job {job_id}")
+            raise HTTPException(status_code=500, detail="Database deletion failed")
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to delete print job {job_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Unexpected error deleting print job {job_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
 
 @router.get("/{job_id}", response_model=dict)
 async def get_print_job(job_id: str):

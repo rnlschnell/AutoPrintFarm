@@ -1,0 +1,581 @@
+
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Separator } from "@/components/ui/separator";
+import { Progress } from "@/components/ui/progress";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Printer as PrinterIcon, Square, Zap, Clock, Activity, Edit, Lightbulb, Home, PencilIcon, Check, X } from "lucide-react";
+import ColorSwatch from "@/components/ColorSwatch";
+import PrinterColorSelector from "@/components/PrinterColorSelector";
+import { useState, useMemo } from "react";
+import { useToast } from "@/hooks/use-toast";
+import { usePrinters, type Printer } from "@/hooks/usePrinters";
+import { usePrinterWebSocket, type LivePrinterData } from "@/hooks/useWebSocket";
+
+interface PrinterDetailsModalProps {
+  printer: Printer | null;
+  isOpen: boolean;
+  onClose: () => void;
+}
+
+const PrinterDetailsModal = ({ printer, isOpen, onClose }: PrinterDetailsModalProps) => {
+  const [isEditing, setIsEditing] = useState(false);
+  const [editedName, setEditedName] = useState("");
+  const [editedModel, setEditedModel] = useState("");
+  const [isLightToggling, setIsLightToggling] = useState(false);
+  const [isHoming, setIsHoming] = useState(false);
+  const [editingNozzleTemp, setEditingNozzleTemp] = useState(false);
+  const [editingBedTemp, setEditingBedTemp] = useState(false);
+  const [nozzleTempInput, setNozzleTempInput] = useState("");
+  const [bedTempInput, setBedTempInput] = useState("");
+  const [isSettingNozzleTemp, setIsSettingNozzleTemp] = useState(false);
+  const [isSettingBedTemp, setIsSettingBedTemp] = useState(false);
+  const { toast } = useToast();
+  const { updatePrinter, printers } = usePrinters();
+  const { data: liveData } = usePrinterWebSocket();
+
+  // Always use the latest printer data from the printers array
+  const currentPrinter = useMemo(() => {
+    const latestPrinter = printers.find(p => p.id === printer?.id);
+    return latestPrinter || printer;
+  }, [printers, printer?.id, printer]);
+
+  // Get live data for current printer
+  const printerLiveData = useMemo(() => {
+    return liveData?.find(data => data.printer_id === currentPrinter?.printerId?.toString());
+  }, [liveData, currentPrinter?.printerId]);
+
+  if (!currentPrinter) return null;
+
+  const getBadgeVariant = (status: string) => {
+    switch (status) {
+      case 'printing': return 'default';
+      case 'idle': return 'secondary';
+      case 'maintenance':
+      case 'offline': return 'destructive';
+      default: return 'outline';
+    }
+  };
+
+  const handleEdit = () => {
+    setEditedName(currentPrinter.name);
+    setEditedModel(currentPrinter.model);
+    setIsEditing(true);
+  };
+
+  const handleSave = async () => {
+    try {
+      await updatePrinter(currentPrinter.id, {
+        name: editedName,
+        model: editedModel
+      });
+      setIsEditing(false);
+    } catch (error) {
+      // Error handling is done in the hook
+    }
+  };
+
+  const handleCancel = () => {
+    setIsEditing(false);
+    setEditedName("");
+    setEditedModel("");
+  };
+
+  const handleLightToggle = async () => {
+    if (!currentPrinter?.id || isLightToggling) return;
+
+    setIsLightToggling(true);
+    try {
+      // Use separate on/off endpoints instead of toggle
+      const endpoint = isLightOn ? 'off' : 'on';
+      const response = await fetch(`/api/printers/${currentPrinter.printerId}/light/${endpoint}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to turn light ${endpoint}`);
+      }
+
+      const result = await response.json();
+      
+      toast({
+        title: "Light Control",
+        description: result.message || `Light turned ${endpoint} successfully`,
+      });
+    } catch (error) {
+      console.error('Error controlling light:', error);
+      toast({
+        title: "Error",
+        description: "Failed to control printer light",
+        variant: "destructive",
+      });
+    } finally {
+      setIsLightToggling(false);
+    }
+  };
+
+  const handleHome = async () => {
+    if (!currentPrinter?.id || isHoming) return;
+
+    setIsHoming(true);
+    try {
+      const response = await fetch(`/api/printers/${currentPrinter.printerId}/home`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to home printer');
+      }
+
+      const result = await response.json();
+      
+      toast({
+        title: "Home Command",
+        description: result.message || "Printer homing completed successfully",
+      });
+    } catch (error) {
+      console.error('Error homing printer:', error);
+      toast({
+        title: "Error",
+        description: "Failed to home printer",
+        variant: "destructive",
+      });
+    } finally {
+      setIsHoming(false);
+    }
+  };
+
+  const handleSetNozzleTemp = async () => {
+    if (!currentPrinter?.id || !nozzleTempInput || isSettingNozzleTemp) return;
+
+    const temperature = parseInt(nozzleTempInput);
+    if (isNaN(temperature) || temperature < 0 || temperature > 300) {
+      toast({
+        title: "Invalid Temperature",
+        description: "Please enter a valid temperature between 0-300°C",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setIsSettingNozzleTemp(true);
+    try {
+      const response = await fetch(`/api/printers/${currentPrinter.printerId}/temp/nozzle`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ temperature, wait: false }),
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to set nozzle temperature');
+      }
+
+      const result = await response.json();
+      
+      toast({
+        title: "Temperature Set",
+        description: `Nozzle temperature set to ${temperature}°C`,
+      });
+
+      setEditingNozzleTemp(false);
+      setNozzleTempInput("");
+    } catch (error) {
+      console.error('Error setting nozzle temperature:', error);
+      toast({
+        title: "Error",
+        description: "Failed to set nozzle temperature",
+        variant: "destructive",
+      });
+    } finally {
+      setIsSettingNozzleTemp(false);
+    }
+  };
+
+  const handleSetBedTemp = async () => {
+    if (!currentPrinter?.id || !bedTempInput || isSettingBedTemp) return;
+
+    const temperature = parseInt(bedTempInput);
+    if (isNaN(temperature) || temperature < 0 || temperature > 120) {
+      toast({
+        title: "Invalid Temperature",
+        description: "Please enter a valid temperature between 0-120°C",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setIsSettingBedTemp(true);
+    try {
+      const response = await fetch(`/api/printers/${currentPrinter.printerId}/temp/bed`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ temperature, wait: false }),
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to set bed temperature');
+      }
+
+      const result = await response.json();
+      
+      toast({
+        title: "Temperature Set",
+        description: `Bed temperature set to ${temperature}°C`,
+      });
+
+      setEditingBedTemp(false);
+      setBedTempInput("");
+    } catch (error) {
+      console.error('Error setting bed temperature:', error);
+      toast({
+        title: "Error",
+        description: "Failed to set bed temperature",
+        variant: "destructive",
+      });
+    } finally {
+      setIsSettingBedTemp(false);
+    }
+  };
+
+  // Get current status: if we have live data, printer is connected, otherwise offline
+  const currentStatus = printerLiveData ? printerLiveData.status : 'offline';
+  const isLightOn = printerLiveData?.light_on || false;
+  
+  const getCurrentTemperatures = () => {
+    if (printerLiveData?.temperatures) {
+      return {
+        nozzle: Math.round(printerLiveData.temperatures.nozzle.current),
+        bed: Math.round(printerLiveData.temperatures.bed.current)
+      };
+    }
+    return { nozzle: 210, bed: 60 }; // fallback values
+  };
+
+  const temperatures = getCurrentTemperatures();
+
+  return (
+    <Dialog open={isOpen} onOpenChange={onClose}>
+      <DialogContent className="sm:max-w-[600px]">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <PrinterIcon className="h-5 w-5" />
+            {isEditing ? "Edit Printer" : `${currentPrinter.name} Details`}
+            {!isEditing && (
+              <Badge className="!bg-[#00AE42] !text-white !border-0 ml-2">
+                {currentPrinter.model}
+              </Badge>
+            )}
+          </DialogTitle>
+        </DialogHeader>
+
+        <div className="space-y-6">
+          {isEditing && (
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label className="text-sm font-medium text-muted-foreground">Name</Label>
+                <Input
+                  value={editedName}
+                  onChange={(e) => setEditedName(e.target.value)}
+                  placeholder="Printer name"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label className="text-sm font-medium text-muted-foreground">Model</Label>
+                <Input
+                  value={editedModel}
+                  onChange={(e) => setEditedModel(e.target.value)}
+                  placeholder="Printer model"
+                />
+              </div>
+            </div>
+          )}
+
+          {!isEditing && (
+            <>
+              <div className="mt-8 space-y-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <h3 className="text-lg font-medium">Current Status:</h3>
+                    <Badge variant={getBadgeVariant(currentStatus)}>{currentStatus}</Badge>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <ColorSwatch 
+                      color={currentPrinter.currentColorHex && currentPrinter.currentColor 
+                        ? `${currentPrinter.currentColor}|${currentPrinter.currentColorHex}`
+                        : 'Black|#000000'} 
+                      size="sm" 
+                    />
+                    <div className="flex flex-col">
+                      <span className="text-sm mr-1">{currentPrinter.currentColor ? currentPrinter.currentColor.split('|')[0] : 'None'}</span>
+                      <span className="text-xs text-muted-foreground">{currentPrinter.currentFilamentType || 'PLA'}</span>
+                    </div>
+                    <PrinterColorSelector printer={currentPrinter} />
+                  </div>
+                </div>
+                
+                {currentStatus === 'printing' ? (
+                  <div className="space-y-4">
+                    <div className="space-y-2">
+                      <div className="flex justify-between">
+                        <span className="text-sm text-muted-foreground">File:</span>
+                        <span className="text-sm font-medium">Sample Print Job</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-sm text-muted-foreground">Time Remaining:</span>
+                        <span className="text-sm font-medium">2h 15m</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-sm text-muted-foreground">Layers:</span>
+                        <span className="text-sm font-medium">156/240</span>
+                      </div>
+                    </div>
+                    <div className="space-y-1">
+                      <div className="flex justify-between text-sm">
+                        <span>Progress</span>
+                        <span>65%</span>
+                      </div>
+                      <Progress value={65} className="h-2" />
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-sm text-muted-foreground">
+                    No active print job
+                  </div>
+                )}
+              </div>
+              <Separator />
+            </>
+          )}
+
+          {!isEditing && (
+            <>
+              <div className="space-y-4">
+                <h3 className="text-lg font-medium">Temperature Status</h3>
+                <div className="space-y-4">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="flex items-center gap-2">
+                      <Zap className="h-4 w-4 text-red-500" />
+                      <div className="flex-1">
+                        <p className="text-sm text-muted-foreground">Nozzle</p>
+                        {editingNozzleTemp ? (
+                          <div className="flex items-center gap-1">
+                            <Input
+                              type="number"
+                              value={nozzleTempInput}
+                              onChange={(e) => setNozzleTempInput(e.target.value)}
+                              placeholder={temperatures.nozzle.toString()}
+                              className="h-8 w-20 text-sm"
+                              min="0"
+                              max="300"
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') handleSetNozzleTemp();
+                                if (e.key === 'Escape') {
+                                  setEditingNozzleTemp(false);
+                                  setNozzleTempInput("");
+                                }
+                              }}
+                              autoFocus
+                            />
+                            <span className="text-sm">°C</span>
+                          </div>
+                        ) : (
+                          <p className="text-lg font-medium">{temperatures.nozzle}°C</p>
+                        )}
+                      </div>
+                      {editingNozzleTemp ? (
+                        <div className="flex items-center gap-1">
+                          <Button
+                            variant="outline"
+                            size="icon"
+                            className="h-6 w-6"
+                            onClick={handleSetNozzleTemp}
+                            disabled={isSettingNozzleTemp || !nozzleTempInput}
+                            title="Confirm temperature"
+                          >
+                            <Check className="h-3 w-3" />
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="icon"
+                            className="h-6 w-6"
+                            onClick={() => {
+                              setEditingNozzleTemp(false);
+                              setNozzleTempInput("");
+                            }}
+                            title="Cancel"
+                          >
+                            <X className="h-3 w-3" />
+                          </Button>
+                        </div>
+                      ) : (
+                        <Button
+                          variant="outline"
+                          size="icon"
+                          className="h-8 w-8"
+                          onClick={() => {
+                            setEditingNozzleTemp(true);
+                            setNozzleTempInput(temperatures.nozzle.toString());
+                          }}
+                          title="Edit nozzle temperature"
+                        >
+                          <PencilIcon className="h-4 w-4" />
+                        </Button>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Square className="h-4 w-4 text-blue-500" />
+                      <div className="flex-1">
+                        <p className="text-sm text-muted-foreground">Bed</p>
+                        {editingBedTemp ? (
+                          <div className="flex items-center gap-1">
+                            <Input
+                              type="number"
+                              value={bedTempInput}
+                              onChange={(e) => setBedTempInput(e.target.value)}
+                              placeholder={temperatures.bed.toString()}
+                              className="h-8 w-20 text-sm"
+                              min="0"
+                              max="120"
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') handleSetBedTemp();
+                                if (e.key === 'Escape') {
+                                  setEditingBedTemp(false);
+                                  setBedTempInput("");
+                                }
+                              }}
+                              autoFocus
+                            />
+                            <span className="text-sm">°C</span>
+                          </div>
+                        ) : (
+                          <p className="text-lg font-medium">{temperatures.bed}°C</p>
+                        )}
+                      </div>
+                      {editingBedTemp ? (
+                        <div className="flex items-center gap-1">
+                          <Button
+                            variant="outline"
+                            size="icon"
+                            className="h-6 w-6"
+                            onClick={handleSetBedTemp}
+                            disabled={isSettingBedTemp || !bedTempInput}
+                            title="Confirm temperature"
+                          >
+                            <Check className="h-3 w-3" />
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="icon"
+                            className="h-6 w-6"
+                            onClick={() => {
+                              setEditingBedTemp(false);
+                              setBedTempInput("");
+                            }}
+                            title="Cancel"
+                          >
+                            <X className="h-3 w-3" />
+                          </Button>
+                        </div>
+                      ) : (
+                        <Button
+                          variant="outline"
+                          size="icon"
+                          className="h-8 w-8"
+                          onClick={() => {
+                            setEditingBedTemp(true);
+                            setBedTempInput(temperatures.bed.toString());
+                          }}
+                          title="Edit bed temperature"
+                        >
+                          <PencilIcon className="h-4 w-4" />
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-end gap-2">
+                    <Button
+                      variant="outline"
+                      size="icon"
+                      className="h-8 w-8"
+                      onClick={handleHome}
+                      disabled={isHoming}
+                      title={isHoming ? "Homing..." : "Home printer"}
+                    >
+                      <Home className="h-4 w-4" />
+                    </Button>
+                    <Button 
+                      variant="outline" 
+                      size="icon" 
+                      className={`h-8 w-8 ${isLightOn ? 'bg-yellow-100 text-yellow-600 hover:bg-yellow-200' : ''}`}
+                      onClick={handleLightToggle}
+                      disabled={isLightToggling}
+                      title={`Light is ${isLightOn ? 'ON' : 'OFF'} - Click to toggle`}
+                    >
+                      <Lightbulb className="h-4 w-4" />
+                    </Button>
+                  </div>
+                </div>
+              </div>
+
+              <Separator />
+
+              <div className="space-y-4">
+                <h3 className="text-lg font-medium">System Info</h3>
+                <div className="grid grid-cols-2 gap-4 text-sm">
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Total Print Time:</span>
+                    <span>342h 15m</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Last Maintenance:</span>
+                    <span>2 weeks ago</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Firmware:</span>
+                    <span>v2.1.2</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-muted-foreground">Connection:</span>
+                    <span className="text-green-600">Online</span>
+                  </div>
+                </div>
+              </div>
+            </>
+          )}
+
+          <div className="flex justify-end gap-2">
+            {isEditing ? (
+              <>
+                <Button variant="outline" onClick={handleCancel}>Cancel</Button>
+                <Button onClick={handleSave}>Save Changes</Button>
+              </>
+            ) : (
+              <>
+                <Button variant="outline" onClick={onClose}>Close</Button>
+                <Button variant="outline" onClick={handleEdit}>
+                  <Edit className="h-4 w-4 mr-2" />
+                  Edit
+                </Button>
+                <Button>Send G-Code</Button>
+              </>
+            )}
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+};
+
+export default PrinterDetailsModal;

@@ -480,7 +480,6 @@ class PrintFile(Base):
     
     # Table constraints
     __table_args__ = (
-        UniqueConstraint('tenant_id', 'name', name='unique_tenant_file_name'),
         Index('idx_print_files_tenant', 'tenant_id'),
         Index('idx_print_files_product', 'product_id'),
     )
@@ -736,3 +735,137 @@ class BackupQueue(Base):
             'error': self.error,
             'retry_count': self.retry_count
         }
+
+class FinishedGoods(Base):
+    """
+    Local SQLite model for finished_goods table
+    Tracks finished goods inventory linked to product SKUs
+    """
+    __tablename__ = 'finished_goods'
+    
+    # Primary key
+    id = Column(String(36), primary_key=True)  # UUID as string in SQLite
+    
+    # Foreign key references
+    product_sku_id = Column(String(36), ForeignKey('product_skus.id', ondelete='CASCADE'), nullable=False)
+    tenant_id = Column(String(36), nullable=False)
+    print_job_id = Column(String(36))  # Optional link to print job that created it
+    
+    # Item information
+    sku = Column(Text, nullable=False)
+    color = Column(Text, nullable=False)
+    material = Column(Text, nullable=False, default='PLA')
+    
+    # Stock management
+    current_stock = Column(Integer, nullable=False, default=0)
+    low_stock_threshold = Column(Integer, default=5)
+    quantity_per_sku = Column(Integer, default=1)  # How many units per SKU
+    
+    # Financial information
+    unit_price = Column(Integer, nullable=False, default=0)  # Store in cents for precision
+    extra_cost = Column(Integer, default=0)  # Additional costs in cents
+    profit_margin = Column(Integer, default=0)  # Percentage * 100 (e.g., 2500 = 25%)
+    
+    # Status tracking
+    assembly_status = Column(Text, default='printed')  # printed, needs_assembly, assembled
+    status = Column(Text, default='out_of_stock')  # out_of_stock, low_stock, in_stock
+    
+    # Metadata
+    image_url = Column(Text)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    product_sku = relationship('ProductSku', backref='finished_goods')
+    
+    # Table constraints
+    __table_args__ = (
+        Index('idx_finished_goods_tenant', 'tenant_id'),
+        Index('idx_finished_goods_product_sku', 'product_sku_id'),
+        Index('idx_finished_goods_status', 'status'),
+        Index('idx_finished_goods_assembly_status', 'assembly_status'),
+    )
+    
+    def to_dict(self):
+        """Convert model to dictionary"""
+        def safe_isoformat(dt):
+            if dt is None:
+                return None
+            if isinstance(dt, str):
+                return dt
+            return dt.isoformat()
+        
+        # Convert cents back to dollars for API response
+        unit_price_dollars = self.unit_price / 100.0 if self.unit_price else 0
+        extra_cost_dollars = self.extra_cost / 100.0 if self.extra_cost else 0
+        profit_margin_percent = self.profit_margin / 100.0 if self.profit_margin else 0
+            
+        return {
+            'id': self.id,
+            'product_sku_id': self.product_sku_id,
+            'tenant_id': self.tenant_id,
+            'print_job_id': self.print_job_id,
+            'sku': self.sku,
+            'color': self.color,
+            'material': self.material,
+            'current_stock': self.current_stock,
+            'low_stock_threshold': self.low_stock_threshold,
+            'quantity_per_sku': self.quantity_per_sku,
+            'unit_price': unit_price_dollars,
+            'extra_cost': extra_cost_dollars,
+            'profit_margin': profit_margin_percent,
+            'assembly_status': self.assembly_status,
+            'status': self.status,
+            'image_url': self.image_url,
+            'is_active': self.is_active,
+            'created_at': safe_isoformat(self.created_at),
+            'updated_at': safe_isoformat(self.updated_at)
+        }
+    
+    @classmethod
+    def from_supabase(cls, data):
+        """Create instance from Supabase data"""
+        # Parse datetime strings
+        created_at = data.get('created_at')
+        if created_at and isinstance(created_at, str):
+            created_at = datetime.fromisoformat(created_at.replace('Z', '+00:00').replace('+00:00', ''))
+        
+        updated_at = data.get('updated_at')
+        if updated_at and isinstance(updated_at, str):
+            updated_at = datetime.fromisoformat(updated_at.replace('Z', '+00:00').replace('+00:00', ''))
+        
+        # Convert dollar amounts to cents
+        unit_price = data.get('unit_price', 0)
+        if unit_price is not None:
+            unit_price = int(float(unit_price) * 100)
+        
+        extra_cost = data.get('extra_cost', 0)
+        if extra_cost is not None:
+            extra_cost = int(float(extra_cost) * 100)
+        
+        profit_margin = data.get('profit_margin', 0)
+        if profit_margin is not None:
+            profit_margin = int(float(profit_margin) * 100)
+        
+        return cls(
+            id=data.get('id'),
+            product_sku_id=data.get('product_sku_id'),
+            tenant_id=data.get('tenant_id'),
+            print_job_id=data.get('print_job_id'),
+            sku=data.get('sku'),
+            color=data.get('color'),
+            material=data.get('material', 'PLA'),
+            current_stock=data.get('current_stock', 0),
+            low_stock_threshold=data.get('low_stock_threshold', 5),
+            quantity_per_sku=data.get('quantity_per_sku', 1),
+            unit_price=unit_price,
+            extra_cost=extra_cost,
+            profit_margin=profit_margin,
+            assembly_status=data.get('assembly_status', 'printed'),
+            status=data.get('status', 'out_of_stock'),
+            image_url=data.get('image_url'),
+            is_active=data.get('is_active', True),
+            created_at=created_at,
+            updated_at=updated_at,
+        )

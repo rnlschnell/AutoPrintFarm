@@ -11,7 +11,7 @@ from datetime import datetime
 from ..services.database_service import get_database_service
 from ..services.config_service import get_config_service
 from ..services.sync_service import get_sync_service
-from ..models.database import ProductSku
+from ..models.database import ProductSku, FinishedGoods
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -261,6 +261,35 @@ async def create_product_sku(sku_request: ProductSkuCreateRequest):
         
         # Insert into local SQLite (will automatically queue backup to Supabase)
         success = await db_service.upsert_product_sku(sku_data)
+        
+        # Create associated finished good
+        if success:
+            try:
+                finished_good = FinishedGoods(
+                    id=str(uuid.uuid4()),
+                    product_sku_id=sku_id,
+                    tenant_id=tenant_id,
+                    sku=sku_request.sku,
+                    color=sku_request.color,
+                    material=sku_request.filament_type or 'PLA',
+                    current_stock=sku_request.stock_level,
+                    unit_price=int(sku_request.price * 100) if sku_request.price else 0,
+                    assembly_status='printed',
+                    status='out_of_stock' if sku_request.stock_level == 0 else 'low_stock' if sku_request.stock_level < 5 else 'in_stock',
+                    low_stock_threshold=5,
+                    quantity_per_sku=1,
+                    extra_cost=0,
+                    profit_margin=0,
+                    created_at=datetime.utcnow(),
+                    updated_at=datetime.utcnow()
+                )
+                
+                await db_service.create_finished_good(finished_good)
+                logger.info(f"Created finished good for SKU: {sku_id}")
+            except Exception as e:
+                logger.error(f"Failed to create finished good for SKU {sku_id}: {e}")
+                # Don't fail the SKU creation if finished good creation fails
+
         
         if success:
             return {

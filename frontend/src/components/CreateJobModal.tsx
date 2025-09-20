@@ -8,7 +8,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { useToast } from "@/hooks/use-toast";
 import { Plus } from "lucide-react";
 import ColorSwatch from "@/components/ColorSwatch";
-import { useColorPresets } from "@/hooks/useColorPresets";
+import { useColorPresetsContext } from "@/contexts/ColorPresetsContext";
 import { usePrintFiles } from "@/hooks/usePrintFiles";
 import { usePrinters } from "@/hooks/usePrinters";
 import { useTenant } from "@/hooks/useTenant";
@@ -36,7 +36,7 @@ const CreateJobModal = ({ isOpen, onClose, onCreateJob }: CreateJobModalProps) =
   });
   const { toast } = useToast();
   const { tenant } = useTenant();
-  const { colorPresets } = useColorPresets();
+  const { colorPresets } = useColorPresetsContext();
   const { printFiles, loading: filesLoading } = usePrintFiles();
   const { printers, loading: printersLoading } = usePrinters();
 
