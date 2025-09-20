@@ -33,10 +33,10 @@ python test_live_websocket.py
 
 ### Frontend Development
 
-**Frontend Source Location**: `C:/Users/nlsch/pi-frontend-backup-20250918/frontend/`
+**Frontend Source Location**: `C:/Users/nlsch/PrintFarmSoftware-Frontend/frontend/`
 
 ```bash
-cd C:/Users/nlsch/pi-frontend-backup-20250918/frontend
+cd C:/Users/nlsch/PrintFarmSoftware-Frontend/frontend
 
 # Initial setup (first time only)
 npm install --legacy-peer-deps  # Must use legacy peer deps due to dependency conflicts
@@ -55,7 +55,7 @@ npx tsc --noEmit
 #### Frontend Deployment (from local backup)
 ```bash
 # Navigate to frontend backup directory
-cd C:/Users/nlsch/pi-frontend-backup-20250918
+cd C:/Users/nlsch/PrintFarmSoftware-Frontend
 
 # One-command deployment (builds and deploys)
 ./deploy-to-pi.sh
@@ -73,7 +73,7 @@ ssh pi@192.168.4.45 "sudo systemctl restart bambu-program"
 #### Manual Frontend Deployment (if needed)
 ```bash
 # Build frontend first (Pi cannot build Vite)
-cd C:/Users/nlsch/pi-frontend-backup-20250918/frontend
+cd C:/Users/nlsch/PrintFarmSoftware-Frontend/frontend
 npm install --legacy-peer-deps  # If not already done
 npm run build
 
@@ -161,7 +161,7 @@ React application with modern tooling and component architecture:
 ## Critical Development Principles
 
 ### 1. Frontend Must Build Locally
-The Raspberry Pi cannot handle Vite build process. Always build frontend on development machine before deployment. The frontend source is maintained locally at `C:/Users/nlsch/pi-frontend-backup-20250918/frontend/`.
+The Raspberry Pi cannot handle Vite build process. Always build frontend on development machine before deployment. The frontend source is maintained locally at `C:/Users/nlsch/PrintFarmSoftware-Frontend/frontend/`.
 
 ### 2. Type Safety is Required
 Run `npx tsc --noEmit` before any deployment. TypeScript errors must be resolved.
@@ -216,7 +216,7 @@ tail -f /home/pi/PrintFarmSoftware/logs/bambu_program.log
 
 ### On Development Machine (Windows)
 ```
-C:/Users/nlsch/pi-frontend-backup-20250918/
+C:/Users/nlsch/PrintFarmSoftware-Frontend/
 ├── frontend/            # Frontend source code (main development)
 ├── deploy-to-pi.sh      # One-command deployment script
 └── README.md            # Frontend development guide
@@ -243,7 +243,259 @@ C:/Users/nlsch/PrintFarmSoftware/  # (Optional - for backend development)
 
 ### Common Issues and Solutions
 
-1. **Frontend build fails on Pi**: Build on development machine at `C:/Users/nlsch/pi-frontend-backup-20250918/frontend/`, not on Pi
+1. **Frontend build fails on Pi**: Build on development machine at `C:/Users/nlsch/PrintFarmSoftware-Frontend/frontend/`, not on Pi
+2. **npm install issues**: Always use `npm install --legacy-peer-deps` due to dependency conflicts
+3. **TypeScript errors**: Run `npx tsc --noEmit` and fix all errors
+4. **Service won't start**: Check logs with `sudo journalctl -u bambu-program -n 100`
+5. **Database errors**: Check SQLite file permissions in `/home/pi/PrintFarmSoftware/data/`
+6. **Printer connection issues**: Verify printer IPs and access codes in `config/printers.yaml`
+7. **WebSocket disconnects**: Check CORS settings in `config/config.yaml`
+
+### Health Checks
+- API Health: `curl http://192.168.4.45:8080/health`
+- Frontend: Navigate to http://192.168.4.45:8080
+- API Docs: http://192.168.4.45:8080/docs
+- WebSocket: Check console for connection status in browser
+
+## Performance Considerations
+
+### Raspberry Pi Optimizations
+- Hardware acceleration disabled in config for Pi compatibility
+- Connection pooling limited to prevent resource exhaustion
+- Log rotation configured to prevent disk fill
+- SQLite WAL mode enabled for better concurrency
+- Frontend assets optimized and minified in production build
+
+### Database Performance
+- Local SQLite for sub-millisecond response times
+- Asynchronous backup to Supabase to avoid blocking
+- Indexes on frequently queried columns
+- Connection pooling with SQLAlchemy
+
+## Security Notes
+
+- Never commit `.env` files or secrets
+- Printer access codes stored in local config only
+- Supabase RLS policies enforce tenant isolation
+- API authentication required for sensitive endpoints
+- CORS configured for specific origins only
+#### File Editing Method for Claude Code
+
+Claude Code should edit frontend files using Git Bash commands with the local backup directory:
+
+**Read files:**
+```bash
+cat "C:/Users/nlsch/PrintFarmSoftware-Frontend/frontend/src/hooks/usePrinters.ts"
+head -20 "C:/Users/nlsch/PrintFarmSoftware-Frontend/frontend/src/hooks/usePrinters.ts"
+```
+
+**Edit files:**
+```bash
+# Complete file replacement
+cat > "C:/Users/nlsch/PrintFarmSoftware-Frontend/frontend/src/hooks/usePrinters.ts" << 'FILEEOF'
+// New file content here
+FILEEOF
+
+# Targeted replacements  
+sed -i 's/old_text/new_text/g' "C:/Users/nlsch/PrintFarmSoftware-Frontend/frontend/src/hooks/usePrinters.ts"
+```
+
+**CRITICAL:** Claude Code Read/Edit tools do NOT work with Git Bash Windows paths (/c/Users/...). Always use Bash commands for all file operations.
+
+### Deployment Workflows
+
+#### Frontend Deployment (from local backup)
+```bash
+# Navigate to frontend backup directory
+cd C:/Users/nlsch/PrintFarmSoftware-Frontend
+
+# One-command deployment (builds and deploys)
+./deploy-to-pi.sh
+```
+
+#### Backend Deployment
+```bash
+# Deploy backend source code only
+scp -r src/ pi@192.168.4.45:/home/pi/PrintFarmSoftware/
+
+# Restart service
+ssh pi@192.168.4.45 "sudo systemctl restart bambu-program"
+```
+
+#### Manual Frontend Deployment (if needed)
+```bash
+# Build frontend first (Pi cannot build Vite)
+cd C:/Users/nlsch/PrintFarmSoftware-Frontend/frontend
+npm install --legacy-peer-deps  # If not already done
+npm run build
+
+# Deploy built frontend
+scp -r dist/ pi@192.168.4.45:/home/pi/PrintFarmSoftware/frontend/
+
+# Restart service
+ssh pi@192.168.4.45 "sudo systemctl restart bambu-program"
+```
+
+#### Service Management
+```bash
+# Service control
+ssh pi@192.168.4.45 "sudo systemctl restart bambu-program"
+ssh pi@192.168.4.45 "sudo systemctl status bambu-program"
+ssh pi@192.168.4.45 "sudo journalctl -u bambu-program -f"  # View logs
+```
+
+## High-Level Architecture
+
+### Backend Structure (`src/`)
+
+The backend follows a layered architecture with clear separation of concerns:
+
+```
+FastAPI App (main.py)
+    ↓
+API Layer (api/)
+    ↓
+Service Layer (services/)
+    ↓
+Core Layer (core/)
+    ↓
+Data Layer (models/)
+```
+
+**Key Backend Services:**
+- **Printer Management**: Connection pooling, status monitoring, command execution via MQTT
+- **Job Queue**: Intelligent job distribution across printer farm
+- **Sync Service**: Automatic backup from local SQLite to Supabase (5-minute intervals)
+- **WebSocket**: Real-time printer status updates and live job synchronization
+- **Auth Service**: Supabase-based authentication with tenant isolation
+
+### Frontend Architecture (`frontend/src/`)
+
+React application with modern tooling and component architecture:
+
+**Key Frontend Features:**
+- **UI Framework**: shadcn/ui with Radix UI primitives and Tailwind CSS
+- **State Management**: TanStack Query for server state, local contexts for auth
+- **Real-time Updates**: WebSocket integration for live printer status
+- **Data Visualization**: Recharts for analytics and printer metrics
+- **Drag & Drop**: DnD Kit for intuitive print queue management
+
+### Database Architecture
+
+**Hybrid Local-First Design:**
+- **Local SQLite** (`data/tenant.db`): Primary operational database for real-time operations
+- **Supabase**: Cloud backup and multi-tenant data isolation
+- **Sync Strategy**: Write to SQLite first, backup to Supabase automatically
+
+**Local-First Tables** (SQLite primary, Supabase backup):
+- `printers`: Printer configurations and status
+- `products`, `product_skus`: Inventory management
+- `print_jobs`, `print_files`: Job tracking and file associations
+- `color_presets`: Material and color configurations
+
+**Cloud-Only Tables** (Supabase):
+- Authentication and user management
+- Analytics and reporting
+- Multi-tenant configuration
+- System-wide settings
+
+### Printer Integration
+
+**Bambu Lab MQTT Protocol:**
+- Uses `bambulabs_api==2.6.3` for all printer communication
+- Supports all Bambu models: X1 series, P1 series, A1 series
+- Connection manager handles pooling and rate limiting
+- Strict adherence to [official API documentation](https://bambutools.github.io/bambulabs_api/index.html)
+
+**Current Printer Configuration:**
+- Configuration in `config/printers.yaml`
+
+## Critical Development Principles
+
+### 1. Frontend Must Build Locally
+The Raspberry Pi cannot handle Vite build process. Always build frontend on development machine before deployment. The frontend source is maintained locally at `C:/Users/nlsch/PrintFarmSoftware-Frontend/frontend/`.
+
+### 2. Type Safety is Required
+Run `npx tsc --noEmit` before any deployment. TypeScript errors must be resolved.
+
+### 3. Test on Target Hardware
+Always test on the production Pi (192.168.4.45) before considering changes complete.
+
+### 4. Commit Everything to GitHub
+All changes must be committed to the `development` branch. Never leave uncommitted work.
+
+### 5. Follow Existing Patterns
+Study neighboring files and existing implementations before adding new features. Maintain consistency with established patterns.
+
+## Service Management
+
+### Systemd Service
+- Service name: `bambu-program`
+- Config: `/etc/systemd/system/bambu-program.service`
+- Auto-restart on failure with proper dependency management
+
+### Common Service Commands
+```bash
+# On the Pi
+sudo systemctl start bambu-program
+sudo systemctl stop bambu-program
+sudo systemctl restart bambu-program
+sudo systemctl status bambu-program
+
+# View logs
+sudo journalctl -u bambu-program -f
+sudo journalctl -u bambu-program --since "1 hour ago"
+
+# Log files
+tail -f /home/pi/PrintFarmSoftware/logs/bambu_program.log
+```
+
+## Testing Strategy
+
+### Backend Testing
+- **Unit Tests**: Test individual services and utilities
+- **Integration Tests**: Test printer communication and database operations
+- **WebSocket Tests**: Verify real-time functionality
+- **Live Hardware Tests**: Test with actual printers connected
+
+### Frontend Testing
+- **Type Checking**: TypeScript compilation must pass
+- **Linting**: ESLint must pass without errors
+- **Manual Testing**: Test on actual Pi hardware at 192.168.4.45
+- **Browser Testing**: Verify on Chrome browser
+
+## Important File Locations
+
+### On Development Machine (Windows)
+```
+C:/Users/nlsch/PrintFarmSoftware-Frontend/
+├── frontend/            # Frontend source code (main development)
+├── deploy-to-pi.sh      # One-command deployment script
+└── README.md            # Frontend development guide
+
+C:/Users/nlsch/PrintFarmSoftware/  # (Optional - for backend development)
+├── src/                 # Backend source
+├── config/              # Configuration files
+└── requirements.txt     # Python dependencies
+```
+
+### On Raspberry Pi
+```
+/home/pi/PrintFarmSoftware/
+├── src/                 # Backend source
+├── frontend/dist/       # Built frontend
+├── config/              # Configuration
+├── data/                # SQLite databases
+├── logs/                # Application logs
+├── venv/                # Python virtual environment
+└── files/               # Uploaded print files
+```
+
+## Troubleshooting
+
+### Common Issues and Solutions
+
+1. **Frontend build fails on Pi**: Build on development machine at `C:/Users/nlsch/PrintFarmSoftware-Frontend/frontend/`, not on Pi
 2. **npm install issues**: Always use `npm install --legacy-peer-deps` due to dependency conflicts
 3. **TypeScript errors**: Run `npx tsc --noEmit` and fix all errors
 4. **Service won't start**: Check logs with `sudo journalctl -u bambu-program -n 100`
