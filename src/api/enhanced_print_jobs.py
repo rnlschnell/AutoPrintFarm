@@ -13,17 +13,79 @@ from typing import Optional, Dict, Any
 from datetime import datetime
 import asyncio
 import re
+from sqlalchemy import text
 
 from ..services.config_service import get_config_service
 from ..utils.tenant_utils import get_tenant_id_or_raise
 from ..services.database_service import get_database_service
 from ..services.job_queue_service import job_queue_service, JobPriority
 from ..core.printer_client import printer_manager
-from supabase import create_client, Client
+from ..utils.validators import sanitize_bambu_filename
 from ..services.auth_service import get_auth_service
-from ..services.sync_service import get_sync_service
 
 logger = logging.getLogger(__name__)
+
+def normalize_printer_model(printer_model: str) -> Optional[str]:
+    """
+    Normalize printer model names to Bambu code IDs
+
+    Maps human-readable printer model names to internal Bambu codes used in 3MF files.
+    Handles variations in naming (spaces, casing, etc.)
+
+    Args:
+        printer_model: Human-readable printer model name (e.g., "A1 Mini", "P1S", "X1-Carbon")
+
+    Returns:
+        Bambu model code (N1, N2S, P1P, P1S, X1, X1C, X1E) or None if not recognized
+
+    Examples:
+        >>> normalize_printer_model("A1 Mini")
+        'N1'
+        >>> normalize_printer_model("A1")
+        'N2S'
+        >>> normalize_printer_model("P1S")
+        'P1S'
+    """
+    if not printer_model:
+        return None
+
+    # Normalize input: strip whitespace, convert to lowercase for comparison
+    model_clean = printer_model.strip().lower().replace('-', ' ')
+
+    # Mapping of printer model names to Bambu codes
+    # Key is lowercase normalized name, value is Bambu code
+    model_map = {
+        'a1 mini': 'N1',
+        'a1mini': 'N1',
+        'a1m': 'N1',
+        'n1': 'N1',
+
+        'a1': 'N2S',
+        'n2s': 'N2S',
+
+        'p1p': 'P1P',
+
+        'p1s': 'P1S',
+
+        'x1': 'X1',
+
+        'x1 carbon': 'X1C',
+        'x1carbon': 'X1C',
+        'x1c': 'X1C',
+
+        'x1 enterprise': 'X1E',
+        'x1enterprise': 'X1E',
+        'x1e': 'X1E',
+    }
+
+    normalized_code = model_map.get(model_clean)
+
+    if normalized_code:
+        logger.debug(f"Normalized printer model '{printer_model}' to code '{normalized_code}'")
+    else:
+        logger.warning(f"Unknown printer model: '{printer_model}'")
+
+    return normalized_code
 
 def clean_filename(filename: str) -> str:
     """
@@ -51,16 +113,6 @@ def clean_filename(filename: str) -> str:
         cleaned = base_name + extension
     
     return cleaned
-
-# Supabase client initialization
-async def get_supabase_client() -> Client:
-    """Get Supabase client instance from sync service"""
-    sync_service = await get_sync_service()
-    if not sync_service:
-        logger.error("Sync service not available")
-        raise Exception("Sync service not available")
-    
-    return sync_service.supabase
 
 router = APIRouter(
     prefix="/enhanced-print-jobs",
@@ -105,7 +157,22 @@ async def validate_printer_connection(printer_id: str, user_action: bool = True)
             }
         
         printer_name = f"{target_printer.get('name', 'Unknown')} ({target_printer.get('model', 'Unknown')})"
-        
+
+        # Check if printer is in maintenance mode
+        is_in_maintenance = target_printer.get("in_maintenance", False)
+        if is_in_maintenance:
+            maintenance_type = target_printer.get("maintenance_type", "")
+            logger.warning(f"Printer {printer_id} ({printer_name}) is in maintenance mode")
+            error_msg = f"Printer '{printer_name}' is currently in maintenance mode and cannot accept new jobs."
+            if maintenance_type:
+                error_msg += f" Maintenance type: {maintenance_type}"
+            return {
+                "valid": False,
+                "error": error_msg,
+                "printer_name": printer_name,
+                "maintenance_type": maintenance_type
+            }
+
         # Check if printer is connected and do real connection test
         is_connected = target_printer.get("connected", False)
         logger.info(f"Printer {printer_id} basic connection status: {is_connected}")
@@ -122,6 +189,7 @@ async def validate_printer_connection(printer_id: str, user_action: bool = True)
                     return {
                         "valid": True,
                         "printer_name": printer_name,
+                        "printer_model": target_printer.get('model', 'Unknown'),
                         "status": "connected",
                         "connection_test": "passed"
                     }
@@ -132,6 +200,7 @@ async def validate_printer_connection(printer_id: str, user_action: bool = True)
                         return {
                             "valid": True,
                             "printer_name": printer_name,
+                            "printer_model": target_printer.get('model', 'Unknown'),
                             "status": "connected",
                             "connection_test": "warning",
                             "warning": f"Status check failed: {str(status_error)}"
@@ -151,6 +220,7 @@ async def validate_printer_connection(printer_id: str, user_action: bool = True)
                 return {
                     "valid": True,
                     "printer_name": printer_name,
+                    "printer_model": target_printer.get('model', 'Unknown'),
                     "status": "connected",
                     "connection_test": "no_client",
                     "warning": "Marked as connected but client not available"
@@ -163,6 +233,7 @@ async def validate_printer_connection(printer_id: str, user_action: bool = True)
                 return {
                     "valid": True,
                     "printer_name": printer_name,
+                    "printer_model": target_printer.get('model', 'Unknown'),
                     "status": "connected",
                     "connection_test": "error",
                     "warning": f"Client error: {str(client_error)}"
@@ -186,6 +257,7 @@ class CreateJobRequest(BaseModel):
     """Request model for creating enhanced print jobs"""
     job_type: str  # 'print_file' or 'product'
     target_id: str  # print_file_id or product_id
+    product_sku_id: Optional[str] = None  # SKU id for product variants
     printer_id: str
     color: str
     filament_type: str
@@ -244,11 +316,15 @@ async def create_enhanced_print_job(
             )
         
         logger.info(f"✓ Printer validation passed: {validation_result['printer_name']} - {validation_result.get('status', 'connected')}")
-        
+
+        # Get printer model for file selection
+        printer_model = validation_result.get('printer_model')
+        logger.info(f"Printer model: {printer_model}")
+
         # Get file path based on job type with enhanced error handling
         logger.info("Step 3: Getting file information")
         try:
-            file_info = await _get_file_info(request.job_type, request.target_id, tenant_id)
+            file_info = await _get_file_info(request.job_type, request.target_id, tenant_id, printer_model)
             logger.info(f"File info retrieved: {file_info}")
             
             if not file_info["exists"]:
@@ -335,6 +411,93 @@ async def create_enhanced_print_job(
                 detail=f"Failed to resolve printer reference: {str(resolve_error)}"
             )
         
+        # Get object_count from the selected print file and fetch SKU data if product_sku_id is provided
+        requires_assembly = False
+        quantity_per_print = 1
+        current_stock = 0
+        projected_stock = 0
+
+        # Initialize new denormalized fields
+        product_id = None
+        product_name = None
+        sku_name = None
+        filament_grams = None
+        estimated_time_minutes = None
+        printer_model = None
+
+        # Get print file metadata (object_count, filament_weight, print_time)
+        try:
+            print_file = await db_service.get_print_file_by_id(file_info["print_file_id"])
+            if print_file:
+                # Get object count
+                if print_file.object_count:
+                    quantity_per_print = print_file.object_count
+                    logger.info(f"Using object_count from print file: {quantity_per_print}")
+                else:
+                    quantity_per_print = 1
+                    logger.info(f"Print file object_count is null or 0, defaulting to 1")
+
+                # Get filament weight in grams (multiply by 100 for centrigram storage)
+                if print_file.filament_weight_grams:
+                    filament_grams = int(print_file.filament_weight_grams * 100)
+                    logger.info(f"Filament needed: {print_file.filament_weight_grams}g (stored as {filament_grams} centrigrams)")
+
+                # Get print time in minutes
+                if print_file.print_time_seconds:
+                    estimated_time_minutes = int(print_file.print_time_seconds / 60)
+                    logger.info(f"Estimated print time: {estimated_time_minutes} minutes")
+        except Exception as file_error:
+            logger.warning(f"Failed to fetch print file metadata: {file_error}, using defaults")
+            quantity_per_print = 1
+
+        # Get printer model and name
+        printer_name = None
+        try:
+            printer = await db_service.get_printer_by_id(printer_uuid)
+            if printer:
+                if printer.model:
+                    printer_model = printer.model
+                if printer.name:
+                    printer_name = printer.name
+                    logger.info(f"Printer name captured: '{printer_name}'")
+                else:
+                    logger.warning(f"Printer {printer_uuid} has no name field set")
+                logger.info(f"Printer: {printer_name} - {printer_model}")
+            else:
+                logger.warning(f"Printer {printer_uuid} not found in database")
+        except Exception as printer_error:
+            logger.warning(f"Failed to fetch printer data: {printer_error}")
+
+        if hasattr(request, 'product_sku_id') and request.product_sku_id:
+            logger.info(f"Fetching SKU data for {request.product_sku_id}")
+            try:
+                # Get the SKU details
+                sku = await db_service.get_product_sku_by_id(request.product_sku_id)
+                if sku:
+                    # Extract SKU name (the code like "BAGCLIP-RED-001")
+                    sku_name = sku.sku
+                    product_id = sku.product_id
+                    logger.info(f"SKU name: {sku_name}, Product ID: {product_id}")
+
+                    # Get product to check assembly requirement and get product name
+                    product = await db_service.get_product_by_id(request.target_id)
+                    if product:
+                        requires_assembly = product.requires_assembly
+                        product_name = product.name
+                        logger.info(f"Product name: {product_name}, Requires assembly: {requires_assembly}")
+
+                    # Get current finished goods stock for this SKU
+                    finished_good = await db_service.get_finished_good_by_sku_id(request.product_sku_id)
+                    if finished_good:
+                        current_stock = finished_good.current_stock or 0
+
+                    # Calculate projected stock
+                    projected_stock = current_stock + quantity_per_print
+
+                    logger.info(f"SKU data: quantity_per_print={quantity_per_print}, assembly={requires_assembly}, current_stock={current_stock}, projected_stock={projected_stock}")
+            except Exception as sku_error:
+                logger.warning(f"Failed to fetch SKU data: {sku_error}")
+
         # Prepare job data for database
         job_data = {
             "printer_id": printer_uuid,  # Use resolved UUID for foreign key
@@ -348,7 +511,19 @@ async def create_enhanced_print_job(
             "priority": request.priority,
             "progress_percentage": 0,
             "time_submitted": datetime.utcnow(),
-            "tenant_id": tenant_id
+            "tenant_id": tenant_id,
+            "product_sku_id": request.product_sku_id if hasattr(request, "product_sku_id") else None,
+            "requires_assembly": requires_assembly,
+            "quantity_per_print": quantity_per_print,
+            # Denormalized fields for reporting
+            "product_id": product_id,
+            "product_name": product_name,
+            "sku_name": sku_name,
+            "filament_needed_grams": filament_grams,
+            "estimated_print_time_minutes": estimated_time_minutes,
+            "printer_numeric_id": request.printer_id,  # Numeric ID passed in request
+            "printer_model": printer_model,
+            "printer_name": printer_name
         }
         
         # Create job in local database first (source of truth)
@@ -432,7 +607,10 @@ async def create_enhanced_print_job(
                     "target_id": request.target_id,
                     "printer_id": request.printer_id,
                     "copies": request.copies,
-                    "auto_start": request.start_print
+                    "auto_start": request.start_print,
+                    "quantity_per_print": quantity_per_print,
+                    "current_stock": current_stock,
+                    "projected_stock": projected_stock
                 }
             )
         else:
@@ -462,7 +640,10 @@ async def create_enhanced_print_job(
                     "target_id": request.target_id,
                     "printer_id": request.printer_id,
                     "copies": request.copies,
-                    "auto_start": request.start_print
+                    "auto_start": request.start_print,
+                    "quantity_per_print": quantity_per_print,
+                    "current_stock": current_stock,
+                    "projected_stock": projected_stock
                 }
             )
         
@@ -472,12 +653,23 @@ async def create_enhanced_print_job(
         logger.error(f"Failed to create enhanced print job: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-async def _get_file_info(job_type: str, target_id: str, tenant_id: str) -> Dict[str, Any]:
-    """Get file information based on job type"""
-    
+async def _get_file_info(job_type: str, target_id: str, tenant_id: str, printer_model: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Get file information based on job type with model-aware selection for products
+
+    Args:
+        job_type: Type of job ('print_file' or 'product')
+        target_id: ID of print file or product
+        tenant_id: Tenant ID
+        printer_model: Printer model name (e.g., 'A1 Mini', 'P1S') for model-aware file selection
+
+    Returns:
+        Dictionary with file information including path, filename, and metadata
+    """
+
     if job_type == "print_file":
-        # Direct print file access - check for all supported extensions
-        files_dir = Path("/home/pi/PrintFarmSoftware/files/print_files") / tenant_id
+        # Direct print file access - check for all supported extensions (tenant-agnostic)
+        files_dir = Path("/home/pi/PrintFarmSoftware/files/print_files")
         supported_extensions = ['.3mf', '.stl', '.gcode', '.obj', '.amf']
         file_path = None
         actual_extension = None
@@ -526,55 +718,113 @@ async def _get_file_info(job_type: str, target_id: str, tenant_id: str) -> Dict[
         }
         
     elif job_type == "product":
-        # Product-linked file access
+        # Product-linked file access with model-aware selection
         db_service = await get_database_service()
         product = await db_service.get_product_by_id(target_id)
-        
+
         if not product:
             raise HTTPException(status_code=404, detail="Product not found")
-        
-        if not product.print_file_id:
-            raise HTTPException(status_code=404, detail="Product has no associated print file")
-        
-        # Check for all supported extensions
-        files_dir = Path("/home/pi/PrintFarmSoftware/files/print_files") / tenant_id
+
+        # Step 1: Try model-specific file if printer_model is provided
+        selected_print_file = None
+        selection_method = "unknown"
+
+        if printer_model:
+            # Normalize printer model to Bambu code (e.g., "A1 Mini" -> "N1")
+            model_code = normalize_printer_model(printer_model)
+            logger.info(f"Looking for print file for product {target_id} with model code: {model_code}")
+
+            if model_code:
+                # Try to get model-specific file
+                model_specific_file = await db_service.get_print_file_by_product_and_model(target_id, model_code)
+                if model_specific_file:
+                    selected_print_file = model_specific_file
+                    selection_method = f"model_specific_{model_code}"
+                    logger.info(f"Found model-specific file for {model_code}: {model_specific_file.id}")
+
+        # Step 2: Fall back to default file ONLY if no printer_model was specified
+        if not selected_print_file:
+            if printer_model:
+                # If a specific printer model was requested but not found, do NOT fall back
+                # This prevents sending incompatible files to printers
+                model_code = normalize_printer_model(printer_model)
+                error_msg = f"No print file found for product '{product.name}' compatible with printer model '{printer_model}' (code: {model_code}). "
+                error_msg += "Please upload a print file for this printer model."
+                logger.error(error_msg)
+                raise HTTPException(status_code=404, detail=error_msg)
+            else:
+                # If no printer model specified, fallback to default is OK
+                logger.info(f"No model-specific file found, trying default file for product {target_id}")
+                default_file = await db_service.get_default_print_file_by_product(target_id)
+                if default_file:
+                    selected_print_file = default_file
+                    selection_method = "default_fallback"
+                    logger.info(f"Found default file: {default_file.id}")
+
+        # Step 3: Fall back to legacy products.print_file_id if no files found in print_files table
+        if not selected_print_file and product.print_file_id:
+            logger.info(f"No files found in print_files table, using legacy product.print_file_id: {product.print_file_id}")
+            legacy_file = await db_service.get_print_file_by_id(product.print_file_id)
+            if legacy_file:
+                selected_print_file = legacy_file
+                selection_method = "legacy_product_reference"
+                logger.info(f"Using legacy file reference: {legacy_file.id}")
+
+        # Step 4: Raise error if no file found
+        if not selected_print_file:
+            error_msg = f"No print file found for product '{product.name}'"
+            if printer_model:
+                model_code = normalize_printer_model(printer_model)
+                error_msg += f" compatible with printer model '{printer_model}' (code: {model_code}). "
+                error_msg += "Please upload a print file for this printer model or a default file."
+            else:
+                error_msg += ". Please upload a print file for this product."
+
+            logger.error(error_msg)
+            raise HTTPException(status_code=404, detail=error_msg)
+
+        # Step 5: Locate the physical file on disk
+        files_dir = Path("/home/pi/PrintFarmSoftware/files/print_files")
         supported_extensions = ['.3mf', '.stl', '.gcode', '.obj', '.amf']
         file_path = None
         actual_extension = None
-        
+
         for ext in supported_extensions:
-            potential_path = files_dir / f"{product.print_file_id}{ext}"
+            potential_path = files_dir / f"{selected_print_file.id}{ext}"
             if potential_path.exists():
                 file_path = potential_path
                 actual_extension = ext
                 break
-        
+
         if not file_path:
             # Default to .3mf if no file found (for error message)
-            file_path = files_dir / f"{product.print_file_id}.3mf"
+            file_path = files_dir / f"{selected_print_file.id}.3mf"
             actual_extension = ".3mf"
-        
-        # Use clean filename from product (authoritative source) or fallback to print_file  
+
+        # Step 6: Determine display filename
         if product.file_name:
             # Use clean filename from products table (authoritative source)
             filename = product.file_name
+        elif selected_print_file.name:
+            # Use filename from print_file record
+            filename = clean_filename(selected_print_file.name)
         else:
-            # Fallback: get from print_file and clean it, or use product-based name
-            print_file = await db_service.get_print_file_by_id(product.print_file_id)
-            if print_file and print_file.name:
-                filename = clean_filename(print_file.name)
-            else:
-                filename = f"{product.name}_{product.print_file_id}{actual_extension}"
-        
+            # Generate filename from product name
+            filename = f"{product.name}_{selected_print_file.id}{actual_extension}"
+
+        logger.info(f"Selected file {selected_print_file.id} for product {target_id} using {selection_method} method")
+
         return {
-            "print_file_id": product.print_file_id,
+            "print_file_id": selected_print_file.id,
             "local_path": str(file_path),
             "filename": filename,
             "exists": file_path.exists(),
             "expected_path": str(file_path),
             "source_type": "product_linked",
             "product_name": product.name,
-            "product_id": target_id
+            "product_id": target_id,
+            "selection_method": selection_method,
+            "printer_model_id": selected_print_file.printer_model_id
         }
     else:
         raise HTTPException(status_code=400, detail=f"Invalid job_type: {job_type}")
@@ -666,52 +916,50 @@ async def _process_print_job(
         
         # Send file to printer using Bambu Lab API
         try:
+            # Sanitize filename ONCE before upload for Bambu Lab compatibility
+            sanitized_filename = sanitize_bambu_filename(file_info["filename"])
+
             logger.info(f"Step 6: Starting file upload to printer")
             logger.info(f"Upload details:")
             logger.info(f"  - File path: {file_path}")
-            logger.info(f"  - File name: {file_info['filename']}")
+            logger.info(f"  - Original filename: {file_info['filename']}")
+            logger.info(f"  - Sanitized filename: {sanitized_filename}")
             logger.info(f"  - Target printer: {request.printer_id}")
-            
-            # Upload file to printer using printer_manager method (not raw client)
+
+            # Upload file with sanitized filename
             upload_result = await printer_manager.upload_file(
                 printer_id=request.printer_id,
                 file_path=str(file_path),
-                filename=file_info["filename"]
+                filename=sanitized_filename
             )
-            
+
             logger.info(f"Upload result: {upload_result}")
-            
+
             if not upload_result.get("success", False):
                 logger.error(f"File upload failed: {upload_result}")
                 raise Exception(f"File upload failed: {upload_result.get('message', 'Unknown error')}")
-            
+
             logger.info(f"✓ File uploaded successfully to printer {request.printer_id}: {upload_result.get('message')}")
-            
+
             # Update progress - file uploaded
             await _update_job_status(job_id, "processing", 80, tenant_id, db_service)
-            
+
             result = {
                 "success": True,
                 "upload_result": upload_result,
                 "print_job": {"started": False},
                 "message": "File uploaded to printer successfully"
             }
-            
+
             if request.start_print:
-                # Start printing the uploaded file
+                # Start printing with the same sanitized filename we uploaded
                 logger.info(f"Step 7: Starting print on printer {request.printer_id}")
                 logger.info(f"Print start requested: {request.start_print}")
-                
-                # Get the file info from upload result to start print
-                uploaded_file_info = upload_result.get("file_info", {})
-                logger.info(f"Using uploaded file info: {uploaded_file_info}")
-                
-                filename_to_print = uploaded_file_info.get("filename", file_info["filename"])
-                logger.info(f"Starting print with filename: {filename_to_print}")
-                
+                logger.info(f"Starting print with sanitized filename: {sanitized_filename}")
+
                 start_result = await printer_manager.start_print(
                     printer_id=request.printer_id,
-                    filename=filename_to_print,
+                    filename=sanitized_filename,
                     use_ams=request.use_ams,
                     # Note: color/material settings would be handled by printer if supported
                 )
@@ -864,6 +1112,134 @@ async def cancel_queue_job(queue_job_id: str):
         logger.error(f"Failed to cancel queue job {queue_job_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.get("/object-count")
+async def get_object_count(
+    product_id: str,
+    printer_id: str,
+    product_sku_id: Optional[str] = None,
+    fastapi_request: Request = None
+):
+    """
+    Get object count and projected stock for a product/printer combination.
+
+    This endpoint helps the frontend display accurate stock projections before creating a print job.
+    It retrieves the object count from the appropriate print file based on the selected printer model,
+    and calculates the projected stock level if a SKU is provided.
+
+    Args:
+        product_id: ID of the product
+        printer_id: ID of the target printer
+        product_sku_id: Optional SKU ID for stock calculation
+
+    Returns:
+        object_count: Number of objects in the print file (null if no file found)
+        current_stock: Current stock level (null if no SKU provided)
+        projected_stock: Projected stock after print (null if no SKU or no file)
+        requires_assembly: Whether product requires assembly
+        print_file_id: ID of the selected print file (null if no file found)
+    """
+    try:
+        # Get tenant ID from request
+        tenant_id = get_tenant_id_or_raise(fastapi_request)
+        logger.info(f"Getting object count for product {product_id}, printer {printer_id}, tenant {tenant_id}")
+
+        # Get database service
+        db_service = await get_database_service()
+
+        # First, query database to get the numeric printer_id from the UUID
+        # The frontend sends UUID (id field), but printer_manager uses numeric IDs from YAML config
+        async with db_service.get_session() as session:
+            result = await session.execute(
+                text("SELECT printer_id FROM printers WHERE id = :printer_id"),
+                {"printer_id": printer_id}
+            )
+            printer_record = result.fetchone()
+
+        if not printer_record:
+            raise HTTPException(status_code=404, detail=f"Printer {printer_id} not found in database")
+
+        numeric_printer_id = printer_record[0]
+        logger.info(f"Mapped printer UUID {printer_id} to numeric ID {numeric_printer_id}")
+
+        # Get printer info to determine model using the numeric ID
+        printer = None
+        printers_list = printer_manager.list_printers()
+        for p in printers_list:
+            # Match using the numeric ID from database
+            if str(p.get("id")) == str(numeric_printer_id):
+                printer = p
+                break
+
+        if not printer:
+            raise HTTPException(status_code=404, detail=f"Printer with numeric ID {numeric_printer_id} not found in printer config")
+
+        printer_model = printer.get("model")
+        logger.info(f"Printer model: {printer_model}")
+
+        # Get print file info using existing logic
+        try:
+            file_info = await _get_file_info("product", product_id, tenant_id, printer_model)
+            print_file_id = file_info.get("print_file_id")
+        except HTTPException as e:
+            # No print file found for this product/printer combination
+            logger.warning(f"No print file found for product {product_id}, printer model {printer_model}: {e.detail}")
+            return {
+                "object_count": None,
+                "current_stock": None,
+                "projected_stock": None,
+                "requires_assembly": False,
+                "print_file_id": None,
+                "error": e.detail
+            }
+
+        # Get object count from print file
+        object_count = 1  # Default
+        try:
+            print_file = await db_service.get_print_file_by_id(print_file_id)
+            if print_file and print_file.object_count:
+                object_count = print_file.object_count
+                logger.info(f"Object count from print file: {object_count}")
+            else:
+                logger.warning(f"Print file {print_file_id} has no object_count, defaulting to 1")
+        except Exception as e:
+            logger.warning(f"Failed to get print file object_count: {e}, defaulting to 1")
+
+        # Get product to check if assembly is required
+        product = await db_service.get_product_by_id(product_id)
+        requires_assembly = product.requires_assembly if product else False
+
+        # Get current stock and calculate projected stock if SKU provided
+        current_stock = None
+        projected_stock = None
+
+        if product_sku_id:
+            try:
+                # Get finished goods record
+                finished_good = await db_service.get_finished_good_by_sku_id(product_sku_id)
+                if finished_good:
+                    # Use assembly-adjusted stock to match what's displayed to the user
+                    current_stock = (finished_good.quantity_assembled or 0) + (finished_good.quantity_needs_assembly or 0)
+                    projected_stock = current_stock + object_count
+                    logger.info(f"Current stock: {current_stock}, Projected stock: {projected_stock}")
+                else:
+                    logger.warning(f"No finished goods record found for SKU {product_sku_id}")
+            except Exception as e:
+                logger.warning(f"Failed to get stock info for SKU {product_sku_id}: {e}")
+
+        return {
+            "object_count": object_count,
+            "current_stock": current_stock,
+            "projected_stock": projected_stock,
+            "requires_assembly": requires_assembly,
+            "print_file_id": print_file_id
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get object count: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.post("/validate")
 async def validate_job_request(request: CreateJobRequest, fastapi_request: Request):
     """Validate a job request without creating it"""
@@ -879,17 +1255,20 @@ async def validate_job_request(request: CreateJobRequest, fastapi_request: Reque
         
         # Validate printer using centralized function
         validation_result = await validate_printer_connection(request.printer_id, user_action=True)
-        
+
         if not validation_result["valid"]:
             validation_results["valid"] = False
             validation_results["errors"].append(validation_result["error"])
         else:
             if validation_result.get("status") == "connected_on_demand":
                 validation_results["warnings"].append("Printer was connected on-demand for this request")
-        
+
+        # Get printer model for file selection
+        printer_model = validation_result.get('printer_model')
+
         # Validate file availability
         try:
-            file_info = await _get_file_info(request.job_type, request.target_id, tenant_id)
+            file_info = await _get_file_info(request.job_type, request.target_id, tenant_id, printer_model)
             if not file_info["exists"]:
                 validation_results["valid"] = False
                 validation_results["errors"].append(f"Print file not available: {file_info['expected_path']}")
@@ -932,65 +1311,48 @@ async def validate_job_request(request: CreateJobRequest, fastapi_request: Reque
         raise HTTPException(status_code=500, detail=str(e))
 
 async def _update_job_status(job_id: str, status: str, progress: int, tenant_id: str, db_service):
-    """Update job status in Supabase first (single source of truth)"""
+    """Update job status in local database only (source of truth)"""
     try:
-        # Update Supabase first
-        supabase = await get_supabase_client()
-        result = supabase.table('print_jobs').update({
+        await db_service.update_print_job(job_id, {
             "status": status,
             "progress_percentage": progress
-        }).eq('id', job_id).execute()
-        
-        logger.debug(f"✓ Job {job_id} status updated in Supabase: {status} ({progress}%)")
-        
-        # Local database will be updated automatically via real-time sync
-        
+        }, tenant_id)
+        logger.debug(f"✓ Job {job_id} status updated locally: {status} ({progress}%)")
     except Exception as e:
-        logger.error(f"Failed to update job {job_id} status in Supabase: {e}")
+        logger.error(f"Failed to update job {job_id} status locally: {e}")
         # Don't raise - allow processing to continue even if status update fails
         # The job will still process, just may not show correct status
 
 async def _update_job_status_with_times(job_id: str, status: str, progress: int, time_started, time_completed, tenant_id: str, db_service):
-    """Update job status with time fields in Supabase first (single source of truth)"""
+    """Update job status with time fields in local database only (source of truth)"""
     try:
-        # Update Supabase first
-        supabase = await get_supabase_client()
-        supabase_update = {
+        update_data = {
             "status": status,
             "progress_percentage": progress
         }
         if time_started is not None:
-            supabase_update["time_started"] = time_started.isoformat() if hasattr(time_started, 'isoformat') else str(time_started)
+            update_data["time_started"] = time_started
         if time_completed is not None:
-            supabase_update["time_completed"] = time_completed.isoformat() if hasattr(time_completed, 'isoformat') else str(time_completed)
-            
-        result = supabase.table('print_jobs').update(supabase_update).eq('id', job_id).execute()
-        logger.debug(f"✓ Job {job_id} status updated in Supabase with times: {status}")
-        
-        # Local database will be updated automatically via real-time sync
-        
+            update_data["time_completed"] = time_completed
+
+        await db_service.update_print_job(job_id, update_data, tenant_id)
+        logger.debug(f"✓ Job {job_id} status updated locally with times: {status}")
     except Exception as e:
-        logger.error(f"Failed to update job {job_id} status with times in Supabase: {e}")
+        logger.error(f"Failed to update job {job_id} status with times locally: {e}")
         # Don't raise - allow processing to continue even if status update fails
 
 async def _update_job_status_with_failure(job_id: str, failure_reason: str, tenant_id: str, db_service):
-    """Update job status to failed with failure reason in Supabase first (single source of truth)"""
+    """Update job status to failed with failure reason in local database only (source of truth)"""
     try:
-        # Update Supabase first
-        supabase = await get_supabase_client()
-        result = supabase.table('print_jobs').update({
+        await db_service.update_print_job(job_id, {
             "status": "failed",
             "progress_percentage": 0,
             "failure_reason": failure_reason,
-            "time_completed": datetime.utcnow().isoformat()
-        }).eq('id', job_id).execute()
-        
-        logger.debug(f"✓ Job {job_id} marked as failed in Supabase")
-        
-        # Local database will be updated automatically via real-time sync
-        
+            "time_completed": datetime.utcnow()
+        }, tenant_id)
+        logger.debug(f"✓ Job {job_id} marked as failed locally")
     except Exception as e:
-        logger.error(f"Failed to update job {job_id} failure status in Supabase: {e}")
+        logger.error(f"Failed to update job {job_id} failure status locally: {e}")
         # Don't raise - allow processing to continue
 
 async def _resolve_printer_uuid(printer_id: str, db_service, tenant_id: str) -> Optional[str]:

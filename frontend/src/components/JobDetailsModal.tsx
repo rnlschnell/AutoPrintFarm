@@ -1,4 +1,3 @@
-
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -6,15 +5,57 @@ import { Separator } from "@/components/ui/separator";
 import { Progress } from "@/components/ui/progress";
 import { FileText, Package, Clock, Calendar, Printer } from "lucide-react";
 import ColorSwatch from "@/components/ColorSwatch";
+import { FrontendPrintJob } from "@/lib/transformers";
 
 interface JobDetailsModalProps {
-  job: any | null;
+  job: FrontendPrintJob | null;
   isOpen: boolean;
   onClose: () => void;
 }
 
 const JobDetailsModal = ({ job, isOpen, onClose }: JobDetailsModalProps) => {
   if (!job) return null;
+
+  // Helper function to format time ago
+  const formatTimeAgo = (isoDate?: string): string => {
+    if (!isoDate) return 'N/A';
+    const date = new Date(isoDate);
+    const now = new Date();
+    const diffMs = now.getTime() - date.getTime();
+    const diffMins = Math.floor(diffMs / 60000);
+    const diffHours = Math.floor(diffMins / 60);
+    const diffDays = Math.floor(diffHours / 24);
+
+    if (diffDays > 0) return `${diffDays} day${diffDays > 1 ? 's' : ''} ago`;
+    if (diffHours > 0) return `${diffHours} hour${diffHours > 1 ? 's' : ''} ago`;
+    if (diffMins > 0) return `${diffMins} minute${diffMins > 1 ? 's' : ''} ago`;
+    return 'Just now';
+  };
+
+  // Helper function to format duration from minutes
+  const formatDuration = (minutes?: number): string => {
+    if (!minutes) return 'N/A';
+    const hours = Math.floor(minutes / 60);
+    const mins = minutes % 60;
+    if (hours > 0) {
+      return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`;
+    }
+    return `${mins}m`;
+  };
+
+  // Helper function to format date/time
+  const formatDateTime = (isoDate?: string): string => {
+    if (!isoDate) return 'N/A';
+    const date = new Date(isoDate);
+    return date.toLocaleString();
+  };
+
+  // Helper function to calculate remaining time
+  const calculateRemainingTime = (estimatedMins?: number, progressPercent?: number): string => {
+    if (!estimatedMins || !progressPercent || progressPercent === 0) return 'N/A';
+    const remainingMins = Math.ceil((estimatedMins * (100 - progressPercent)) / 100);
+    return formatDuration(remainingMins);
+  };
 
   const getBadgeVariant = (status: string) => {
     switch (status) {
@@ -52,8 +93,8 @@ const JobDetailsModal = ({ job, isOpen, onClose }: JobDetailsModalProps) => {
               </div>
             </div>
             <div className="space-y-2">
-              <span className="text-sm font-medium text-muted-foreground">Source</span>
-              <p className="text-lg">{job.source || 'Manual'}</p>
+              <span className="text-sm font-medium text-muted-foreground">Submitted By</span>
+              <p className="text-lg">{job.submittedBy || 'System'}</p>
             </div>
           </div>
 
@@ -63,24 +104,10 @@ const JobDetailsModal = ({ job, isOpen, onClose }: JobDetailsModalProps) => {
             <h3 className="text-lg font-medium">Job Information</h3>
             <div className="grid grid-cols-2 gap-4 text-sm">
               <div className="flex items-center gap-2">
-                <Package className="h-4 w-4 text-muted-foreground" />
-                <div>
-                  <p className="text-muted-foreground">SKU</p>
-                  <p className="font-medium">SKU-{job.fileName.replace(/\.[^/.]+$/, "").slice(0, 6).toUpperCase()}</p>
-                </div>
-              </div>
-              <div className="flex items-center gap-2">
-                <Calendar className="h-4 w-4 text-muted-foreground" />
-                <div>
-                  <p className="text-muted-foreground">Submitted</p>
-                  <p className="font-medium">2 hours ago</p>
-                </div>
-              </div>
-              <div className="flex items-center gap-2">
                 <Clock className="h-4 w-4 text-muted-foreground" />
                 <div>
                   <p className="text-muted-foreground">Est. Print Time</p>
-                  <p className="font-medium">2h 30m</p>
+                  <p className="font-medium">{formatDuration(job.estimatedPrintTimeMinutes)}</p>
                 </div>
               </div>
               <div className="flex items-center gap-2">
@@ -90,6 +117,51 @@ const JobDetailsModal = ({ job, isOpen, onClose }: JobDetailsModalProps) => {
                   <p className="font-medium">{jobColor.split('|')[0]}</p>
                 </div>
               </div>
+              {job.productName && (
+                <div className="flex items-center gap-2">
+                  <Package className="h-4 w-4 text-muted-foreground" />
+                  <div>
+                    <p className="text-muted-foreground">Product</p>
+                    <p className="font-medium">{job.productName}</p>
+                  </div>
+                </div>
+              )}
+              {job.skuName && (
+                <div className="flex items-center gap-2">
+                  <FileText className="h-4 w-4 text-muted-foreground" />
+                  <div>
+                    <p className="text-muted-foreground">SKU</p>
+                    <p className="font-medium">{job.skuName}</p>
+                  </div>
+                </div>
+              )}
+              {job.timeStarted && (
+                <div className="flex items-center gap-2">
+                  <Clock className="h-4 w-4 text-muted-foreground" />
+                  <div>
+                    <p className="text-muted-foreground">Started</p>
+                    <p className="font-medium">{formatDateTime(job.timeStarted)}</p>
+                  </div>
+                </div>
+              )}
+              {job.timeCompleted && (
+                <div className="flex items-center gap-2">
+                  <Clock className="h-4 w-4 text-muted-foreground" />
+                  <div>
+                    <p className="text-muted-foreground">Completed</p>
+                    <p className="font-medium">{formatDateTime(job.timeCompleted)}</p>
+                  </div>
+                </div>
+              )}
+              {job.actualPrintTimeMinutes && (
+                <div className="flex items-center gap-2">
+                  <Clock className="h-4 w-4 text-muted-foreground" />
+                  <div>
+                    <p className="text-muted-foreground">Actual Print Time</p>
+                    <p className="font-medium">{formatDuration(job.actualPrintTimeMinutes)}</p>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 
@@ -101,12 +173,16 @@ const JobDetailsModal = ({ job, isOpen, onClose }: JobDetailsModalProps) => {
                 <div className="space-y-2">
                   <div className="flex justify-between text-sm">
                     <span>Completion</span>
-                    <span>{job.progress}%</span>
+                    <span>{job.progressPercentage || 0}%</span>
                   </div>
-                  <Progress value={job.progress} className="h-3" />
+                  <Progress value={job.progressPercentage || 0} className="h-3" />
                   <div className="flex justify-between text-sm text-muted-foreground">
-                    <span>Layer 125 of 180</span>
-                    <span>1h 15m remaining</span>
+                    {job.liveData?.progress?.current_layer && job.liveData?.progress?.total_layers ? (
+                      <span>Layer {job.liveData.progress.current_layer} of {job.liveData.progress.total_layers}</span>
+                    ) : (
+                      <span>&nbsp;</span>
+                    )}
+                    <span>{calculateRemainingTime(job.estimatedPrintTimeMinutes, job.progressPercentage)}</span>
                   </div>
                 </div>
               </div>
@@ -116,24 +192,43 @@ const JobDetailsModal = ({ job, isOpen, onClose }: JobDetailsModalProps) => {
           <Separator />
 
           <div className="space-y-4">
-            <h3 className="text-lg font-medium">File Properties</h3>
+            <h3 className="text-lg font-medium">Print Details</h3>
             <div className="grid grid-cols-2 gap-4 text-sm">
-              <div className="flex justify-between">
-                <span className="text-muted-foreground">File Size:</span>
-                <span>15.2 MB</span>
-              </div>
+              {(job.printerName || job.printerNumericId || job.printerModel) && (
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Printer:</span>
+                  <span>
+                    {job.printerName || `#${job.printerNumericId} - ${job.printerModel}`}
+                    {job.printerName && job.printerNumericId && ` (#${job.printerNumericId})`}
+                  </span>
+                </div>
+              )}
               <div className="flex justify-between">
                 <span className="text-muted-foreground">Material:</span>
-                <span>PLA</span>
+                <span>{job.materialType || 'N/A'}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-muted-foreground">Number of Units:</span>
-                <span>3</span>
+                <span className="text-muted-foreground">Filament Type:</span>
+                <span>{job.filamentType || 'N/A'}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Copies:</span>
+                <span>{job.numberOfUnits || 'N/A'}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-muted-foreground">Objects/Copy:</span>
+                <span>{job.quantityPerPrint || 'N/A'}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-muted-foreground">Filament Needed:</span>
-                <span>450g</span>
+                <span>{job.filamentNeededGrams ? `${job.filamentNeededGrams}g` : 'N/A'}</span>
               </div>
+              {job.requiresAssembly && (
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Requires Assembly:</span>
+                  <Badge variant="outline" className="ml-auto">Yes</Badge>
+                </div>
+              )}
             </div>
           </div>
 

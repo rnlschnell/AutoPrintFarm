@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { supabase } from '@/integrations/supabase/client';
 import { useTenant } from '@/hooks/useTenant';
 import { useToast } from '@/hooks/use-toast';
+import { getApiBaseUrl } from '@/utils/apiUrl';
 
 export interface Product {
   id: string;
@@ -12,8 +13,11 @@ export interface Product {
   print_file_id?: string;
   file_name?: string;
   requires_assembly: boolean;
+  requires_post_processing: boolean;
+  printer_priority?: string | null;
   image_url?: string;
   is_active: boolean;
+  wiki_id?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -28,15 +32,18 @@ export interface ProductSku {
   quantity: number;
   stock_level: number;
   price?: number;
+  low_stock_threshold?: number;
   is_active: boolean;
   created_at: string;
   updated_at: string;
+  finishedGoodsStock?: number;
 }
 
 export interface ProductComponent {
   id: string;
   product_id: string;
   component_name: string;
+  accessory_id?: string;
   component_type?: string;
   quantity_required: number;
   notes?: string;
@@ -50,6 +57,12 @@ export interface ProductWithDetails extends Product {
     id: string;
     name: string;
   };
+  print_files?: Array<{
+    id: string;
+    name: string;
+    printer_model_id?: string | null;
+    file_name?: string;
+  }>;
 }
 
 export const useProductsNew = () => {
@@ -91,24 +104,38 @@ export const useProductsNew = () => {
       }
       const skusData = await skusResponse.json();
 
-      // Fetch components from Supabase (still using direct access for non-local-first table)
+      // Fetch components from Supabase
       const { data: componentsData, error: componentsError } = await supabase
         .from('product_components')
         .select('*')
-        .eq('tenant_id', tenant?.id);
+        .eq('tenant_id', tenant.id);
 
-      if (componentsError) throw componentsError;
+      if (componentsError) {
+        console.error('Error fetching components:', componentsError);
+      }
 
       // Combine data from local-first APIs and Supabase
       const productsWithDetails: ProductWithDetails[] = (productsData || []).map(product => {
-        // Find associated print file
+        // Find associated print file (legacy single file support)
         const printFile = printFilesData.find(file => file.id === product.print_file_id);
-        
+
+        // Find ALL print files for this product (multi-file support)
+        const productPrintFiles = printFilesData.filter(file => file.product_id === product.id);
+
+        // Find components for this product
+        const productComponents = (componentsData || []).filter(c => c.product_id === product.id);
+
         return {
           ...product,
           skus: (skusData || []).filter(sku => sku.product_id === product.id),
-          components: (componentsData || []).filter(component => component.product_id === product.id),
-          print_file: printFile ? { id: printFile.id, name: printFile.name } : null
+          components: productComponents,
+          print_file: printFile ? { id: printFile.id, name: printFile.name } : null,
+          print_files: productPrintFiles.map(pf => ({
+            id: pf.id,
+            name: pf.name,
+            printer_model_id: pf.printer_model_id,
+            file_name: pf.name
+          }))
         };
       });
 
@@ -129,50 +156,10 @@ export const useProductsNew = () => {
     }
   }, [tenant?.id, toast]);
 
-  // Set up real-time subscription for Supabase-only tables (local-first tables don't need real-time)
-  useEffect(() => {
-    if (!tenant?.id) return;
-
-    const channel = supabase
-      .channel('product-supabase-changes')
-      .on(
-        'postgres_changes',
-        {
-          event: 'UPDATE',
-          schema: 'public',
-          table: 'finished_goods',
-          filter: `tenant_id=eq.${tenant.id}`
-        },
-        (payload) => {
-          console.log('Finished goods stock updated:', payload);
-          // Refetch products when finished goods stock changes
-          fetchProducts();
-        }
-      )
-      .on(
-        'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'product_components',
-          filter: `tenant_id=eq.${tenant.id}`
-        },
-        (payload) => {
-          console.log('Product components changed:', payload);
-          // Refetch products when components change
-          fetchProducts();
-        }
-      )
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [tenant?.id, fetchProducts]);
-
   const addProduct = useCallback(async (productData: Omit<Product, 'id' | 'tenant_id' | 'created_at' | 'updated_at'> & {
     components?: any[];
     skus?: any[];
+    uploaded_print_file_ids?: string[];
   }) => {
     if (!tenant?.id) {
       toast({
@@ -184,8 +171,8 @@ export const useProductsNew = () => {
     }
     
     try {
-      // Extract components and skus from productData
-      const { components, skus, ...productFields } = productData;
+      // Extract components, skus, and uploaded_print_file_ids from productData
+      const { components, skus, uploaded_print_file_ids, ...productFields } = productData;
 
       console.log('Adding product with data:', productFields);
 
@@ -195,42 +182,49 @@ export const useProductsNew = () => {
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          ...productFields
-        }),
+        body: JSON.stringify(productFields),
       });
 
       if (!productResponse.ok) {
         throw new Error(`Failed to create product: ${productResponse.statusText}`);
       }
-      
+
       const productResult = await productResponse.json();
-      
+
       if (!productResult.success) {
         throw new Error(productResult.message || 'Failed to create product');
       }
-      
+
       const data = productResult.product;
       console.log('Product created successfully:', data);
 
-      // Save components if they exist
+      // Save components to Supabase if provided
       if (components && components.length > 0) {
-        const componentInserts = components.map(component => ({
-          product_id: data.id,
-          component_name: component.component_name,
-          component_type: component.component_type,
-          quantity_required: component.quantity_required,
-          notes: component.notes,
-          tenant_id: tenant?.id
-        }));
+        try {
+          const componentInserts = components.map(comp => ({
+            product_id: data.id,
+            tenant_id: tenant.id,
+            component_name: comp.component_name,
+            accessory_id: comp.accessory_id,
+            quantity_required: comp.quantity_required
+          }));
 
-        const { error: componentError } = await supabase
-          .from('product_components')
-          .insert(componentInserts);
+          const { error } = await supabase
+            .from('product_components')
+            .insert(componentInserts);
 
-        if (componentError) {
-          console.error('Error saving components:', componentError);
-          // Don't throw here - product is already created
+          if (error) {
+            console.error('Error saving components:', error);
+            toast({
+              title: "Warning",
+              description: "Product created but components may not have saved",
+              variant: "default",
+            });
+          } else {
+            console.log(`Saved ${components.length} components for product ${data.id}`);
+          }
+        } catch (error) {
+          console.error('Error saving components to Supabase:', error);
         }
       }
 
@@ -251,14 +245,15 @@ export const useProductsNew = () => {
                 hex_code: sku.hex_code,
                 quantity: sku.quantity,
                 stock_level: sku.stock_level || 0,
-                price: sku.price
+                price: sku.price,
+                low_stock_threshold: sku.low_stock_threshold || 0
               }),
             });
-            
+
             if (!skuResponse.ok) {
               throw new Error(`Failed to create SKU: ${skuResponse.statusText}`);
             }
-            
+
             const skuResult = await skuResponse.json();
             if (!skuResult.success) {
               throw new Error(skuResult.message || 'Failed to create SKU');
@@ -266,6 +261,38 @@ export const useProductsNew = () => {
           } catch (error) {
             console.error('Error saving SKU:', error);
             // Don't throw here - product is already created
+          }
+        }
+      }
+
+      // Link ALL print files to this product
+      // The print files were created during the temp file upload process
+      // but weren't linked to a product yet (product didn't exist)
+      if (uploaded_print_file_ids && uploaded_print_file_ids.length > 0) {
+        console.log(`Linking ${uploaded_print_file_ids.length} print files to product ${data.id}`);
+
+        for (const printFileId of uploaded_print_file_ids) {
+          try {
+            console.log(`Linking print file ${printFileId} to product ${data.id}`);
+            const linkResponse = await fetch(`/api/print-files-sync/${printFileId}`, {
+              method: 'PUT',
+              headers: {
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                product_id: data.id
+              }),
+            });
+
+            if (!linkResponse.ok) {
+              console.error(`Failed to link print file ${printFileId} to product:`, linkResponse.statusText);
+              // Don't throw - product is already created, this is just a link
+            } else {
+              console.log(`Successfully linked print file ${printFileId} to product ${data.id}`);
+            }
+          } catch (error) {
+            console.error(`Error linking print file ${printFileId} to product:`, error);
+            // Don't throw - product is already created
           }
         }
       }
@@ -290,24 +317,15 @@ export const useProductsNew = () => {
   const updateProduct = useCallback(async (id: string, updates: Partial<Product> & {
     components?: any[];
     skus?: any[];
+    uploaded_print_file_ids?: string[];
   }) => {
     try {
-      // Extract components and skus from updates
-      const { components, skus, ...productUpdates } = updates;
+      // Extract components, skus, and uploaded_print_file_ids from updates
+      const { components, skus, uploaded_print_file_ids, ...productUpdates } = updates;
 
-      // Get current product to check for print file changes
-      const currentProduct = products.find(p => p.id === id);
-      const oldPrintFileId = currentProduct?.print_file_id;
-      const newPrintFileId = productUpdates.print_file_id;
-      
-      // Check if print file is being changed
-      const isPrintFileChanged = oldPrintFileId !== newPrintFileId;
-      
       console.log('Updating product:', {
         productId: id,
-        oldPrintFileId,
-        newPrintFileId,
-        isPrintFileChanged
+        uploaded_print_file_ids
       });
 
       // Update product via local-first API
@@ -322,83 +340,146 @@ export const useProductsNew = () => {
       if (!productResponse.ok) {
         throw new Error(`Failed to update product: ${productResponse.statusText}`);
       }
-      
+
       const productResult = await productResponse.json();
-      
+
       if (!productResult.success) {
         throw new Error(productResult.message || 'Failed to update product');
       }
-      
+
       const data = productResult.product;
-      
-      // Handle print file cleanup if file was replaced or removed
-      if (isPrintFileChanged && oldPrintFileId) {
-        try {
-          // Delete the old print file via local-first API
-          const deleteResponse = await fetch(`/api/print-files-sync/${oldPrintFileId}`, {
-            method: 'DELETE',
-          });
-          
-          if (!deleteResponse.ok || !(await deleteResponse.json()).success) {
-            console.error('Failed to delete old print file via API');
-            // Don't fail the whole operation, but log the error
-            toast({
-              title: "Warning",
-              description: "Old file may not have been cleaned up properly",
-              variant: "default",
-            });
-          } else {
-            console.log('Successfully deleted old print file:', oldPrintFileId);
-          }
-        } catch (cleanupError) {
-          console.error('Error during print file cleanup:', cleanupError);
-          // Continue - don't fail the product update
-        }
-      }
 
-      // Handle components if they exist
+      // Update components in Supabase if provided
       if (components !== undefined) {
-        // Delete existing components
-        await supabase
-          .from('product_components')
-          .delete()
-          .eq('product_id', id);
-
-        // Insert new components
-        if (components.length > 0) {
-          const componentInserts = components.map(component => ({
-            product_id: id,
-            component_name: component.component_name,
-            component_type: component.component_type,
-            quantity_required: component.quantity_required,
-            notes: component.notes,
-            tenant_id: tenant?.id
-          }));
-
-          const { error: componentError } = await supabase
+        try {
+          // Delete existing components
+          await supabase
             .from('product_components')
-            .insert(componentInserts);
+            .delete()
+            .eq('product_id', id);
 
-          if (componentError) {
-            console.error('Error updating components:', componentError);
+          // Insert new components
+          if (components.length > 0) {
+            const componentInserts = components.map(comp => ({
+              product_id: id,
+              tenant_id: tenant.id,
+              component_name: comp.component_name,
+              accessory_id: comp.accessory_id,
+              quantity_required: comp.quantity_required
+            }));
+
+            const { error } = await supabase
+              .from('product_components')
+              .insert(componentInserts);
+
+            if (error) {
+              console.error('Error updating components:', error);
+              toast({
+                title: "Warning",
+                description: "Product updated but components may not have saved",
+                variant: "default",
+              });
+            } else {
+              console.log(`Updated components for product ${id}: ${components.length} components`);
+            }
+          } else {
+            console.log(`Removed all components for product ${id}`);
+          }
+        } catch (error) {
+          console.error('Error updating components in Supabase:', error);
+        }
+      }
+
+      // Manage print files for this product (multi-file support)
+      // This handles both linking new files and unlinking removed files
+      if (uploaded_print_file_ids !== undefined) {
+        // Fetch current print files for this product to detect removals
+        try {
+          const printFilesResponse = await fetch('/api/print-files-sync/');
+          if (printFilesResponse.ok) {
+            const allPrintFiles = await printFilesResponse.json();
+            const currentProductFiles = allPrintFiles.filter(pf => pf.product_id === id);
+
+            // Find files that need to be unlinked (exist in current but not in new list)
+            const filesToUnlink = currentProductFiles.filter(
+              pf => !uploaded_print_file_ids.includes(pf.id)
+            );
+
+            // Unlink removed files by setting product_id to null
+            if (filesToUnlink.length > 0) {
+              console.log(`Unlinking ${filesToUnlink.length} removed print files from product ${id}`);
+
+              for (const fileToUnlink of filesToUnlink) {
+                try {
+                  console.log(`Unlinking print file ${fileToUnlink.id} from product ${id}`);
+                  const unlinkResponse = await fetch(`/api/print-files-sync/${fileToUnlink.id}`, {
+                    method: 'PUT',
+                    headers: {
+                      'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                      product_id: null
+                    }),
+                  });
+
+                  if (!unlinkResponse.ok) {
+                    console.error(`Failed to unlink print file ${fileToUnlink.id}:`, unlinkResponse.statusText);
+                  } else {
+                    console.log(`Successfully unlinked print file ${fileToUnlink.id} from product ${id}`);
+                  }
+                } catch (error) {
+                  console.error(`Error unlinking print file ${fileToUnlink.id}:`, error);
+                }
+              }
+            }
+          }
+        } catch (error) {
+          console.error('Error fetching current print files:', error);
+        }
+
+        // Link new/kept print files to this product
+        if (uploaded_print_file_ids.length > 0) {
+          console.log(`Linking ${uploaded_print_file_ids.length} print files to product ${id}`);
+
+          for (const printFileId of uploaded_print_file_ids) {
+            try {
+              console.log(`Linking print file ${printFileId} to product ${id}`);
+              const linkResponse = await fetch(`/api/print-files-sync/${printFileId}`, {
+                method: 'PUT',
+                headers: {
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                  product_id: id
+                }),
+              });
+
+              if (!linkResponse.ok) {
+                console.error(`Failed to link print file ${printFileId} to product:`, linkResponse.statusText);
+                // Don't throw - product is already updated, this is just a link
+              } else {
+                console.log(`Successfully linked print file ${printFileId} to product ${id}`);
+              }
+            } catch (error) {
+              console.error(`Error linking print file ${printFileId} to product:`, error);
+              // Don't throw - product is already updated
+            }
           }
         }
       }
 
-      // Handle SKUs with proper differential updates
+      // Handle SKUs - simplified approach for product edit
       if (skus !== null && skus !== undefined && Array.isArray(skus)) {
         console.log('Updating SKUs for product:', id, skus);
         
-        // Get current SKUs from database
-        const { data: currentSkus, error: fetchError } = await supabase
-          .from('product_skus')
-          .select('*')
-          .eq('product_id', id);
-          
-        if (fetchError) {
-          console.error('Error fetching current SKUs:', fetchError);
-          throw fetchError;
+        // Get current SKUs from local database
+        const response = await fetch(`/api/product-skus-sync/product/${id}`);
+        if (!response.ok) {
+          const errorText = await response.text();
+          console.error('Error fetching current SKUs:', errorText);
+          throw new Error(`Failed to fetch current SKUs: ${response.status} ${errorText}`);
         }
+        const currentSkus = await response.json();
         
         // Create maps for easier comparison
         const currentSkusMap = new Map();
@@ -412,9 +493,11 @@ export const useProductsNew = () => {
         
         // Process incoming SKUs
         skus.forEach(sku => {
+          console.log('🔍 Processing SKU:', { id: sku.id, sku: sku.sku, price: sku.price, priceType: typeof sku.price });
+
           if (sku.id && sku.id.startsWith('temp-')) {
             // This is a new SKU (temp ID)
-            skusToInsert.push({
+            const newSkuData = {
               product_id: id,
               sku: sku.sku,
               color: sku.color,
@@ -423,14 +506,19 @@ export const useProductsNew = () => {
               quantity: sku.quantity,
               stock_level: sku.stock_level || 0,
               price: sku.price,
+              low_stock_threshold: sku.low_stock_threshold || 0,
               tenant_id: tenant?.id
-            });
+            };
+            console.log('✅ New SKU (temp ID) - Adding to skusToInsert:', newSkuData);
+            skusToInsert.push(newSkuData);
           } else if (sku.id && currentSkusMap.has(sku.id)) {
             // This is an existing SKU that might need updates
             const currentSku = currentSkusMap.get(sku.id);
             newSkusMap.set(sku.id, sku);
             
             // Check if any fields have changed
+            // Note: Both currentSku.price and sku.price are in dollars (API converts from cents)
+            // Use tolerance for floating point comparison to avoid false positives
             const hasChanges = (
               currentSku.sku !== sku.sku ||
               currentSku.color !== sku.color ||
@@ -438,7 +526,8 @@ export const useProductsNew = () => {
               currentSku.hex_code !== sku.hex_code ||
               currentSku.quantity !== sku.quantity ||
               currentSku.stock_level !== sku.stock_level ||
-              currentSku.price !== sku.price
+              Math.abs((currentSku.price || 0) - (sku.price || 0)) > 0.001 ||
+              (currentSku.low_stock_threshold || 0) !== (sku.low_stock_threshold || 0)
             );
             
             if (hasChanges) {
@@ -450,7 +539,8 @@ export const useProductsNew = () => {
                 hex_code: sku.hex_code,
                 quantity: sku.quantity,
                 stock_level: sku.stock_level || 0,
-                price: sku.price
+                price: sku.price,
+                low_stock_threshold: sku.low_stock_threshold || 0
               });
             }
           }
@@ -468,40 +558,59 @@ export const useProductsNew = () => {
         
         // 1. Insert new SKUs
         if (skusToInsert.length > 0) {
-          const { error: insertError } = await supabase
-            .from('product_skus')
-            .insert(skusToInsert);
-            
-          if (insertError) {
-            console.error('Error inserting new SKUs:', insertError);
-            throw insertError;
+          console.log('📤 About to INSERT new SKUs:', skusToInsert);
+          for (const sku of skusToInsert) {
+            console.log('📤 Sending SKU to API:', sku, 'JSON:', JSON.stringify(sku));
+            const response = await fetch('/api/product-skus-sync/', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify(sku)
+            });
+
+            if (!response.ok) {
+              // Try to parse JSON error response
+              const errorData = await response.json().catch(() => ({}));
+              const errorMessage = errorData.detail || `Failed to insert SKU: ${response.statusText}`;
+              console.error('Error inserting new SKU:', errorMessage);
+              throw new Error(errorMessage);
+            }
           }
         }
         
         // 2. Update existing SKUs
         for (const skuUpdate of skusToUpdate) {
           const { id, ...updateFields } = skuUpdate;
-          const { error: updateError } = await supabase
-            .from('product_skus')
-            .update(updateFields)
-            .eq('id', id);
-            
-          if (updateError) {
-            console.error('Error updating SKU:', updateError);
-            throw updateError;
+          const response = await fetch(`/api/product-skus-sync/${id}`, {
+            method: 'PUT',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(updateFields)
+          });
+
+          if (!response.ok) {
+            // Try to parse JSON error response
+            const errorData = await response.json().catch(() => ({}));
+            const errorMessage = errorData.detail || `Failed to update SKU: ${response.statusText}`;
+            console.error('Error updating SKU:', errorMessage);
+            throw new Error(errorMessage);
           }
         }
         
         // 3. Hard delete removed SKUs
         if (skusToDelete.length > 0) {
-          const { error: deleteError } = await supabase
-            .from('product_skus')
-            .delete()
-            .in('id', skusToDelete);
-            
-          if (deleteError) {
-            console.error('Error deleting SKUs:', deleteError);
-            throw deleteError;
+          for (const skuId of skusToDelete) {
+            const response = await fetch(`/api/product-skus-sync/${skuId}`, {
+              method: 'DELETE'
+            });
+
+            if (!response.ok) {
+              const errorText = await response.text();
+              console.error('Error deleting SKU:', errorText);
+              throw new Error(`Failed to delete SKU: ${response.status} ${errorText}`);
+            }
           }
         }
         
@@ -551,13 +660,24 @@ export const useProductsNew = () => {
         throw new Error(result.message || 'Failed to delete product');
       }
 
+      // Delete components from Supabase
+      try {
+        await supabase
+          .from('product_components')
+          .delete()
+          .eq('product_id', id);
+        console.log(`Deleted components for product ${id}`);
+      } catch (error) {
+        console.error('Error deleting components from Supabase:', error);
+      }
+
       // Delete the associated print file if it exists
       if (product?.print_file_id) {
         try {
           const printFileResponse = await fetch(`/api/print-files-sync/${product.print_file_id}`, {
             method: 'DELETE',
           });
-          
+
           if (!printFileResponse.ok || !(await printFileResponse.json()).success) {
             console.warn('Failed to delete associated print file via API');
             // Don't fail the whole operation if print file deletion fails
@@ -566,30 +686,10 @@ export const useProductsNew = () => {
           console.warn('Failed to delete associated print file:', error);
         }
       }
-      
-      // Delete components via Supabase (still non-local-first)
-      if (product?.components && product.components.length > 0) {
-        const { error: componentError } = await supabase
-          .from('product_components')
-          .delete()
-          .eq('product_id', id);
-        
-        if (componentError) {
-          console.warn('Failed to delete product components:', componentError);
-          // Don't fail the whole operation
-        }
-      }
 
       // Trigger cleanup of orphaned files on Pi
       try {
-        const currentHost = window.location.hostname;
-        let baseUrl: string;
-        
-        if (currentHost === '192.168.4.45' || currentHost === 'localhost' || currentHost === '127.0.0.1') {
-          baseUrl = `${window.location.protocol}//${window.location.host}`;
-        } else {
-          baseUrl = 'http://192.168.4.45:8080';
-        }
+        const baseUrl = getApiBaseUrl();
 
         const cleanupResponse = await fetch(`${baseUrl}/api/available-files/maintenance/cleanup-orphaned`, {
           method: 'POST',
@@ -628,42 +728,29 @@ export const useProductsNew = () => {
   const addSku = useCallback(async (skuData: Omit<ProductSku, 'id' | 'created_at' | 'updated_at'>) => {
     console.log('addSku called with:', skuData);
     try {
-      // Insert the new SKU
-      const { data: skuResult, error: skuError } = await supabase
-        .from('product_skus')
-        .insert({
-          ...skuData,
-          tenant_id: tenant?.id
-        })
-        .select()
-        .single();
+      // Create SKU via local-first API
+      const skuResponse = await fetch('/api/product-skus-sync/', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(skuData),
+      });
 
-      if (skuError) {
-        console.error('Supabase error in addSku:', skuError);
-        throw skuError;
+      if (!skuResponse.ok) {
+        // Try to extract error detail from response
+        const errorData = await skuResponse.json().catch(() => ({}));
+        const errorMessage = errorData.detail || `Failed to create SKU: ${skuResponse.statusText}`;
+        throw new Error(errorMessage);
+      }
+
+      const skuResult = await skuResponse.json();
+
+      if (!skuResult.success) {
+        throw new Error(skuResult.message || 'Failed to create SKU');
       }
 
       console.log('addSku successful, data:', skuResult);
-
-      // Create corresponding finished_goods record
-      const { error: finishedGoodsError } = await supabase
-        .from('finished_goods')
-        .insert({
-          tenant_id: tenant?.id,
-          product_sku_id: skuResult.id,
-          sku: skuData.sku,
-          color: skuData.color,
-          material: skuData.filament_type || 'PLA', // Use filament_type from SKU
-          current_stock: skuData.stock_level || 0,
-          assembly_status: 'printed',
-          unit_price: skuData.price || 0,
-          status: (skuData.stock_level || 0) > 0 ? ((skuData.stock_level || 0) <= 5 ? 'low_stock' : 'in_stock') : 'out_of_stock'
-        });
-
-      if (finishedGoodsError) {
-        console.warn('Warning: Could not create finished_goods record:', finishedGoodsError);
-        // Don't fail the whole operation if finished_goods creation fails
-      }
 
       toast({
         title: "Success",
@@ -671,72 +758,80 @@ export const useProductsNew = () => {
       });
 
       await fetchProducts();
-      return skuResult;
-    } catch (error) {
+      return skuResult.sku;
+    } catch (error: any) {
       console.error('Error adding SKU:', error);
       toast({
         title: "Error",
-        description: "Failed to add SKU",
+        description: error?.message || "Failed to add SKU",
         variant: "destructive",
       });
-      throw error; // Re-throw to ensure calling code knows about the failure
+      throw error;
     }
-  }, [tenant?.id, toast, fetchProducts]);
+  }, [toast, fetchProducts]);
 
   const updateSku = useCallback(async (id: string, updates: Partial<ProductSku>) => {
     console.log('updateSku called with:', id, updates);
     try {
-      const { data, error } = await supabase
-        .from('product_skus')
-        .update(updates)
-        .eq('id', id)
-        .select()
-        .single();
+      // Update SKU via local-first API
+      const skuResponse = await fetch(`/api/product-skus-sync/${id}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(updates),
+      });
 
-      if (error) {
-        console.error('Supabase error in updateSku:', error);
-        throw error;
+      if (!skuResponse.ok) {
+        // Try to extract error detail from response
+        const errorData = await skuResponse.json().catch(() => ({}));
+        const errorMessage = errorData.detail || `Failed to update SKU: ${skuResponse.statusText}`;
+        throw new Error(errorMessage);
       }
 
-      console.log('updateSku successful, data:', data);
+      const skuResult = await skuResponse.json();
+
+      if (!skuResult.success) {
+        throw new Error(skuResult.message || 'Failed to update SKU');
+      }
+
+      console.log('updateSku successful, data:', skuResult);
       toast({
         title: "Success",
         description: "SKU updated successfully",
       });
 
       await fetchProducts();
-      return data;
-    } catch (error) {
+      return skuResult.sku;
+    } catch (error: any) {
       console.error('Error updating SKU:', error);
       toast({
         title: "Error",
-        description: "Failed to update SKU",
+        description: error?.message || "Failed to update SKU",
         variant: "destructive",
       });
-      throw error; // Re-throw to ensure calling code knows about the failure
+      throw error;
     }
   }, [toast, fetchProducts]);
 
   const deleteSku = useCallback(async (id: string) => {
     try {
-      // Hard delete the SKU
-      const { error: skuError } = await supabase
-        .from('product_skus')
-        .delete()
-        .eq('id', id);
+      // Delete SKU via local-first API
+      const skuResponse = await fetch(`/api/product-skus-sync/${id}`, {
+        method: 'DELETE',
+      });
 
-      if (skuError) throw skuError;
-
-      // Also hard delete the corresponding finished_goods record
-      const { error: finishedGoodsError } = await supabase
-        .from('finished_goods')
-        .delete()
-        .eq('product_sku_id', id);
-
-      if (finishedGoodsError) {
-        console.warn('Warning: Could not delete finished_goods record:', finishedGoodsError);
-        // Don't fail the whole operation if finished_goods deletion fails
+      if (!skuResponse.ok) {
+        throw new Error(`Failed to delete SKU: ${skuResponse.statusText}`);
       }
+
+      const skuResult = await skuResponse.json();
+
+      if (!skuResult.success) {
+        throw new Error(skuResult.message || 'Failed to delete SKU');
+      }
+
+      console.log('deleteSku successful:', skuResult);
 
       toast({
         title: "Success",
@@ -754,60 +849,7 @@ export const useProductsNew = () => {
     }
   }, [toast, fetchProducts]);
 
-  const addComponent = useCallback(async (componentData: Omit<ProductComponent, 'id' | 'created_at'>) => {
-    try {
-      const { data, error } = await supabase
-        .from('product_components')
-        .insert({
-          ...componentData,
-          tenant_id: tenant?.id
-        })
-        .select()
-        .single();
-
-      if (error) throw error;
-
-      toast({
-        title: "Success",
-        description: "Component added successfully",
-      });
-
-      await fetchProducts();
-      return data;
-    } catch (error) {
-      console.error('Error adding component:', error);
-      toast({
-        title: "Error",
-        description: "Failed to add component",
-        variant: "destructive",
-      });
-    }
-  }, [tenant?.id, toast, fetchProducts]);
-
-  const deleteComponent = useCallback(async (id: string) => {
-    try {
-      const { error } = await supabase
-        .from('product_components')
-        .delete()
-        .eq('id', id);
-
-      if (error) throw error;
-
-      toast({
-        title: "Success",
-        description: "Component deleted successfully",
-      });
-
-      await fetchProducts();
-    } catch (error) {
-      console.error('Error deleting component:', error);
-      toast({
-        title: "Error",
-        description: "Failed to delete component",
-        variant: "destructive",
-      });
-    }
-  }, [toast, fetchProducts]);
+  // Note: addComponent and deleteComponent removed (table no longer exists in Supabase)
 
   useEffect(() => {
     fetchProducts();
@@ -822,8 +864,6 @@ export const useProductsNew = () => {
     addSku,
     updateSku,
     deleteSku,
-    addComponent,
-    deleteComponent,
     refetch: fetchProducts,
   };
 };

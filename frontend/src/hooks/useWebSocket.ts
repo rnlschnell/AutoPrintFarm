@@ -23,9 +23,9 @@ export interface LivePrinterData {
   };
   progress: {
     percentage: number;
-    layers_current: number;
-    layers_total: number;
-    time_remaining: number;
+    current_layer: number;
+    total_layers: number;
+    remaining_time: number;
   };
   current_job?: {
     filename: string;
@@ -171,12 +171,17 @@ export const usePrinterWebSocket = (printerId?: string) => {
     if (typeof window !== 'undefined') {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const host = window.location.hostname;
-      const port = window.location.port || (window.location.protocol === 'https:' ? '443' : '80');
-      
-      // If we're on the Pi (port 8080), use the same host and port
-      // If we're in development, use localhost:8080
-      const wsPort = port === '8080' ? '8080' : '8080';
-      return `${protocol}//${host}:${wsPort}`;
+      const port = window.location.port;
+
+      // Use the same port as the current connection
+      // When accessed via tunnel (autoprintfarm.com), port will be empty/443
+      // When accessed locally (192.168.4.45:8080), port will be 8080
+      if (port) {
+        return `${protocol}//${host}:${port}`;
+      } else {
+        // No explicit port means standard port (80/443)
+        return `${protocol}//${host}`;
+      }
     }
     // Fallback for SSR
     return 'ws://localhost:8080';

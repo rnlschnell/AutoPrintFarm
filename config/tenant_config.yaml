@@ -1,50 +1,38 @@
-# Tenant Configuration for Print Farm Software
-# This file contains tenant-specific settings for the Pi
-
-# Tenant Information
-# Note: These values should be set during Pi setup
 tenant:
-  id: "f448c280-3009-4120-b701-9f25b5e78ebb"  # Tenant UUID - set during setup
-  name: ""  # Tenant/Company name for display
-
-# Supabase Configuration
+  id: f448c280-3009-4120-b701-9f25b5e78ebb
+  name: ''
 supabase:
-  url: "https://rippurqgfesmtoovxidz.supabase.co"
-  anon_key: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJpcHB1cnFnZmVzbXRvb3Z4aWR6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTE0OTQwNjEsImV4cCI6MjA2NzA3MDA2MX0.ct4KGkxZvQS0LW9llwKlPK4VAPsdHusKU_3mWXzOt58"
-  service_role_key: ""  # Optional: Service role key for system operations
-
-# Sync Configuration
+  url: https://rippurqgfesmtoovxidz.supabase.co
+  anon_key: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJpcHB1cnFnZmVzbXRvb3Z4aWR6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTE0OTQwNjEsImV4cCI6MjA2NzA3MDA2MX0.ct4KGkxZvQS0LW9llwKlPK4VAPsdHusKU_3mWXzOt58
+  service_role_key: ''
 sync:
   enabled: true
   initial_sync_on_startup: true
   retry_attempts: 5
   retry_delay_seconds: 5
   heartbeat_interval_seconds: 30
-
-# Database Configuration
 database:
-  path: "data/tenant.db"
+  path: data/tenant.db
   backup_enabled: true
   backup_interval_hours: 24
   cleanup_logs_after_days: 7
-
-# Logging Configuration
 logging:
-  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  level: INFO
   sync_operations: true
-  database_operations: false  # Set to true for database debugging
-  file_path: "logs/sync.log"
+  database_operations: false
+  file_path: logs/sync.log
   max_file_size_mb: 10
   backup_count: 5
-
-# Security Settings
 security:
   encrypt_credentials: true
   require_https: true
   validate_tenant_access: true
-
-# Performance Settings
 performance:
   max_concurrent_syncs: 3
   batch_size: 100
   connection_pool_size: 5
+tunnel:
+  provisioning_url: https://api.autoprintfarm.com/provision
+shopify:
+  app_url: https://autoprint-dev.myshopify.com
+  api_key: d5qRX2GJ9J4HUr3P_79ZUiDZvZhnnmqOEvcm2X1pBk0

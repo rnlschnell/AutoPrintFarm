@@ -1,5 +1,4 @@
 import { useState, useEffect } from 'react';
-import { supabase } from '@/integrations/supabase/client';
 import { useToast } from '@/hooks/use-toast';
 import { useTenant } from '@/hooks/useTenant';
 import { 
@@ -258,73 +257,7 @@ export const usePrintJobs = () => {
 
   // Set up real-time subscription for print job changes
   useEffect(() => {
-    if (!tenant?.id) {
-      console.log('usePrintJobs: No tenant ID, skipping subscription');
-      return;
-    }
-
-    console.log('usePrintJobs: Setting up real-time subscription for tenant:', tenant.id);
     fetchPrintJobs();
-
-    const channel = supabase
-      .channel('print-job-changes')
-      .on(
-        'postgres_changes',
-        {
-          event: 'INSERT',
-          schema: 'public',
-          table: 'print_jobs',
-          filter: `tenant_id=eq.${tenant.id}`
-        },
-        (payload) => {
-          console.log('🆕 Print job inserted via real-time:', payload);
-          const newJob = transformPrintJobFromDb(payload.new as DbPrintJob);
-          setPrintJobs(prev => {
-            console.log('Adding new job to list:', newJob);
-            return [newJob, ...prev];
-          });
-        }
-      )
-      .on(
-        'postgres_changes',
-        {
-          event: 'UPDATE',
-          schema: 'public',
-          table: 'print_jobs',
-          filter: `tenant_id=eq.${tenant.id}`
-        },
-        (payload) => {
-          console.log('📝 Print job updated via real-time:', payload);
-          const updatedJob = transformPrintJobFromDb(payload.new as DbPrintJob);
-          setPrintJobs(prev => {
-            console.log('Updating job in list:', updatedJob);
-            return prev.map(job => 
-              job.id === updatedJob.id ? updatedJob : job
-            );
-          });
-        }
-      )
-      .on(
-        'postgres_changes',
-        {
-          event: 'DELETE',
-          schema: 'public',
-          table: 'print_jobs',
-          filter: `tenant_id=eq.${tenant.id}`
-        },
-        (payload) => {
-          console.log('Print job deleted:', payload);
-          setPrintJobs(prev => prev.filter(job => job.id !== payload.old.id));
-        }
-      )
-      .subscribe((status) => {
-        console.log('Print jobs subscription status:', status);
-      });
-
-    return () => {
-      console.log('Cleaning up print jobs subscription');
-      supabase.removeChannel(channel);
-    };
   }, [tenant?.id]);
 
   return {

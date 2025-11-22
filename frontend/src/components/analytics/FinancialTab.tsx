@@ -121,32 +121,6 @@ const FinancialTab = ({ analyticsData }: FinancialTabProps) => {
         </Card>
       </div>
 
-      {/* Financial Performance */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Financial Performance</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="space-y-4">
-            <div className="flex justify-between items-center">
-              <span className="text-sm font-medium">Revenue Growth (YoY)</span>
-              <span className="text-sm font-semibold text-green-600">+23.4%</span>
-            </div>
-            <div className="flex justify-between items-center">
-              <span className="text-sm font-medium">Profit Growth (YoY)</span>
-              <span className="text-sm font-semibold text-green-600">+18.7%</span>
-            </div>
-            <div className="flex justify-between items-center">
-              <span className="text-sm font-medium">Cost Reduction</span>
-              <span className="text-sm font-semibold text-green-600">-8.2%</span>
-            </div>
-            <div className="flex justify-between items-center">
-              <span className="text-sm font-medium">Inventory Turnover</span>
-              <span className="text-sm font-semibold">6.2x</span>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
     </div>
   );
 };

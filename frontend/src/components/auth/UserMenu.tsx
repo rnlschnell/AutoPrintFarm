@@ -10,10 +10,12 @@ import {
 import { Button } from '@/components/ui/button';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { useTenantContext } from '@/contexts/TenantContext';
-import { LogOut, User, Settings, Users } from 'lucide-react';
+import { LogOut, Settings, Users } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 
 const UserMenu: React.FC = () => {
   const { user, profile, tenant, signOut } = useTenantContext();
+  const navigate = useNavigate();
 
   if (!user || !profile || !tenant) {
     return null;
@@ -27,6 +29,10 @@ const UserMenu: React.FC = () => {
 
   const handleSignOut = async () => {
     await signOut();
+  };
+
+  const handleSettingsClick = () => {
+    navigate('/settings');
   };
 
   return (
@@ -51,11 +57,7 @@ const UserMenu: React.FC = () => {
           </div>
         </DropdownMenuLabel>
         <DropdownMenuSeparator />
-        <DropdownMenuItem>
-          <User className="mr-2 h-4 w-4" />
-          <span>Profile</span>
-        </DropdownMenuItem>
-        <DropdownMenuItem>
+        <DropdownMenuItem onClick={handleSettingsClick}>
           <Settings className="mr-2 h-4 w-4" />
           <span>Settings</span>
         </DropdownMenuItem>

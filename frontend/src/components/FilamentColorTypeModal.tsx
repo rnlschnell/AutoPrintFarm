@@ -19,9 +19,11 @@ interface ColorPreset {
 interface FilamentColorTypeModalProps {
   isOpen: boolean;
   onClose: () => void;
+  quickAddMode?: boolean;
+  onColorAdded?: (preset: ColorPreset) => void;
 }
 
-const FilamentColorTypeModal = ({ isOpen, onClose }: FilamentColorTypeModalProps) => {
+const FilamentColorTypeModal = ({ isOpen, onClose, quickAddMode = false, onColorAdded }: FilamentColorTypeModalProps) => {
   const { colorPresets, loading, createColorPreset, updateColorPreset, deleteColorPreset, refetch } = useColorPresetsContext();
   const [editingPreset, setEditingPreset] = useState<ColorPreset | null>(null);
   const [formData, setFormData] = useState({
@@ -61,6 +63,20 @@ const FilamentColorTypeModal = ({ isOpen, onClose }: FilamentColorTypeModalProps
     }
 
     if (success) {
+      // If in quick add mode, call the callback with the newly created preset
+      if (quickAddMode && onColorAdded) {
+        const newPreset: ColorPreset = {
+          id: '', // ID will be set by backend
+          color_name: formData.colorName,
+          hex_code: formData.hexCode,
+          filament_type: formData.filamentType,
+          is_active: true
+        };
+        onColorAdded(newPreset);
+        // Auto-close in quick add mode
+        onClose();
+      }
+
       setFormData({ colorName: "", hexCode: "#ff0000", filamentType: "" });
       setEditingPreset(null);
       setShowColorPicker(false);
@@ -103,52 +119,54 @@ const FilamentColorTypeModal = ({ isOpen, onClose }: FilamentColorTypeModalProps
       <Dialog open={isOpen} onOpenChange={onClose}>
         <DialogContent className="sm:max-w-[600px] max-h-[80vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>Manage Filament Colors & Types</DialogTitle>
+            <DialogTitle>{quickAddMode ? "Add New Color" : "Manage Filament Colors & Types"}</DialogTitle>
           </DialogHeader>
-        
+
         <div className="space-y-6">
-          <div className="space-y-4">
-            <Label>Current Color Presets</Label>
-            <div className="space-y-2 max-h-64 overflow-y-auto border rounded-md p-4">
-              {colorPresets.map((preset) => (
-                <div key={preset.id} className="flex items-center justify-between p-2 rounded-md hover:bg-muted/50">
-                  <div className="flex items-center gap-3">
-                    <div
-                      className="w-6 h-6 rounded-full border border-border"
-                      style={{ backgroundColor: preset.hex_code }}
-                    />
-                    <div className="flex flex-col">
-                      <span className="text-sm font-medium">{preset.color_name}</span>
-                      <span className="text-xs text-muted-foreground">{preset.filament_type}</span>
+          {!quickAddMode && (
+            <div className="space-y-4">
+              <Label>Current Color Presets</Label>
+              <div className="space-y-2 max-h-64 overflow-y-auto border rounded-md p-4">
+                {colorPresets.map((preset) => (
+                  <div key={preset.id} className="flex items-center justify-between p-2 rounded-md hover:bg-muted/50">
+                    <div className="flex items-center gap-3">
+                      <div
+                        className="w-6 h-6 rounded-full border border-border"
+                        style={{ backgroundColor: preset.hex_code }}
+                      />
+                      <div className="flex flex-col">
+                        <span className="text-sm font-medium">{preset.color_name}</span>
+                        <span className="text-xs text-muted-foreground">{preset.filament_type}</span>
+                      </div>
+                    </div>
+                    <div className="flex gap-1">
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => handleEdit(preset)}
+                        className="h-8 w-8 p-0"
+                      >
+                        <Edit className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => handleDelete(preset)}
+                        className="h-8 w-8 p-0 text-destructive hover:text-destructive"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
                     </div>
                   </div>
-                  <div className="flex gap-1">
-                    <Button 
-                      size="sm" 
-                      variant="ghost" 
-                      onClick={() => handleEdit(preset)}
-                      className="h-8 w-8 p-0"
-                    >
-                      <Edit className="h-4 w-4" />
-                    </Button>
-                    <Button 
-                      size="sm" 
-                      variant="ghost" 
-                      onClick={() => handleDelete(preset)}
-                      className="h-8 w-8 p-0 text-destructive hover:text-destructive"
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </Button>
-                  </div>
-                </div>
-              ))}
-              {colorPresets.length === 0 && (
-                <p className="text-sm text-muted-foreground text-center py-4">
-                  No color presets yet. Add one below.
-                </p>
-              )}
+                ))}
+                {colorPresets.length === 0 && (
+                  <p className="text-sm text-muted-foreground text-center py-4">
+                    No color presets yet. Add one below.
+                  </p>
+                )}
+              </div>
             </div>
-          </div>
+          )}
 
           <div className="space-y-4">
             <div className="flex items-center justify-between">
@@ -216,8 +234,10 @@ const FilamentColorTypeModal = ({ isOpen, onClose }: FilamentColorTypeModalProps
         </div>
 
         <DialogFooter className="gap-2">
-          <Button variant="outline" onClick={onClose}>Close</Button>
-          {editingPreset && (
+          <Button variant="outline" onClick={onClose}>
+            {quickAddMode ? "Cancel" : "Close"}
+          </Button>
+          {!quickAddMode && editingPreset && (
             <Button variant="outline" onClick={resetForm}>
               Cancel Edit
             </Button>

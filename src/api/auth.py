@@ -10,6 +10,7 @@ from datetime import datetime
 
 from ..services.auth_service import get_auth_service, AuthService
 from ..services.config_service import get_config_service
+from ..services.tunnel_service import get_tunnel_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Authentication"])
@@ -83,7 +84,44 @@ async def login(
                 config_service = get_config_service()
                 config_service.set_tenant_info(tenant_id)
                 logger.info(f"Pi automatically configured for tenant {tenant_id}")
-            
+
+            # Provision and start tunnel if service is available
+            tunnel_service = get_tunnel_service()
+            if tunnel_service:
+                try:
+                    # Check if tunnel credentials already exist
+                    status = tunnel_service.get_status()
+
+                    if not status.get('credentials_exist'):
+                        # Get auth token
+                        access_token = auth_service.current_session.get('access_token')
+                        if access_token:
+                            logger.info("Provisioning tunnel for first-time login...")
+                            tunnel_service.set_auth_token(access_token)
+
+                            # Provision tunnel
+                            tunnel_result = await tunnel_service.provision_tunnel()
+                            logger.info(f"Tunnel provisioned: {tunnel_result.get('subdomain')}")
+
+                            # Start tunnel
+                            started = await tunnel_service.start_tunnel()
+                            if started:
+                                logger.info("Tunnel started successfully after login")
+                            else:
+                                logger.warning("Tunnel provisioned but failed to start")
+                    elif not status.get('active'):
+                        # Credentials exist but tunnel not running - start it
+                        logger.info("Starting existing tunnel...")
+                        access_token = auth_service.current_session.get('access_token')
+                        if access_token:
+                            tunnel_service.set_auth_token(access_token)
+                        started = await tunnel_service.start_tunnel()
+                        if started:
+                            logger.info("Existing tunnel started successfully after login")
+                except Exception as e:
+                    # Don't fail login if tunnel provisioning fails
+                    logger.error(f"Failed to provision/start tunnel: {e}")
+
             return LoginResponse(
                 success=True,
                 message="Authentication successful",
@@ -438,22 +476,23 @@ async def auth_debug_info(
 ):
     """
     Get detailed authentication debugging information
-    
+
     Returns:
         Comprehensive debug information
     """
     try:
         # Test direct Supabase connection
         import requests
-        
+
         supabase_test = {
             "api_accessible": False,
             "auth_endpoint_accessible": False,
             "api_error": None,
             "auth_error": None
         }
-        
+
         # Test API access
+        # NOTE: Using printers endpoint only for connectivity testing (printers are not synced to Supabase)
         try:
             api_response = requests.get(
                 "https://rippurqgfesmtoovxidz.supabase.co/rest/v1/printers",
@@ -465,7 +504,7 @@ async def auth_debug_info(
                 supabase_test["api_error"] = api_response.text
         except Exception as e:
             supabase_test["api_error"] = str(e)
-        
+
         # Test auth endpoint
         try:
             auth_response = requests.post(
@@ -482,10 +521,10 @@ async def auth_debug_info(
                 supabase_test["auth_error"] = auth_response.text
         except Exception as e:
             supabase_test["auth_error"] = str(e)
-        
+
         # Get current auth state
         auth_health = auth_service.get_auth_health_status()
-        
+
         return {
             "auth_service_status": auth_health,
             "supabase_connectivity": supabase_test,
@@ -501,10 +540,208 @@ async def auth_debug_info(
             },
             "timestamp": datetime.utcnow().isoformat()
         }
-        
+
     except Exception as e:
         logger.error(f"Auth debug error: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Debug information gathering failed"
+        )
+
+# Phase 2: Subdomain Management Endpoints
+
+class CheckSubdomainRequest(BaseModel):
+    subdomain: str
+
+class CheckSubdomainResponse(BaseModel):
+    available: bool
+    subdomain: str
+
+class SignupRequest(BaseModel):
+    email: EmailStr
+    password: str
+    first_name: str
+    last_name: str
+    company_name: str
+    subdomain: Optional[str] = None  # Optional - will auto-generate if not provided
+
+class SignupResponse(BaseModel):
+    success: bool
+    message: str
+    user_id: Optional[str] = None
+    tenant_id: Optional[str] = None
+    subdomain: Optional[str] = None
+    full_domain: Optional[str] = None
+
+@router.post("/check-subdomain", response_model=CheckSubdomainResponse)
+async def check_subdomain_availability(
+    request: CheckSubdomainRequest,
+    auth_service: AuthService = Depends(get_auth_service_dep)
+):
+    """
+    Check if a subdomain is available for registration
+
+    Validates subdomain format and checks availability in Supabase.
+    Subdomain must be:
+    - 3-63 characters long
+    - Lowercase letters, numbers, and hyphens only
+    - No leading or trailing hyphens
+
+    Args:
+        request: Subdomain to check
+
+    Returns:
+        Availability status
+    """
+    try:
+        import re
+        from supabase import create_client
+
+        subdomain = request.subdomain.lower().strip()
+
+        # Validate format
+        if not re.match(r'^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$', subdomain):
+            return CheckSubdomainResponse(
+                available=False,
+                subdomain=subdomain
+            )
+
+        # Check availability via Supabase RPC
+        supabase = create_client(auth_service.supabase_url, auth_service.supabase_key)
+        result = supabase.rpc('check_subdomain_available', {'p_subdomain': subdomain}).execute()
+
+        available = result.data if result.data is not None else False
+
+        return CheckSubdomainResponse(
+            available=available,
+            subdomain=subdomain
+        )
+
+    except Exception as e:
+        logger.error(f"Error checking subdomain availability: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error checking subdomain availability"
+        )
+
+@router.post("/signup", response_model=SignupResponse)
+async def signup_with_subdomain(
+    request: SignupRequest,
+    auth_service: AuthService = Depends(get_auth_service_dep)
+):
+    """
+    Sign up a new user with subdomain selection
+
+    Creates a new tenant and user account. If subdomain is not provided,
+    auto-generates one from the company name. After successful signup,
+    claims the subdomain for the tenant.
+
+    Args:
+        request: Signup details including email, password, and optional subdomain
+
+    Returns:
+        Signup result with user, tenant, and subdomain information
+    """
+    try:
+        from supabase import create_client
+        import re
+
+        supabase = create_client(auth_service.supabase_url, auth_service.supabase_key)
+
+        # Generate subdomain if not provided
+        subdomain = request.subdomain
+        if not subdomain:
+            # Auto-generate from company name
+            base_subdomain = re.sub(r'[^a-z0-9]+', '-', request.company_name.lower())
+            base_subdomain = re.sub(r'^-+|-+$', '', base_subdomain)
+            timestamp = datetime.utcnow().strftime('%s')[-6:]  # Last 6 digits of timestamp
+            subdomain = f"{base_subdomain}-{timestamp}"
+        else:
+            subdomain = subdomain.lower().strip()
+
+        # Validate subdomain format
+        if not re.match(r'^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$', subdomain):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid subdomain format. Use only lowercase letters, numbers, and hyphens (3-63 characters)."
+            )
+
+        # Check subdomain availability
+        availability_result = supabase.rpc('check_subdomain_available', {'p_subdomain': subdomain}).execute()
+        if not availability_result.data:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Subdomain '{subdomain}' is already taken"
+            )
+
+        # Create user account via Supabase Auth
+        auth_response = supabase.auth.sign_up({
+            "email": request.email,
+            "password": request.password
+        })
+
+        if not auth_response.user:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Failed to create user account"
+            )
+
+        user_id = auth_response.user.id
+
+        # Create tenant
+        tenant_data = {
+            "company_name": request.company_name,
+            "subdomain": subdomain,
+            "is_active": True
+        }
+
+        tenant_response = supabase.table('tenants').insert(tenant_data).execute()
+
+        if not tenant_response.data or len(tenant_response.data) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to create tenant"
+            )
+
+        tenant_id = tenant_response.data[0]['id']
+
+        # Create profile linking user to tenant
+        profile_data = {
+            "id": user_id,
+            "tenant_id": tenant_id,
+            "email": request.email,
+            "first_name": request.first_name,
+            "last_name": request.last_name,
+            "role": "admin"
+        }
+
+        supabase.table('profiles').insert(profile_data).execute()
+
+        # Claim the subdomain (stores subdomain_claimed_at timestamp)
+        claim_result = supabase.rpc('claim_subdomain', {
+            'p_tenant_id': tenant_id,
+            'p_subdomain': subdomain
+        }).execute()
+
+        if not claim_result.data:
+            logger.warning(f"Subdomain claim RPC returned no data for {subdomain}")
+
+        logger.info(f"Successfully created account for {request.email} with subdomain {subdomain}")
+
+        return SignupResponse(
+            success=True,
+            message="Account created successfully",
+            user_id=user_id,
+            tenant_id=tenant_id,
+            subdomain=subdomain,
+            full_domain=f"{subdomain}.autoprintfarm.com"
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Signup error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Signup failed: {str(e)}"
         )

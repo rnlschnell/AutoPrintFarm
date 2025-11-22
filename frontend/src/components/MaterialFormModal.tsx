@@ -8,6 +8,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { InventoryType } from "@/lib/data";
 import { useColorPresetsContext } from "@/contexts/ColorPresetsContext";
 import { useToast } from "@/hooks/use-toast";
+import FilamentColorTypeModal from "@/components/FilamentColorTypeModal";
+import { Plus } from "lucide-react";
 
 interface MaterialFormModalProps {
   isOpen: boolean;
@@ -18,7 +20,6 @@ interface MaterialFormModalProps {
     type: string;
     color: string;
     brand: string;
-    spoolSize: string;
     diameter: string;
     costPerSpool: string;
     location: string;
@@ -50,6 +51,8 @@ const MaterialFormModal = ({
   const { colorPresets } = useColorPresetsContext();
   const [availableTypes, setAvailableTypes] = useState<string[]>([]);
   const [availableColors, setAvailableColors] = useState<any[]>([]);
+  const [showAddColorModal, setShowAddColorModal] = useState(false);
+  const [preSelectedType, setPreSelectedType] = useState<string>('');
   const { toast } = useToast();
 
   useEffect(() => {
@@ -89,9 +92,17 @@ const MaterialFormModal = ({
               <div className="grid grid-cols-4 items-center gap-4">
                 <Label htmlFor="type" className="text-right">Type *</Label>
                 <div className="col-span-3">
-                  <Select 
-                    value={materialData.type} 
-                    onValueChange={(value) => onMaterialDataChange({ ...materialData, type: value, color: '' })}
+                  <Select
+                    value={materialData.type}
+                    onValueChange={(value) => {
+                      // Handle "Add New" option
+                      if (value === '__ADD_NEW_TYPE__') {
+                        setPreSelectedType('');
+                        setShowAddColorModal(true);
+                        return;
+                      }
+                      onMaterialDataChange({ ...materialData, type: value, color: '' });
+                    }}
                   >
                     <SelectTrigger>
                       <SelectValue placeholder="Select filament type" />
@@ -100,6 +111,12 @@ const MaterialFormModal = ({
                       {availableTypes.map(type => (
                         <SelectItem key={type} value={type}>{type}</SelectItem>
                       ))}
+                      <SelectItem value="__ADD_NEW_TYPE__">
+                        <div className="flex items-center gap-2 text-primary">
+                          <Plus className="h-4 w-4" />
+                          <span>Add New Type</span>
+                        </div>
+                      </SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
@@ -108,9 +125,17 @@ const MaterialFormModal = ({
               <div className="grid grid-cols-4 items-center gap-4">
                 <Label htmlFor="color" className="text-right">Color *</Label>
                 <div className="col-span-3">
-                  <Select 
-                    value={materialData.color} 
-                    onValueChange={(value) => onMaterialDataChange({ ...materialData, color: value })}
+                  <Select
+                    value={materialData.color}
+                    onValueChange={(value) => {
+                      // Handle "Add New" option
+                      if (value === '__ADD_NEW_COLOR__') {
+                        setPreSelectedType(materialData.type);
+                        setShowAddColorModal(true);
+                        return;
+                      }
+                      onMaterialDataChange({ ...materialData, color: value });
+                    }}
                     disabled={!materialData.type}
                   >
                     <SelectTrigger>
@@ -128,6 +153,14 @@ const MaterialFormModal = ({
                           </div>
                         </SelectItem>
                       ))}
+                      {materialData.type && (
+                        <SelectItem value="__ADD_NEW_COLOR__">
+                          <div className="flex items-center gap-2 text-primary">
+                            <Plus className="h-4 w-4" />
+                            <span>Add New Color</span>
+                          </div>
+                        </SelectItem>
+                      )}
                     </SelectContent>
                   </Select>
                 </div>
@@ -163,28 +196,16 @@ const MaterialFormModal = ({
       {activeTab === 'Filament' && (
         <>
           <div className="grid grid-cols-4 items-center gap-4">
-            <Label htmlFor="spoolSize" className="text-right">Spool Size (g) *</Label>
+            <Label htmlFor="location" className="text-right">Storage Location</Label>
             <Input
-              id="spoolSize"
-              type="number"
-              value={materialData.spoolSize}
-              onChange={(e) => onMaterialDataChange({ ...materialData, spoolSize: e.target.value })}
+              id="location"
+              value={materialData.location}
+              onChange={(e) => onMaterialDataChange({ ...materialData, location: e.target.value })}
               className="col-span-3"
-              placeholder="1000"
+              placeholder="e.g. Shelf A, Bin 3"
             />
           </div>
-          
-          <div className="grid grid-cols-4 items-center gap-4">
-            <Label htmlFor="diameter" className="text-right">Diameter</Label>
-            <Input
-              id="diameter"
-              value={materialData.diameter}
-              onChange={(e) => onMaterialDataChange({ ...materialData, diameter: e.target.value })}
-              className="col-span-3"
-              placeholder="1.75mm"
-            />
-          </div>
-          
+
           <div className="grid grid-cols-4 items-center gap-4">
             <Label htmlFor="costPerSpool" className="text-right">Cost Per Spool ($)</Label>
             <Input
@@ -226,6 +247,17 @@ const MaterialFormModal = ({
       
       {activeTab !== 'Filament' && (
         <>
+          <div className="grid grid-cols-4 items-center gap-4">
+            <Label htmlFor="location" className="text-right">Storage Location</Label>
+            <Input
+              id="location"
+              value={materialData.location}
+              onChange={(e) => onMaterialDataChange({ ...materialData, location: e.target.value })}
+              className="col-span-3"
+              placeholder="e.g. Shelf A, Bin 3"
+            />
+          </div>
+
           <div className="grid grid-cols-4 items-center gap-4">
             <Label htmlFor="costPerUnit" className="text-right">Cost Per Unit ($)</Label>
             <Input
@@ -314,6 +346,20 @@ const MaterialFormModal = ({
           </Button>
         </DialogFooter>
       </DialogContent>
+
+      <FilamentColorTypeModal
+        isOpen={showAddColorModal}
+        onClose={() => setShowAddColorModal(false)}
+        quickAddMode={true}
+        onColorAdded={(preset) => {
+          // Auto-populate BOTH type and color from the newly created preset
+          onMaterialDataChange({
+            ...materialData,
+            type: preset.filament_type,
+            color: preset.color_name
+          });
+        }}
+      />
     </Dialog>
   );
 };

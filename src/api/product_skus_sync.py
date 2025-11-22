@@ -26,6 +26,7 @@ class ProductSkuCreateRequest(BaseModel):
     quantity: int = 1
     stock_level: int = 0
     price: Optional[float] = None  # In dollars, will be converted to cents
+    low_stock_threshold: Optional[int] = 0
 
 class ProductSkuUpdateRequest(BaseModel):
     sku: Optional[str] = None
@@ -35,6 +36,7 @@ class ProductSkuUpdateRequest(BaseModel):
     quantity: Optional[int] = None
     stock_level: Optional[int] = None
     price: Optional[float] = None
+    low_stock_threshold: Optional[int] = None
 
 router = APIRouter(
     prefix="/product-skus-sync",
@@ -45,24 +47,40 @@ router = APIRouter(
 @router.get("/", response_model=List[dict])
 async def get_product_skus():
     """
-    Get all product SKUs for the current tenant from local SQLite
+    Get all product SKUs for the current tenant from local SQLite, enriched with finished goods stock
     """
     try:
         # Get tenant ID from config
         config_service = get_config_service()
         tenant_config = config_service.get_tenant_config()
         tenant_id = tenant_config.get('id', '').strip()
-        
+
         if not tenant_id:
             raise HTTPException(status_code=400, detail="Tenant not configured")
-        
+
         # Get product SKUs from local database
         db_service = await get_database_service()
         skus = await db_service.get_product_skus_by_tenant(tenant_id)
-        
-        # Convert to dict for response
-        return [sku.to_dict() for sku in skus]
-        
+
+        # Get all finished goods for this tenant
+        finished_goods = await db_service.get_finished_goods_by_tenant(tenant_id)
+
+        # Create a mapping of product_sku_id to finished goods stock
+        finished_goods_map = {}
+        for fg in finished_goods:
+            # Total stock is quantity_assembled + quantity_needs_assembly
+            total_stock = (fg.quantity_assembled or 0) + (fg.quantity_needs_assembly or 0)
+            finished_goods_map[fg.product_sku_id] = total_stock
+
+        # Convert to dict and enrich with finished goods stock
+        sku_dicts = []
+        for sku in skus:
+            sku_dict = sku.to_dict()
+            sku_dict['finishedGoodsStock'] = finished_goods_map.get(sku.id, 0)
+            sku_dicts.append(sku_dict)
+
+        return sku_dicts
+
     except Exception as e:
         logger.error(f"Failed to get product SKUs: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -221,8 +239,8 @@ async def get_low_stock_skus():
 async def create_product_sku(sku_request: ProductSkuCreateRequest):
     """
     Create a new product SKU (local-first)
-    
-    Creates a new SKU in the local SQLite database and queues backup to Supabase.
+
+    Creates a new SKU in the local SQLite database.
     """
     try:
         # Get tenant ID from config
@@ -238,10 +256,24 @@ async def create_product_sku(sku_request: ProductSkuCreateRequest):
         product = await db_service.get_product_by_id(sku_request.product_id)
         if not product:
             raise HTTPException(status_code=404, detail="Product not found")
-        
+
+        # Check for duplicate SKU name (case-insensitive) across ALL products in tenant
+        existing_skus = await db_service.get_product_skus_by_tenant(tenant_id)
+        for existing_sku in existing_skus:
+            if existing_sku.sku.lower() == sku_request.sku.lower():
+                raise HTTPException(
+                    status_code=400,
+                    detail="SKU name already in use. Please enter a unique SKU identifier"
+                )
+
         # Generate UUID for new SKU
         sku_id = str(uuid.uuid4())
-        
+
+        # Log the received price for debugging
+        logger.info(f"🔍 CREATE SKU - Received price: {sku_request.price} (type: {type(sku_request.price)})")
+        converted_price = int(sku_request.price * 100) if sku_request.price else None
+        logger.info(f"🔍 CREATE SKU - Converted price: {converted_price} cents")
+
         # Create SKU data dict (convert price to cents)
         sku_data = {
             'id': sku_id,
@@ -253,18 +285,24 @@ async def create_product_sku(sku_request: ProductSkuCreateRequest):
             'hex_code': sku_request.hex_code,
             'quantity': sku_request.quantity,
             'stock_level': sku_request.stock_level,
-            'price': int(sku_request.price * 100) if sku_request.price else None,  # Convert to cents
+            'price': converted_price,
+            'low_stock_threshold': sku_request.low_stock_threshold,
             'is_active': True,
             'created_at': datetime.utcnow(),
             'updated_at': datetime.utcnow()
         }
         
-        # Insert into local SQLite (will automatically queue backup to Supabase)
+        # Insert into local SQLite
         success = await db_service.upsert_product_sku(sku_data)
         
         # Create associated finished good
         if success:
             try:
+                # Determine assembly quantities based on product requirements
+                requires_assembly = product.requires_assembly
+                quantity_assembled = 0 if requires_assembly else sku_request.stock_level
+                quantity_needs_assembly = sku_request.stock_level if requires_assembly else 0
+
                 finished_good = FinishedGoods(
                     id=str(uuid.uuid4()),
                     product_sku_id=sku_id,
@@ -274,9 +312,11 @@ async def create_product_sku(sku_request: ProductSkuCreateRequest):
                     material=sku_request.filament_type or 'PLA',
                     current_stock=sku_request.stock_level,
                     unit_price=int(sku_request.price * 100) if sku_request.price else 0,
-                    assembly_status='printed',
-                    status='out_of_stock' if sku_request.stock_level == 0 else 'low_stock' if sku_request.stock_level < 5 else 'in_stock',
-                    low_stock_threshold=5,
+                    requires_assembly=requires_assembly,
+                    quantity_assembled=quantity_assembled,
+                    quantity_needs_assembly=quantity_needs_assembly,
+                    status='out_of_stock' if sku_request.stock_level == 0 else 'low_stock' if sku_request.stock_level < sku_request.low_stock_threshold else 'in_stock',
+                    low_stock_threshold=sku_request.low_stock_threshold,
                     quantity_per_sku=1,
                     extra_cost=0,
                     profit_margin=0,
@@ -323,13 +363,24 @@ async def update_product_sku(sku_id: str, sku_request: ProductSkuUpdateRequest):
         # Get existing SKU
         db_service = await get_database_service()
         existing_sku = await db_service.get_product_sku_by_id(sku_id)
-        
+
         if not existing_sku:
             raise HTTPException(status_code=404, detail="Product SKU not found")
-        
+
+        # Check for duplicate SKU name (case-insensitive) across ALL products in tenant if SKU name is being updated
+        if sku_request.sku is not None:
+            existing_skus = await db_service.get_product_skus_by_tenant(tenant_id)
+            for other_sku in existing_skus:
+                # Skip the current SKU being updated
+                if other_sku.id != sku_id and other_sku.sku.lower() == sku_request.sku.lower():
+                    raise HTTPException(
+                        status_code=400,
+                        detail="SKU name already in use. Please enter a unique SKU identifier"
+                    )
+
         # Build update data
         update_data = {'id': sku_id, 'tenant_id': tenant_id, 'updated_at': datetime.utcnow()}
-        
+
         if sku_request.sku is not None:
             update_data['sku'] = sku_request.sku
         if sku_request.color is not None:
@@ -344,9 +395,30 @@ async def update_product_sku(sku_id: str, sku_request: ProductSkuUpdateRequest):
             update_data['stock_level'] = sku_request.stock_level
         if sku_request.price is not None:
             update_data['price'] = int(sku_request.price * 100)  # Convert to cents
-        
+        if sku_request.low_stock_threshold is not None:
+            update_data['low_stock_threshold'] = sku_request.low_stock_threshold
+
         # Update in local SQLite
         success = await db_service.upsert_product_sku(update_data)
+
+        # If low_stock_threshold was updated, sync to FinishedGoods
+        if success and sku_request.low_stock_threshold is not None:
+            try:
+                # Get the finished good for this SKU
+                finished_goods = await db_service.get_finished_goods_by_tenant(tenant_id)
+                for fg in finished_goods:
+                    if fg.product_sku_id == sku_id:
+                        # Update the finished good's low_stock_threshold
+                        update_fg_data = {
+                            'low_stock_threshold': sku_request.low_stock_threshold,
+                            'updated_at': datetime.utcnow()
+                        }
+                        await db_service.update_finished_good(fg.id, update_fg_data)
+                        logger.info(f"Synced low_stock_threshold to finished good for SKU: {sku_id}")
+                        break
+            except Exception as e:
+                logger.error(f"Failed to sync low_stock_threshold to finished good for SKU {sku_id}: {e}")
+                # Don't fail the SKU update if finished good sync fails
         
         if success:
             # Get updated SKU
@@ -388,19 +460,8 @@ async def delete_product_sku(sku_id: str):
         
         # Delete from local SQLite
         success = await db_service.delete_product_sku(sku_id, tenant_id)
-        
+
         if success:
-            # Queue backup deletion to Supabase
-            from ..services.backup_service import get_backup_service
-            backup_service = get_backup_service()
-            if backup_service:
-                await backup_service.queue_change(
-                    'product_skus',
-                    'delete',
-                    sku_id,
-                    {'id': sku_id, 'tenant_id': tenant_id, 'is_active': False, 'deleted_at': datetime.utcnow()}
-                )
-            
             return {
                 'success': True,
                 'message': f"Product SKU '{sku_id}' deleted successfully"

@@ -236,8 +236,8 @@ async def get_unique_filament_types():
 async def create_color_preset(preset_request: ColorPresetCreateRequest):
     """
     Create a new color preset (local-first)
-    
-    Creates a new color preset in the local SQLite database and queues backup to Supabase.
+
+    Creates a new color preset in the local SQLite database.
     """
     try:
         # Get tenant ID from config
@@ -265,7 +265,7 @@ async def create_color_preset(preset_request: ColorPresetCreateRequest):
             'updated_at': datetime.utcnow()
         }
         
-        # Insert into local SQLite (will automatically queue backup to Supabase)
+        # Insert into local SQLite
         db_service = await get_database_service()
         success = await db_service.upsert_color_preset(preset_data)
         
@@ -364,19 +364,8 @@ async def delete_color_preset(preset_id: str):
         
         # Delete from local SQLite
         success = await db_service.delete_color_preset(preset_id, tenant_id)
-        
+
         if success:
-            # Queue backup deletion to Supabase
-            from ..services.backup_service import get_backup_service
-            backup_service = get_backup_service()
-            if backup_service:
-                await backup_service.queue_change(
-                    'color_presets',
-                    'delete',
-                    preset_id,
-                    {'id': preset_id, 'tenant_id': tenant_id, 'is_active': False, 'deleted_at': datetime.utcnow()}
-                )
-            
             return {
                 'success': True,
                 'message': f"Color preset '{preset_id}' deleted successfully"

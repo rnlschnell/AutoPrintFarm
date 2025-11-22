@@ -45,7 +45,7 @@ const Sidebar = ({ sidebarOpen, setSidebarOpen }: SidebarProps) => {
         <div className="flex h-14 items-center justify-between border-b px-4 lg:h-[60px] lg:px-6">
           <NavLink to="/" className="flex items-center gap-2 whitespace-nowrap font-semibold text-foreground">
             <Bot className="h-6 w-6 text-primary" />
-            <span>{tenant?.company_name || 'PrintFarm OS'}</span>
+            <span>AutoPrintFarm</span>
           </NavLink>
           <Button variant="ghost" size="icon" className="sm:hidden" onClick={() => setSidebarOpen(false)}>
             <X className="h-5 w-5" />

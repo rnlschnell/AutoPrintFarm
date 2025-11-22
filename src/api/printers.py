@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends
 from typing import List, Optional
+import asyncio
 import logging
 from pydantic import BaseModel
 from src.models.requests import PrinterCreateRequest, PrinterUpdateRequest
@@ -8,6 +9,7 @@ from src.models.responses import (
     BaseResponse, ErrorResponse, PrinterInfo
 )
 from src.core.printer_client import printer_manager
+from src.core.connection_manager import connection_manager
 from src.core.config import load_printers_config, save_printers_config
 from src.utils.exceptions import PrinterNotFoundError, PrinterConnectionError, ValidationError
 from src.utils.validators import validate_printer_config
@@ -199,18 +201,18 @@ async def connect_printer(printer_id: str):
 async def disconnect_printer(printer_id: str):
     """
     Disconnect from a specific printer
-    
+
     Closes the MQTT connection to the specified printer.
     """
     try:
         # Disconnect from printer
         printer_manager.disconnect_printer(printer_id)
-        
+
         return BaseResponse(
             success=True,
             message=f"Successfully disconnected from printer {printer_id}"
         )
-        
+
     except PrinterNotFoundError as e:
         logger.error(f"Printer not found: {e}")
         raise HTTPException(status_code=404, detail=str(e))
@@ -218,66 +220,36 @@ async def disconnect_printer(printer_id: str):
         logger.error(f"Failed to disconnect from printer: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/status-quick")
-async def get_printer_status_quick():
+@router.post("/{printer_id}/reconnect", response_model=BaseResponse)
+async def reconnect_printer(printer_id: str):
     """
-    Quick status check for all printers - optimized for frontend polling
-    Returns basic connection status without detailed information
+    Manually reconnect to a printer
+
+    Resets the connection attempt counter and attempts to reconnect to the printer.
+    This is useful when a printer has reached the maximum auto-reconnect attempts
+    and needs to be manually reconnected.
     """
     try:
-        printers_list = printer_manager.list_printers()
-        quick_status = []
-        
-        for printer in printers_list:
-            printer_id = printer.get("id")
-            
-            # Quick check if printer has an active client connection
-            is_connected = printer_id in printer_manager.clients
-            
-            # Try to get basic state if connected
-            status = "offline"
-            if is_connected:
-                try:
-                    client = printer_manager.clients.get(printer_id)
-                    if client and hasattr(client, 'connected') and client.connected:
-                        status = "idle"  # Default to idle if connected
-                        # Try to get actual state
-                        try:
-                            state = await asyncio.wait_for(
-                                asyncio.to_thread(client.get_state),
-                                timeout=1.0  # Very short timeout for quick response
-                            )
-                            if state:
-                                state_str = str(state).lower()
-                                if 'print' in state_str or 'run' in state_str:
-                                    status = "printing"
-                                elif 'idle' in state_str:
-                                    status = "idle"
-                                elif 'pause' in state_str:
-                                    status = "paused"
-                        except:
-                            pass  # Keep default idle status if state check fails
-                except:
-                    is_connected = False
-                    status = "offline"
-            
-            quick_status.append({
-                "printer_id": printer_id,
-                "connected": is_connected,
-                "status": status
-            })
-        
-        return {
-            "success": True,
-            "printers": quick_status
-        }
+        # Reset the attempt counter to allow reconnection
+        connection_manager.reset_attempt_count(printer_id)
+
+        # Attempt to connect to the printer (user_action=True bypasses attempt limit)
+        await printer_manager.connect_printer(printer_id)
+
+        return BaseResponse(
+            success=True,
+            message=f"Successfully reconnected to printer {printer_id}"
+        )
+
+    except PrinterNotFoundError as e:
+        logger.error(f"Printer not found: {e}")
+        raise HTTPException(status_code=404, detail=str(e))
+    except PrinterConnectionError as e:
+        logger.error(f"Failed to reconnect to printer: {e}")
+        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
-        logger.error(f"Failed to get quick printer status: {e}")
-        return {
-            "success": False,
-            "error": str(e),
-            "printers": []
-        }
+        logger.error(f"Unexpected error reconnecting to printer: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.put("/{printer_id}", response_model=PrinterCreateResponse)
 async def update_printer(printer_id: str, printer_update: PrinterUpdateRequest):
@@ -495,3 +467,187 @@ async def get_printer_light_status(printer_id: str):
         logger.error(f"Failed to get printer light status: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@router.post("/{printer_id}/cleared/toggle", response_model=BaseResponse)
+async def toggle_printer_cleared_status(printer_id: str):
+    """
+    Toggle printer cleared status
+
+    Toggles the cleared status for a printer. When false, indicates the printer
+    bed needs to be cleared before starting a new print.
+    """
+    try:
+        import sqlite3
+        from datetime import datetime
+
+        # Direct SQLite access
+        db_path = "/home/pi/PrintFarmSoftware/data/tenant.db"
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+
+        # Get current cleared status
+        cursor.execute("""
+            SELECT cleared FROM printers WHERE printer_id = ?
+        """, (int(printer_id),))
+
+        result = cursor.fetchone()
+        if not result:
+            conn.close()
+            raise PrinterNotFoundError(f"Printer {printer_id} not found")
+
+        current_cleared = result[0]
+        new_status = not bool(current_cleared) if current_cleared is not None else True
+
+        # Toggle the cleared status
+        cursor.execute("""
+            UPDATE printers
+            SET cleared = ?,
+                updated_at = ?
+            WHERE printer_id = ?
+        """, (1 if new_status else 0, datetime.utcnow().isoformat(), int(printer_id)))
+
+        conn.commit()
+        conn.close()
+
+        return BaseResponse(
+            success=True,
+            message=f"Printer cleared status updated to {new_status}"
+        )
+
+    except PrinterNotFoundError as e:
+        logger.error(f"Printer not found: {e}")
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to toggle printer cleared status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/status-quick")
+async def debug_status_quick():
+    """Quick status check for all printers - returns live print status"""
+    try:
+        quick_status = []
+
+        for printer_id in printer_manager.printer_configs.keys():
+            config = printer_manager.printer_configs[printer_id]
+            is_connected = printer_id in printer_manager.clients
+
+            # Get live status if connected
+            status = "offline"
+            if is_connected:
+                try:
+                    # Use the comprehensive live status method with timeout
+                    live_status = await asyncio.wait_for(
+                        printer_manager.get_live_print_status(printer_id),
+                        timeout=2.0
+                    )
+                    # Extract status from live status response
+                    status = live_status.get("status", "idle")
+                except asyncio.TimeoutError:
+                    logger.warning(f"Timeout getting live status for printer {printer_id}, defaulting to idle")
+                    status = "idle"
+                except Exception as e:
+                    logger.warning(f"Error getting live status for printer {printer_id}: {e}, defaulting to idle")
+                    status = "idle"
+
+            quick_status.append({
+                "printer_id": printer_id,
+                "name": config.get("name", "Unknown"),
+                "model": config.get("model", "Unknown"),
+                "connected": is_connected,
+                "status": status
+            })
+
+        return {
+            "success": True,
+            "printers": quick_status
+        }
+    except Exception as e:
+        import traceback
+        logger.error(f"Failed to get quick printer status: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "traceback": traceback.format_exc(),
+            "printers": []
+        }
+
+@router.get("/status-quick-fixed")
+async def get_printer_status_quick_fixed():
+    """Working version of status-quick that returns both printers"""
+    quick_status = []
+    
+    for printer_id in printer_manager.printer_configs.keys():
+        config = printer_manager.printer_configs[printer_id]
+        is_connected = printer_id in printer_manager.clients
+        
+        quick_status.append({
+            "printer_id": printer_id,
+            "name": config.get("name", "Unknown"),
+            "model": config.get("model", "Unknown"),
+            "connected": is_connected,
+            "status": "idle" if is_connected else "offline"
+        })
+    
+    return {
+        "success": True,
+        "printers": quick_status
+    }
+
+@router.post("/{printer_id}/enable")
+async def enable_printer(printer_id: str):
+    """
+    Re-enable a disabled printer and reset failure counters
+
+    This endpoint allows manually re-enabling a printer that was auto-disabled
+    due to consecutive connection failures. It resets all failure tracking.
+    """
+    try:
+        from src.services.database_service import get_database_service
+        from sqlalchemy import text
+        from datetime import datetime
+
+        db_service = await get_database_service()
+
+        async with db_service.get_session() as session:
+            # First check if printer exists
+            check_query = text("SELECT id, name FROM printers WHERE id = :printer_id")
+            result = await session.execute(check_query, {'printer_id': printer_id})
+            printer = result.fetchone()
+
+            if not printer:
+                raise HTTPException(status_code=404, detail=f"Printer {printer_id} not found")
+
+            printer_name = printer[1]
+
+            # Re-enable the printer and reset failure tracking
+            update_query = text("""
+                UPDATE printers
+                SET is_active = 1,
+                    consecutive_failures = 0,
+                    disabled_reason = NULL,
+                    disabled_at = NULL,
+                    updated_at = :timestamp
+                WHERE id = :printer_id
+            """)
+
+            await session.execute(update_query, {
+                'timestamp': datetime.utcnow().isoformat(),
+                'printer_id': printer_id
+            })
+
+            await session.commit()
+
+            logger.info(f"Manually re-enabled printer {printer_name} (id: {printer_id})")
+
+            return {
+                "success": True,
+                "message": f"Printer {printer_name} has been re-enabled",
+                "printer_id": printer_id
+            }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error enabling printer {printer_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to enable printer: {str(e)}")

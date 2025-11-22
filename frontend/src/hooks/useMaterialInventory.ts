@@ -23,7 +23,6 @@ export interface MaterialInventoryItem {
   // Additional fields for compatibility
   diameter?: string;
   category?: InventoryType;
-  spoolSize?: number;
   remaining?: number;
   usageHistory?: any[];
 }
@@ -66,7 +65,6 @@ export const useMaterialInventory = () => {
             ...item,
             category,
             remaining: item.remaining_grams,
-            spoolSize: item.remaining_grams,
             usageHistory: []
           }));
 
@@ -85,7 +83,6 @@ export const useMaterialInventory = () => {
             color: '', // Set empty color since it was removed from table
             category,
             remaining: item.remaining_units,
-            spoolSize: item.remaining_units,
             usageHistory: []
           }));
 
@@ -104,7 +101,6 @@ export const useMaterialInventory = () => {
             color: '', // Set empty color since it was removed from table
             category,
             remaining: item.remaining_units,
-            spoolSize: item.remaining_units,
             usageHistory: []
           }));
 
@@ -123,7 +119,6 @@ export const useMaterialInventory = () => {
             color: '', // Set empty color since it was removed from table
             category,
             remaining: item.remaining_units,
-            spoolSize: item.remaining_units,
             usageHistory: []
           }));
 
@@ -182,8 +177,7 @@ export const useMaterialInventory = () => {
 
       if (category === 'Filament') {
         insertData.remaining_grams = materialData.remaining;
-        insertData.diameter = materialData.diameter || '1.75mm';
-        
+
         const result = await supabase
           .from('filament_inventory')
           .insert(insertData)
@@ -239,7 +233,6 @@ export const useMaterialInventory = () => {
         ...data,
         category,
         remaining: category === 'Filament' ? (data as any).remaining_grams : (data as any).remaining_units,
-        spoolSize: category === 'Filament' ? (data as any).remaining_grams : (data as any).remaining_units,
         usageHistory: []
       };
 
@@ -284,6 +277,11 @@ export const useMaterialInventory = () => {
       delete updateData.tenant_id;
       delete updateData.created_at;
       delete updateData.updated_at;
+
+      // Remove color field for non-filament categories
+      if (category !== 'Filament') {
+        delete updateData.color;
+      }
 
       let data, error;
 
@@ -335,7 +333,6 @@ export const useMaterialInventory = () => {
         ...data,
         category,
         remaining: category === 'Filament' ? (data as any).remaining_grams : (data as any).remaining_units,
-        spoolSize: category === 'Filament' ? (data as any).remaining_grams : (data as any).remaining_units,
         usageHistory: []
       };
 

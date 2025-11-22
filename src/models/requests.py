@@ -21,13 +21,14 @@ class PrinterUpdateRequest(BaseModel):
     serial: Optional[str] = Field(None, description="Printer serial number")
     model: Optional[str] = Field(None, description="Printer model")
     enabled: Optional[bool] = Field(None, description="Whether the printer is enabled")
+    current_build_plate: Optional[str] = Field(None, description="Current build plate type name")
 
 # Print Control Models
 class PrintStartRequest(BaseModel):
     """Request model for starting a print job - CRITICAL: Must match Bambu Lab MQTT protocol exactly"""
     file_path: str = Field(..., description="Name of the 3MF file on printer (without path)")
     plate_number: int = Field(default=1, ge=1, le=4, description="Build plate number (1-4)")
-    use_ams: bool = Field(default=True, description="Whether to use AMS for filament")
+    use_ams: bool = Field(default=False, description="Whether to use AMS for filament")
     ams_mapping: Optional[List[int]] = Field(None, description="AMS slot mapping array, -1 for external spool")
     flow_calibration: bool = Field(default=False, description="Enable automatic flow calibration")
     bed_leveling: bool = Field(default=True, description="Enable bed leveling before print")
@@ -93,6 +94,12 @@ class FlowCalibrationRequest(BaseModel):
     """Request model for flow rate calibration"""
     filament_type: str = Field(..., description="Filament type for calibration")
     nozzle_diameter: float = Field(default=0.4, description="Nozzle diameter in mm")
+
+class CalibrationRequest(BaseModel):
+    """Request model for printer calibration"""
+    bed_level: bool = Field(default=True, description="Whether to calibrate the bed level")
+    vibration_compensation: bool = Field(default=True, description="Whether to calibrate the vibration compensation")
+    motor_noise_calibration: bool = Field(default=True, description="Whether to calibrate the motor noise")
 
 
 

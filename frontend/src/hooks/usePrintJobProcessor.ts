@@ -1,10 +1,12 @@
-import { useState } from 'react';
+import { useState, useCallback } from 'react';
 import { useToast } from '@/hooks/use-toast';
 import { supabase } from '@/integrations/supabase/client';
+import { getApiBaseUrl } from '@/utils/apiUrl';
 
 export interface EnhancedJobRequest {
   job_type: 'print_file' | 'product';
   target_id: string;
+  product_sku_id?: string;
   printer_id: string;
   color: string;
   filament_type: string;
@@ -20,6 +22,7 @@ export interface ProcessingStatus {
   stage: string;
   file_type: string;
   target_id: string;
+  product_sku_id?: string;
   printer_id: string;
   copies: number;
   auto_start: boolean;
@@ -39,20 +42,20 @@ export interface ValidationResult {
   warnings: string[];
 }
 
+export interface ObjectCountData {
+  object_count: number | null;
+  current_stock: number | null;
+  projected_stock: number | null;
+  requires_assembly: boolean;
+  print_file_id: string | null;
+  error?: string;
+}
+
 export const usePrintJobProcessor = () => {
   const [processing, setProcessing] = useState(false);
   const [validating, setValidating] = useState(false);
   const { toast } = useToast();
 
-  const getApiBaseUrl = () => {
-    const currentHost = window.location.hostname;
-    
-    if (currentHost === '192.168.4.45' || currentHost === 'localhost' || currentHost === '127.0.0.1') {
-      return `${window.location.protocol}//${window.location.host}`;
-    } else {
-      return 'http://192.168.4.45:8080';
-    }
-  };
 
   const validateJobRequest = async (request: EnhancedJobRequest): Promise<ValidationResult> => {
     try {
@@ -110,12 +113,7 @@ export const usePrintJobProcessor = () => {
       
       if (!validation.valid) {
         const errorMessage = validation.errors.join(', ');
-        toast({
-          title: "Validation Error",
-          description: errorMessage,
-          variant: "destructive",
-        });
-        
+
         return {
           success: false,
           message: errorMessage,
@@ -234,13 +232,55 @@ export const usePrintJobProcessor = () => {
     }
   };
 
+  const getObjectCount = useCallback(async (
+    productId: string,
+    printerId: string,
+    productSkuId?: string
+  ): Promise<ObjectCountData | null> => {
+    try {
+      // Get the current session to include auth headers
+      const { data: { session } } = await supabase.auth.getSession();
+      const headers: any = {};
+
+      if (session?.access_token) {
+        headers['Authorization'] = `Bearer ${session.access_token}`;
+      }
+
+      // Build query params
+      const params = new URLSearchParams({
+        product_id: productId,
+        printer_id: printerId,
+      });
+
+      if (productSkuId) {
+        params.append('product_sku_id', productSkuId);
+      }
+
+      const baseUrl = getApiBaseUrl();
+      const response = await fetch(`${baseUrl}/api/enhanced-print-jobs/object-count?${params}`, {
+        headers
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to get object count: ${response.status} ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      return data;
+
+    } catch (error: any) {
+      console.error('Error getting object count:', error);
+      return null;
+    }
+  }, []); // Empty deps - function doesn't depend on any props/state
+
   const testConnection = async (): Promise<boolean> => {
     try {
       const baseUrl = getApiBaseUrl();
       const response = await fetch(`${baseUrl}/health`, {
         signal: AbortSignal.timeout(5000) // 5 second timeout
       });
-      
+
       return response.ok;
     } catch (error) {
       console.warn('Pi connection test failed:', error);
@@ -254,6 +294,7 @@ export const usePrintJobProcessor = () => {
     createEnhancedJob,
     validateJobRequest,
     getJobStatus,
+    getObjectCount,
     testConnection
   };
 };

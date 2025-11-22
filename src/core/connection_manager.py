@@ -117,14 +117,20 @@ class ExponentialBackoff:
 
 class ConnectionManager:
     """Manages printer connections with rate limiting and circuit breaking"""
-    
+
+    # Maximum connection attempts before stopping auto-reconnect
+    MAX_CONNECTION_ATTEMPTS = 5
+
     def __init__(self):
         self.circuit_breakers: Dict[str, ConnectionCircuitBreaker] = {}
         self.backoff_timers: Dict[str, ExponentialBackoff] = {}
         self.connection_attempts: Dict[str, list] = {}
         self.active_connections: Set[str] = set()
-        self.max_concurrent_connections = 3
-        
+        self.max_concurrent_connections = 500
+
+        # Connection attempt counter (for 5-attempt limit)
+        self.connection_attempt_count: Dict[str, int] = {}
+
         # Global rate limiting
         self.global_attempt_window = 60  # 1 minute
         self.max_global_attempts = 10   # Max 10 connection attempts per minute globally
@@ -144,80 +150,104 @@ class ConnectionManager:
     
     def can_attempt_connection(self, printer_id: str, user_action: bool = False) -> tuple[bool, str]:
         """Check if connection attempt is allowed
-        
+
         Args:
             printer_id: ID of the printer to check
             user_action: If True, allows bypass of some rate limits for user-initiated actions
         """
         current_time = time.time()
-        
+
+        # Check connection attempt limit (user actions bypass this)
+        if not user_action:
+            attempt_count = self.connection_attempt_count.get(printer_id, 0)
+            if attempt_count >= self.MAX_CONNECTION_ATTEMPTS:
+                return False, f"Max connection attempts reached ({attempt_count}/{self.MAX_CONNECTION_ATTEMPTS}). Use manual reconnect."
+
         # Check global rate limit (user actions get higher limit)
-        self.global_attempts = [t for t in self.global_attempts 
+        self.global_attempts = [t for t in self.global_attempts
                                if current_time - t < self.global_attempt_window]
-        
+
         max_attempts = self.max_global_attempts * 2 if user_action else self.max_global_attempts
         if len(self.global_attempts) >= max_attempts:
             return False, f"Global rate limit exceeded: {len(self.global_attempts)}/{max_attempts} attempts in last minute"
-        
+
         # Check concurrent connections limit (less strict for user actions)
         max_connections = self.max_concurrent_connections + 1 if user_action else self.max_concurrent_connections
         if len(self.active_connections) >= max_connections:
             return False, f"Max concurrent connections reached: {len(self.active_connections)}/{max_connections}"
-        
+
         # Check circuit breaker
         circuit_breaker = self.get_circuit_breaker(printer_id)
         if not circuit_breaker.can_execute(user_action):
             return False, f"Circuit breaker is {circuit_breaker.state.value} for printer {printer_id}"
-        
+
         # Check backoff timer
         backoff_timer = self.get_backoff_timer(printer_id)
         if not backoff_timer.should_attempt():
             next_attempt = backoff_timer.last_attempt + backoff_timer.current_delay
             wait_time = next_attempt - current_time
             return False, f"Backoff timer active, next attempt in {wait_time:.1f} seconds"
-        
+
         return True, "Connection attempt allowed"
     
     def record_connection_attempt(self, printer_id: str, success: bool, error: str = ""):
         """Record connection attempt result"""
         current_time = time.time()
-        
+
         # Record global attempt
         self.global_attempts.append(current_time)
-        
+
         # Record per-printer attempt
         if printer_id not in self.connection_attempts:
             self.connection_attempts[printer_id] = []
-        
+
         attempt = ConnectionAttempt(current_time, success, error)
         self.connection_attempts[printer_id].append(attempt)
-        
+
         # Keep only recent attempts
         self.connection_attempts[printer_id] = [
             a for a in self.connection_attempts[printer_id]
             if current_time - a.timestamp < 300  # Keep 5 minutes of history
         ]
-        
+
         # Update circuit breaker
         circuit_breaker = self.get_circuit_breaker(printer_id)
         backoff_timer = self.get_backoff_timer(printer_id)
-        
+
         if success:
             circuit_breaker.record_success()
             backoff_timer.reset()
             self.active_connections.add(printer_id)
+            # Reset attempt counter on successful connection
+            self.connection_attempt_count[printer_id] = 0
             logger.info(f"Connection successful for printer {printer_id}")
         else:
             circuit_breaker.record_failure(error)
             self.active_connections.discard(printer_id)
             delay = backoff_timer.get_delay()
-            logger.warning(f"Connection failed for printer {printer_id}: {error}. Next attempt in {delay:.1f}s")
+            # Increment attempt counter on failure
+            self.connection_attempt_count[printer_id] = self.connection_attempt_count.get(printer_id, 0) + 1
+            current_count = self.connection_attempt_count[printer_id]
+            if current_count >= self.MAX_CONNECTION_ATTEMPTS:
+                logger.warning(f"Printer {printer_id} reached max connection attempts ({current_count}/{self.MAX_CONNECTION_ATTEMPTS}). Auto-reconnect disabled. Use manual reconnect.")
+            else:
+                logger.warning(f"Connection failed for printer {printer_id}: {error}. Attempt {current_count}/{self.MAX_CONNECTION_ATTEMPTS}. Next attempt in {delay:.1f}s")
     
     def record_disconnection(self, printer_id: str):
         """Record that printer disconnected"""
         self.active_connections.discard(printer_id)
         logger.info(f"Printer {printer_id} disconnected")
-    
+
+    def reset_attempt_count(self, printer_id: str):
+        """Reset connection attempt counter for manual reconnect
+
+        Args:
+            printer_id: ID of the printer to reset
+        """
+        old_count = self.connection_attempt_count.get(printer_id, 0)
+        self.connection_attempt_count[printer_id] = 0
+        logger.info(f"Reset attempt counter for printer {printer_id} (was {old_count}/{self.MAX_CONNECTION_ATTEMPTS})")
+
     def get_status(self) -> Dict:
         """Get current connection manager status"""
         current_time = time.time()
@@ -243,7 +273,9 @@ class ConnectionManager:
                 "current_backoff": backoff_timer.current_delay if backoff_timer else 0,
                 "recent_attempts": len(recent_attempts),
                 "recent_failures": len(recent_failures),
-                "connected": printer_id in self.active_connections
+                "connected": printer_id in self.active_connections,
+                "attempt_count": self.connection_attempt_count.get(printer_id, 0),
+                "max_attempts_reached": self.connection_attempt_count.get(printer_id, 0) >= self.MAX_CONNECTION_ATTEMPTS
             }
         
         return status

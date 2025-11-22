@@ -18,18 +18,19 @@ from src.core.printer_client import printer_manager
 from src.utils.exceptions import BambuProgramError, PrinterNotFoundError, PrinterConnectionError, ValidationError
 
 # Import all API routers
-from src.api import printers, print_control, finished_goods_sync, movement, temperature, filament, maintenance, files, camera, system, websocket, object_manipulation, sync, auth, color_presets, products_sync, product_skus_sync, print_files_sync, print_jobs_sync, file_operations, available_files, enhanced_print_jobs, connection_status, printers_sync
+from src.api import printers, print_control, finished_goods_sync, movement, temperature, filament, maintenance, files, camera, system, websocket, object_manipulation, sync, auth, color_presets, build_plate_types, products_sync, product_skus_sync, print_files_sync, print_jobs_sync, file_operations, available_files, enhanced_print_jobs, connection_status, printers_sync, logs, database_backup, assembly_tasks, worklist, tunnel, tenant, shopify
 
 # Import sync services
 from src.services.config_service import get_config_service
 from src.services.database_service import get_database_service, close_database_service
 from src.services.sync_service import initialize_sync_service, shutdown_sync_service
-from src.services.auth_service import initialize_auth_service
+from src.services.auth_service import initialize_auth_service, get_auth_service
 from src.services.printer_connection_service import initialize_printer_connection_service, shutdown_printer_connection_service
 from src.services.startup_service import startup_service
 from src.services.live_job_sync_service import live_job_sync_service
 from src.services.print_job_sync_service import print_job_sync_service
-from src.services.backup_service import initialize_backup_service, get_backup_service
+from src.services.tunnel_service import initialize_tunnel_service, shutdown_tunnel_service, get_tunnel_service
+from src.services.shopify_order_sync_service import initialize_shopify_sync_service, start_shopify_sync_service, stop_shopify_sync_service, get_shopify_sync_service
 
 logger = logging.getLogger(__name__)
 
@@ -88,17 +89,67 @@ async def lifespan(app: FastAPI):
                 # Continue startup even if sync fails
         else:
             logger.info("Tenant not configured or sync disabled, sync service not started")
-        
-        # Initialize backup service if tenant is configured
-        if tenant_id and supabase_url and supabase_key:
+
+        # Initialize Shopify sync service if configured
+        shopify_config = config_service.config_data.get('shopify', {})
+        shopify_app_url = shopify_config.get('app_url', '').strip()
+        shopify_api_key = shopify_config.get('api_key', '').strip()
+
+        if tenant_id and supabase_url and supabase_key and shopify_app_url and shopify_api_key:
             try:
-                backup_service = await initialize_backup_service(tenant_id, supabase_url, supabase_key)
-                await backup_service.start()
-                logger.info(f"Backup service initialized and started for tenant {tenant_id}")
+                # Get Supabase client from auth service
+                auth_service = get_auth_service()
+                if auth_service and auth_service.supabase:
+                    initialize_shopify_sync_service(
+                        tenant_id=tenant_id,
+                        shopify_app_url=shopify_app_url,
+                        api_key=shopify_api_key,
+                        supabase_client=auth_service.supabase,
+                        poll_interval_seconds=60
+                    )
+                    await start_shopify_sync_service()
+                    logger.info(f"Shopify sync service initialized and started for tenant {tenant_id}")
+                else:
+                    logger.warning("Auth service not available, Shopify sync not started")
             except Exception as e:
-                logger.error(f"Failed to initialize backup service: {e}")
-                # Continue startup even if backup fails
-        
+                logger.error(f"Failed to initialize Shopify sync service: {e}")
+                # Continue startup even if Shopify sync fails
+        else:
+            if not shopify_app_url or not shopify_api_key:
+                logger.info("Shopify configuration incomplete, Shopify sync service not started")
+            else:
+                logger.info("Tenant not configured, Shopify sync service not started")
+
+        # Initialize tunnel service if tenant is configured
+        tunnel_config = config_service.config_data.get('tunnel', {})
+        provisioning_url = tunnel_config.get('provisioning_url', '')
+
+        if tenant_id and supabase_url and supabase_key and provisioning_url:
+            try:
+                tunnel_service = initialize_tunnel_service(provisioning_url, supabase_url, supabase_key)
+                logger.info(f"Tunnel service initialized for tenant {tenant_id}")
+
+                # Try to start tunnel if credentials exist
+                status = tunnel_service.get_status()
+                if status.get('credentials_exist'):
+                    logger.info("Existing tunnel credentials found, attempting to start tunnel...")
+                    # No auth token needed to start - only to provision
+                    started = await tunnel_service.start_tunnel()
+                    if started:
+                        logger.info("Tunnel started successfully on app startup")
+                    else:
+                        logger.warning("Failed to start tunnel on app startup")
+                else:
+                    logger.info("No existing tunnel credentials, tunnel must be provisioned by user")
+            except Exception as e:
+                logger.error(f"Failed to initialize tunnel service: {e}")
+                # Continue startup even if tunnel fails
+        else:
+            if not provisioning_url:
+                logger.info("Tunnel provisioning URL not configured, tunnel service not started")
+            else:
+                logger.info("Tenant not configured, tunnel service not started")
+
         # Initialize printer connection service if tenant is configured
         if tenant_id:
             try:
@@ -184,15 +235,22 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"Error shutting down printer connection service: {e}")
         
-        # Shutdown backup service
+        # Shutdown Shopify sync service
         try:
-            backup_service = get_backup_service()
-            if backup_service:
-                await backup_service.stop()
-                logger.info("Backup service shutdown complete")
+            await stop_shopify_sync_service()
+            logger.info("Shopify sync service shutdown complete")
         except Exception as e:
-            logger.error(f"Error shutting down backup service: {e}")
-        
+            logger.error(f"Error shutting down Shopify sync service: {e}")
+
+        # Shutdown tunnel service
+        try:
+            tunnel_service = get_tunnel_service()
+            if tunnel_service:
+                await shutdown_tunnel_service()
+                logger.info("Tunnel service shutdown complete")
+        except Exception as e:
+            logger.error(f"Error shutting down tunnel service: {e}")
+
         # Shutdown sync service
         try:
             await shutdown_sync_service()
@@ -338,12 +396,12 @@ async def get_printers_quick_status():
     try:
         printers_list = printer_manager.list_printers()
         
-        # Only return legitimate printers (4 and 7) with their connection status
+        # Return all printers with their connection status
         status_data = []
         for printer in printers_list:
             printer_id = printer.get("id")
-            if str(printer_id) in ["4", "7"]:  # Only legitimate printers
-                status_data.append({
+            # No filter - return all printers
+            status_data.append({
                     "printer_id": str(printer_id),
                     "name": printer.get("name", "Unknown"),
                     "model": printer.get("model", "Unknown"),
@@ -367,6 +425,7 @@ async def get_printers_quick_status():
 app.include_router(printers.router, prefix="/api/printers", tags=["Printer Management"])
 app.include_router(printers_sync.router, prefix="/api", tags=["Printers Sync Management"])
 app.include_router(print_control.router, prefix="/api/printers", tags=["Print Control"])
+app.include_router(finished_goods_sync.router, prefix="/api", tags=["Finished Goods Sync Management"])
 app.include_router(movement.router, prefix="/api/printers", tags=["Movement Control"])
 app.include_router(temperature.router, prefix="/api/printers", tags=["Temperature Control"])
 app.include_router(filament.router, prefix="/api/printers", tags=["Filament Management"])
@@ -387,13 +446,24 @@ app.include_router(sync.router, prefix="/api/sync", tags=["Sync Management"])
 # Include Authentication router
 app.include_router(auth.router, prefix="/api/auth", tags=["Authentication"])
 
+# Include Tunnel router
+app.include_router(tunnel.router, prefix="/api/tunnel", tags=["Tunnel"])
+
+# Include Tenant router
+app.include_router(tenant.router)
+
+# Include Shopify router
+app.include_router(shopify.router, tags=["Shopify Integration"])
+
 # Include Color Presets router
 app.include_router(color_presets.router, prefix="/api", tags=["Color Presets Management"])
+
+# Include Build Plate Types router
+app.include_router(build_plate_types.router, prefix="/api", tags=["Build Plate Types Management"])
 
 # Include Realtime sync routers for new tables
 app.include_router(products_sync.router, prefix="/api", tags=["Products Sync Management"])
 app.include_router(product_skus_sync.router, prefix="/api", tags=["Product SKUs Sync Management"])
-app.include_router(finished_goods_sync.router, prefix="/api", tags=["Finished Goods Sync Management"])
 app.include_router(print_files_sync.router, prefix="/api", tags=["Print Files Sync Management"])
 app.include_router(print_jobs_sync.router, prefix="/api", tags=["Print Jobs Sync Management"])
 
@@ -409,6 +479,18 @@ app.include_router(enhanced_print_jobs.router, prefix="/api", tags=["Enhanced Pr
 # Include Connection Status router for monitoring system health
 app.include_router(connection_status.router, prefix="/api", tags=["Connection Status"])
 
+# Include System Logs router for log management
+app.include_router(logs.router, prefix="/api/logs", tags=["System Logs"])
+
+# Include Database Backup & Restore router
+app.include_router(database_backup.router, prefix="/api", tags=["Database Backup & Restore"])
+
+# Assembly Tasks Management
+app.include_router(assembly_tasks.router, prefix="/api", tags=["Assembly Tasks"])
+
+# Worklist Tasks Management
+app.include_router(worklist.router, prefix="/api", tags=["Worklist"])
+
 # Mount static files for frontend assets (CSS, JS, etc.)
 frontend_dist_path = Path("frontend/dist")
 if frontend_dist_path.exists():
@@ -416,6 +498,11 @@ if frontend_dist_path.exists():
     assets_path = frontend_dist_path / "assets"
     if assets_path.exists():
         app.mount("/assets", StaticFiles(directory=str(assets_path)), name="assets")
+
+# Mount product images directory for serving product photos
+product_images_path = Path("files/product_images")
+if product_images_path.exists():
+    app.mount("/product-images", StaticFiles(directory=str(product_images_path)), name="product_images")
 
 # Catch-all route for React Router (must be last!)
 @app.get("/{path:path}")

@@ -18,6 +18,16 @@ async def take_snapshot(printer_id: str):
         logger.error(f"Failed to take snapshot: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.post("/{printer_id}/camera/stop", response_model=BaseResponse)
+async def stop_camera(printer_id: str):
+    """Stop camera connection"""
+    try:
+        await printer_manager.stop_camera(printer_id)
+        return BaseResponse(success=True, message="Camera stopped")
+    except Exception as e:
+        logger.error(f"Failed to stop camera: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 
 

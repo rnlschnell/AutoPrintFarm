@@ -6,8 +6,9 @@ import psutil
 import logging
 import asyncio
 import os
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, Any
 from dataclasses import dataclass
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +76,21 @@ class ResourceMonitor:
                 load_avg_1min=0.0,
                 process_count=50
             )
-    
+
+    def check_system_health(self) -> Dict[str, Any]:
+        """Get system health metrics formatted for API response"""
+        resources = self.get_system_resources()
+        disk = psutil.disk_usage('/')
+
+        return {
+            "cpu_percent": resources.cpu_percent,
+            "memory_percent": resources.memory_percent,
+            "memory_available_mb": resources.memory_available_mb,
+            "disk_percent": resources.disk_percent,
+            "disk_free_gb": disk.free / (1024**3),  # Convert bytes to GB
+            "timestamp": datetime.now().isoformat()
+        }
+
     def should_throttle_operation(self, operation_type: str) -> bool:
         """
         Check if an operation should be throttled due to resource constraints

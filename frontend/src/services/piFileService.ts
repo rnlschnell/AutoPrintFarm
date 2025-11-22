@@ -1,3 +1,5 @@
+import { getApiBaseUrl } from '@/utils/apiUrl';
+
 export interface PiUploadResponse {
   success: boolean;
   file_path?: string;
@@ -8,14 +10,8 @@ export class PiFileService {
   private readonly PI_BASE_URL: string;
 
   constructor() {
-    // If we're running on the Pi (same host), use localhost for better performance and avoid CORS
-    // Otherwise use the Pi's IP address
-    const currentHost = window.location.hostname;
-    if (currentHost === '192.168.4.45' || currentHost === 'localhost' || currentHost === '127.0.0.1') {
-      this.PI_BASE_URL = `${window.location.protocol}//${window.location.host}`;
-    } else {
-      this.PI_BASE_URL = 'http://192.168.4.45:8080';
-    }
+    // Use central API URL utility
+    this.PI_BASE_URL = getApiBaseUrl();
     console.log(`[PiFileService] Initialized with base URL: ${this.PI_BASE_URL}`);
   }
 

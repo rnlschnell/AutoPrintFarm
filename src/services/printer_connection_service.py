@@ -31,7 +31,12 @@ class PrinterConnectionService:
         self.reconnection_intervals = {}  # Track reconnection intervals for each printer
         self.max_reconnection_interval = 300  # Max 5 minutes between attempts
         self.min_reconnection_interval = 30   # Min 30 seconds between attempts
-        
+
+        # Chronic MQTT failure tracking
+        self.mqtt_failure_history: Dict[str, List[float]] = {}  # Track timestamps of rapid MQTT failures
+        self.chronic_failure_printers: set = set()  # Track printers with chronic MQTT issues
+        self.connection_timestamps: Dict[str, float] = {}  # Track when printers were last connected
+
         logger.info("Printer connection service initialized")
     
     async def initialize(self, tenant_id: str):
@@ -209,6 +214,9 @@ class PrinterConnectionService:
             if await self._verify_printer_connection(printer_key, client):
                 # Update database with success
                 await self._update_connection_status(printer.id, True, None)
+                # Record connection timestamp for MQTT failure detection
+                import time
+                self.connection_timestamps[printer_key] = time.time()
                 logger.info(f"✅ Successfully connected and verified printer {printer_key}")
                 return True
             else:
@@ -299,11 +307,7 @@ class PrinterConnectionService:
         try:
             # Try to get printer info or status to verify connection
             # The bambulabs_api should have methods to query printer state
-            import asyncio
-            
-            # Give the connection a moment to stabilize
-            await asyncio.sleep(1)
-            
+
             # Check if client has expected attributes
             if not hasattr(client, 'mqtt_client'):
                 logger.warning(f"Printer {printer_key} client missing mqtt_client attribute")
@@ -352,7 +356,171 @@ class PrinterConnectionService:
                 
         except Exception as e:
             logger.error(f"Failed to update connection status for printer {printer_id}: {e}")
-    
+
+    async def _increment_failure_count(self, printer_id: str, printer_name: str) -> bool:
+        """
+        Increment consecutive failures counter and disable printer if threshold reached.
+
+        Args:
+            printer_id: Database ID of the printer
+            printer_name: Name of the printer for logging
+
+        Returns:
+            True if printer was disabled, False otherwise
+        """
+        try:
+            async with self.db_service.get_session() as session:
+                from sqlalchemy import text
+
+                # Increment the failure counter
+                query = text("""
+                    UPDATE printers
+                    SET consecutive_failures = COALESCE(consecutive_failures, 0) + 1,
+                        updated_at = :timestamp
+                    WHERE id = :printer_id
+                    RETURNING consecutive_failures
+                """)
+
+                result = await session.execute(query, {
+                    'timestamp': datetime.utcnow().isoformat(),
+                    'printer_id': printer_id
+                })
+
+                row = result.fetchone()
+                failure_count = row[0] if row else 0
+
+                # Check if we've hit the threshold (3 failures)
+                if failure_count >= 3:
+                    # Disable the printer
+                    disable_query = text("""
+                        UPDATE printers
+                        SET is_active = 0,
+                            disabled_reason = :reason,
+                            disabled_at = :timestamp,
+                            updated_at = :timestamp
+                        WHERE id = :printer_id
+                    """)
+
+                    await session.execute(disable_query, {
+                        'reason': f'Auto-disabled: Connection failed after {failure_count} consecutive attempts',
+                        'timestamp': datetime.utcnow().isoformat(),
+                        'printer_id': printer_id
+                    })
+
+                    await session.commit()
+                    logger.info(f"Disabled printer {printer_name} (id: {printer_id}) after {failure_count} consecutive failures")
+                    return True
+                else:
+                    await session.commit()
+                    logger.debug(f"Printer {printer_name} failure count: {failure_count}/3")
+                    return False
+
+        except Exception as e:
+            logger.error(f"Failed to increment failure count for printer {printer_id}: {e}")
+            return False
+
+    async def _reset_failure_count(self, printer_id: str):
+        """
+        Reset consecutive failures counter for a printer after successful connection.
+
+        Args:
+            printer_id: Database ID of the printer
+        """
+        try:
+            async with self.db_service.get_session() as session:
+                from sqlalchemy import text
+
+                query = text("""
+                    UPDATE printers
+                    SET consecutive_failures = 0,
+                        disabled_reason = NULL,
+                        disabled_at = NULL,
+                        updated_at = :timestamp
+                    WHERE id = :printer_id
+                """)
+
+                await session.execute(query, {
+                    'timestamp': datetime.utcnow().isoformat(),
+                    'printer_id': printer_id
+                })
+
+                await session.commit()
+                logger.debug(f"Reset failure count for printer {printer_id}")
+
+        except Exception as e:
+            logger.error(f"Failed to reset failure count for printer {printer_id}: {e}")
+
+    def _record_mqtt_failure(self, printer_key: str) -> None:
+        """
+        Record an MQTT failure that occurred shortly after connection.
+        Marks printer as chronic failure if it fails repeatedly.
+
+        Args:
+            printer_key: Printer identifier
+        """
+        import time
+
+        current_time = time.time()
+
+        # Initialize failure history for this printer if needed
+        if printer_key not in self.mqtt_failure_history:
+            self.mqtt_failure_history[printer_key] = []
+
+        # Record this failure
+        self.mqtt_failure_history[printer_key].append(current_time)
+
+        # Keep only failures from the last 5 minutes
+        self.mqtt_failure_history[printer_key] = [
+            t for t in self.mqtt_failure_history[printer_key]
+            if current_time - t < 300  # 5 minutes
+        ]
+
+        # Check if this printer has chronic MQTT failures (3+ in 5 minutes)
+        if len(self.mqtt_failure_history[printer_key]) >= 3:
+            if printer_key not in self.chronic_failure_printers:
+                self.chronic_failure_printers.add(printer_key)
+                logger.warning(
+                    f"⚠️ Printer {printer_key} marked as CHRONIC MQTT FAILURE "
+                    f"({len(self.mqtt_failure_history[printer_key])} rapid failures). "
+                    f"Auto-reconnection DISABLED. Manual reconnection via UI still available."
+                )
+
+                # Disconnect client to stop internal MQTT reconnection loop
+                printer_manager.disconnect_printer(printer_key)
+                logger.info(f"🔌 Disconnected printer {printer_key} due to chronic MQTT failures - reconnection loop stopped")
+            else:
+                logger.debug(
+                    f"Printer {printer_key} still in chronic failure state "
+                    f"({len(self.mqtt_failure_history[printer_key])} failures in 5 min)"
+                )
+
+    def _is_chronic_failure(self, printer_key: str) -> bool:
+        """
+        Check if a printer is in chronic MQTT failure state.
+
+        Args:
+            printer_key: Printer identifier
+
+        Returns:
+            True if printer has chronic MQTT failures, False otherwise
+        """
+        return printer_key in self.chronic_failure_printers
+
+    def _clear_chronic_failure(self, printer_key: str) -> None:
+        """
+        Clear chronic failure state for a printer after successful connection.
+
+        Args:
+            printer_key: Printer identifier
+        """
+        if printer_key in self.chronic_failure_printers:
+            self.chronic_failure_printers.remove(printer_key)
+            logger.info(f"✅ Cleared chronic failure state for printer {printer_key}")
+
+        # Clear failure history
+        if printer_key in self.mqtt_failure_history:
+            del self.mqtt_failure_history[printer_key]
+
     async def handle_printer_added(self, printer_data: Dict[str, Any]):
         """
         Handle when a new printer is added to the database
@@ -364,7 +532,7 @@ class PrinterConnectionService:
             logger.info(f"Handling new printer: {printer_data.get('name')} (ID: {printer_data.get('printer_id')})")
             
             # Create Printer model from data
-            printer = Printer.from_supabase_dict(printer_data)
+            printer = Printer.from_dict(printer_data)
             
             # Add to manager and connect
             await self._add_printer_to_manager(printer)
@@ -376,52 +544,125 @@ class PrinterConnectionService:
     async def handle_printer_updated(self, printer_data: Dict[str, Any]):
         """
         Handle when a printer is updated in the database
-        
+
         Args:
             printer_data: Updated printer data
         """
         try:
             logger.info(f"Handling printer update: {printer_data.get('name')} (ID: {printer_data.get('printer_id')})")
-            
+
             # Create Printer model from data
-            printer = Printer.from_supabase_dict(printer_data)
+            printer = Printer.from_dict(printer_data)
             printer_key = str(printer.printer_id) if printer.printer_id else printer.id
-            
+
             # Check if printer exists in manager
             if printer_key in printer_manager.printer_configs:
-                # Disconnect existing connection
-                printer_manager.disconnect_printer(printer_key)
-            
-            # Update configuration and reconnect
-            await self._add_printer_to_manager(printer)
-            
-            # Only connect if printer is active
-            if printer.is_active:
-                await self._connect_printer(printer)
-            
+                existing_config = printer_manager.printer_configs[printer_key]
+
+                # Determine which fields changed
+                connection_critical_fields = ['ip_address', 'access_code', 'serial_number']
+                metadata_fields = ['name', 'current_color', 'current_color_hex', 'current_filament_type',
+                                 'filament_level', 'location', 'firmware_version', 'sort_order', 'status']
+
+                # Check if any connection-critical fields changed
+                connection_critical_changed = (
+                    existing_config.get('ip') != printer.ip_address or
+                    existing_config.get('access_code') != printer.access_code or
+                    existing_config.get('serial') != printer.serial_number
+                )
+
+                if connection_critical_changed:
+                    # Connection-critical fields changed - need to disconnect and reconnect
+                    logger.info(f"Connection-critical fields changed for printer {printer_key}, reconnecting...")
+                    printer_manager.disconnect_printer(printer_key)
+
+                    # Update configuration and reconnect
+                    await self._add_printer_to_manager(printer)
+
+                    if printer.is_active:
+                        await self._connect_printer(printer)
+                else:
+                    # Only metadata changed - update config directly without disconnecting
+                    logger.info(f"Metadata-only update for printer {printer_key}, updating in-memory config without reconnection")
+
+                    # Update the in-memory configuration directly
+                    existing_config['name'] = printer.name
+                    existing_config['model'] = printer.model
+                    existing_config['enabled'] = printer.is_active
+                    existing_config['tenant_id'] = printer.tenant_id
+
+                    # No need to disconnect/reconnect - instant update!
+            else:
+                # New printer, add and connect
+                logger.info(f"Adding new printer {printer_key} from update")
+                await self._add_printer_to_manager(printer)
+
+                if printer.is_active:
+                    await self._connect_printer(printer)
+
         except Exception as e:
             logger.error(f"Error handling printer update: {e}")
     
     async def handle_printer_deleted(self, printer_data: Dict[str, Any]):
         """
         Handle when a printer is deleted from the database
-        
+
         Args:
             printer_data: Deleted printer data
         """
         try:
             printer_id = printer_data.get('printer_id')
             printer_key = str(printer_id) if printer_id else printer_data.get('id')
-            
+
             logger.info(f"Handling printer deletion: {printer_data.get('name')} (Key: {printer_key})")
-            
-            # Remove from printer manager (this also disconnects)
+
+            # Robust cleanup to prevent stale connections that cause system-wide issues
+            cleaned_up = False
+
+            # Try to remove from printer manager (this also disconnects)
             if printer_key in printer_manager.printer_configs:
-                printer_manager.remove_printer(printer_key)
-                logger.info(f"Removed printer {printer_key} from manager")
-            else:
-                logger.warning(f"Printer {printer_key} not found in manager")
-            
+                try:
+                    # Force disconnection first to ensure clean state
+                    if printer_key in printer_manager.clients:
+                        printer_manager.disconnect_printer(printer_key)
+                        logger.debug(f"Disconnected printer {printer_key} before removal")
+
+                    # Remove configuration
+                    printer_manager.remove_printer(printer_key)
+                    logger.info(f"✅ Removed printer {printer_key} from manager")
+                    cleaned_up = True
+                except Exception as e:
+                    logger.error(f"Error removing printer {printer_key} from manager: {e}")
+
+            # Also check for any alternative keys and clean those up
+            alternative_keys = [
+                str(printer_data.get('id', '')),  # UUID id
+                printer_data.get('name', ''),     # Name-based key
+                str(printer_data.get('printer_id', ''))  # Numeric printer_id
+            ]
+
+            for alt_key in alternative_keys:
+                if alt_key and alt_key != printer_key and alt_key in printer_manager.printer_configs:
+                    try:
+                        if alt_key in printer_manager.clients:
+                            printer_manager.disconnect_printer(alt_key)
+                        printer_manager.remove_printer(alt_key)
+                        logger.info(f"✅ Cleaned up alternative key {alt_key} for deleted printer")
+                        cleaned_up = True
+                    except Exception as e:
+                        logger.error(f"Error cleaning up alternative key {alt_key}: {e}")
+
+            if not cleaned_up:
+                logger.warning(f"⚠️ Printer {printer_key} not found in manager - may already be cleaned up")
+
+            # Clear any reconnection tracking for this printer
+            if hasattr(self, 'reconnection_intervals') and printer_key in self.reconnection_intervals:
+                del self.reconnection_intervals[printer_key]
+                logger.debug(f"Cleared reconnection tracking for {printer_key}")
+
+            # Clear chronic failure tracking for this printer
+            self._clear_chronic_failure(printer_key)
+
         except Exception as e:
             logger.error(f"Error handling printer deletion: {e}")
     
@@ -529,22 +770,57 @@ class PrinterConnectionService:
         """
         Check if we should attempt to reconnect to a printer
         """
+        import time
+        from ..core.connection_manager import connection_manager
+
         # Don't reconnect if already connected
         if printer_key in printer_manager.clients:
             # Reset the reconnection interval since it's connected
             self.reconnection_intervals.pop(printer_key, None)
             return False
-        
+
+        # Check connection attempt limit (connection_manager enforces 5-attempt max)
+        can_attempt, reason = connection_manager.can_attempt_connection(printer_key, user_action=False)
+        if not can_attempt:
+            if "Max connection attempts reached" in reason:
+                logger.debug(f"Skipping auto-reconnect for printer {printer_key}: {reason}")
+            return False
+
+        # Check if printer was recently connected and failed quickly (MQTT failure detection)
+        if printer_key in self.connection_timestamps:
+            time_since_connection = time.time() - self.connection_timestamps[printer_key]
+            # If disconnected within 5 seconds of connection, this is likely an MQTT failure
+            if time_since_connection < 5:
+                logger.warning(
+                    f"⚠️ Printer {printer_key} MQTT connection failed {time_since_connection:.1f}s after connecting"
+                )
+                self._record_mqtt_failure(printer_key)
+            # Clear the timestamp since we've processed it
+            del self.connection_timestamps[printer_key]
+
+        # Don't auto-reconnect printers with chronic MQTT failures
+        if self._is_chronic_failure(printer_key):
+            # Safety check: ensure client is removed to prevent internal reconnection loop
+            if printer_key in printer_manager.clients:
+                printer_manager.disconnect_printer(printer_key)
+                logger.info(f"🛡️ Removed client for chronic failure printer {printer_key} (safety check)")
+
+            logger.debug(
+                f"Skipping auto-reconnect for printer {printer_key} (chronic MQTT failure). "
+                f"Manual reconnection via UI still available."
+            )
+            return False
+
         # Check if we should wait before attempting reconnection
         current_time = asyncio.get_event_loop().time()
         last_attempt_time = getattr(self, f'_last_attempt_{printer_key}', 0)
-        
+
         # Get current reconnection interval (exponential backoff)
         interval = self.reconnection_intervals.get(printer_key, self.min_reconnection_interval)
-        
+
         if current_time - last_attempt_time < interval:
             return False
-        
+
         return True
     
     async def _attempt_printer_reconnection(self, printer: 'Printer'):
@@ -573,18 +849,27 @@ class PrinterConnectionService:
             
             # Attempt connection
             success = await self._connect_printer(printer)
-            
+
             if success:
                 logger.info(f"✅ Successfully reconnected printer {printer_key}")
                 # Reset the reconnection interval on success
                 self.reconnection_intervals.pop(printer_key, None)
+                # Clear chronic failure state on successful connection
+                self._clear_chronic_failure(printer_key)
+                # Reset consecutive failures counter in database
+                await self._reset_failure_count(printer.id)
             else:
                 # Increase the reconnection interval (exponential backoff)
                 current_interval = self.reconnection_intervals.get(printer_key, self.min_reconnection_interval)
                 new_interval = min(current_interval * 2, self.max_reconnection_interval)
                 self.reconnection_intervals[printer_key] = new_interval
-                
-                logger.warning(f"❌ Failed to reconnect printer {printer_key}, next attempt in {new_interval} seconds")
+
+                # Increment failure counter and check if we should disable
+                should_disable = await self._increment_failure_count(printer.id, printer.name)
+                if should_disable:
+                    logger.warning(f"🔴 Printer {printer_key} ({printer.name}) auto-disabled after 3 consecutive failures")
+                else:
+                    logger.warning(f"❌ Failed to reconnect printer {printer_key}, next attempt in {new_interval} seconds")
         
         except Exception as e:
             logger.error(f"Error attempting to reconnect printer {printer_key}: {e}")

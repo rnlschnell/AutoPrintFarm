@@ -75,10 +75,10 @@ async def get_available_print_files(request: Request):
                 file_names_map[product.print_file_id] = product.file_name
         
         logger.info(f"Found {len(active_products)} total products, {len(active_file_ids)} active print file IDs")
-        
-        # Get print files directory
-        files_dir = Path("/home/pi/PrintFarmSoftware/files/print_files") / tenant_id
-        
+
+        # Get print files directory (tenant-agnostic)
+        files_dir = Path("/home/pi/PrintFarmSoftware/files/print_files")
+
         available_files = []
         supported_extensions = ['.3mf', '.stl', '.gcode', '.obj', '.amf']
         
@@ -155,10 +155,10 @@ async def get_products_with_files(request: Request):
         
         # Get all products for this tenant
         products = await db_service.get_products_by_tenant(tenant_id)
-        
+
         products_with_files = []
-        files_dir = Path("/home/pi/PrintFarmSoftware/files/print_files") / tenant_id
-        
+        files_dir = Path("/home/pi/PrintFarmSoftware/files/print_files")
+
         for product in products:
             # Skip products without print files
             if not product.print_file_id:
@@ -248,9 +248,9 @@ async def get_product_print_file(product_id: str, request: Request):
         
         if not product.print_file_id:
             raise HTTPException(status_code=404, detail="Product has no associated print file")
-        
-        # Check file on Pi
-        files_dir = Path("/home/pi/PrintFarmSoftware/files/print_files") / tenant_id
+
+        # Check file on Pi (tenant-agnostic)
+        files_dir = Path("/home/pi/PrintFarmSoftware/files/print_files")
         file_path = files_dir / f"{product.print_file_id}.3mf"
         
         if not file_path.exists():
@@ -367,30 +367,48 @@ async def cleanup_orphaned_files(request: Request):
         }
         
         # Phase 1: Clean up orphaned files from database
+        # IMPORTANT: A file is "orphaned" if not linked to active products
+        # However, delete_print_file() will also check for print job references
+        # to prevent database integrity errors
         all_print_files = await db_service.get_print_files_by_tenant(tenant_id)
         orphaned_db_files = [pf for pf in all_print_files if pf.id not in active_file_ids]
-        
-        logger.info(f"Found {len(orphaned_db_files)} orphaned files in database")
-        
+
+        logger.info(f"Found {len(orphaned_db_files)} potentially orphaned files in database (not linked to active products)")
+
+        skipped_due_to_print_jobs = []
+
         for orphaned_file in orphaned_db_files:
             try:
-                # Delete the print file record (versions will cascade if configured properly)
+                # Delete the print file record
+                # NOTE: delete_print_file will check for print job references and skip if found
                 success = await db_service.delete_print_file(orphaned_file.id, tenant_id)
-                
+
                 if success:
                     cleanup_results["orphaned_files_removed_from_db"].append({
                         "id": orphaned_file.id,
                         "name": orphaned_file.name
                     })
                     logger.info(f"Deleted orphaned print file from database: {orphaned_file.name}")
-                
+                else:
+                    # File wasn't deleted - likely due to print job references
+                    skipped_due_to_print_jobs.append({
+                        "id": orphaned_file.id,
+                        "name": orphaned_file.name
+                    })
+                    logger.info(f"Skipped file {orphaned_file.name}: Still referenced by print jobs")
+
             except Exception as e:
                 error_msg = f"Failed to delete orphaned file {orphaned_file.id} from database: {str(e)}"
                 logger.error(error_msg)
                 cleanup_results["errors"].append(error_msg)
-        
-        # Phase 2: Clean up orphaned files from filesystem
-        files_dir = Path("/home/pi/PrintFarmSoftware/files/print_files") / tenant_id
+
+        # Add skipped files to results for transparency
+        cleanup_results["skipped_due_to_print_jobs"] = skipped_due_to_print_jobs
+        if skipped_due_to_print_jobs:
+            logger.info(f"Skipped {len(skipped_due_to_print_jobs)} files due to print job references")
+
+        # Phase 2: Clean up orphaned files from filesystem (tenant-agnostic)
+        files_dir = Path("/home/pi/PrintFarmSoftware/files/print_files")
         supported_extensions = ['.3mf', '.stl', '.gcode', '.obj', '.amf']
         
         if files_dir.exists():

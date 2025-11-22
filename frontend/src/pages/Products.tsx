@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -17,37 +18,36 @@ import {
   DropdownMenuLabel,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { 
-  PlusCircle, 
-  List, 
-  LayoutGrid, 
-  Edit, 
-  Package, 
-  ChevronDown, 
-  ChevronRight, 
-  File, 
+import {
+  PlusCircle,
+  List,
+  LayoutGrid,
+  Edit,
+  Package,
+  ChevronDown,
+  ChevronRight,
+  File,
   MoreHorizontal,
   Settings,
-  Eye
+  Eye,
+  BookOpen
 } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { useProductsNew, ProductWithDetails, ProductSku } from '@/hooks/useProductsNew';
 import { ProductModal } from '@/components/ProductModal';
-import { SkuModal } from '@/components/SkuModal';
 import { usePrintFiles } from '@/hooks/usePrintFiles';
 import ColorSwatch from '@/components/ColorSwatch';
+import { formatCurrency, formatNumber } from '@/lib/utils';
 
 const Products = () => {
-  const { products, loading, addProduct, updateProduct, deleteProduct, addSku, updateSku, deleteSku } = useProductsNew();
+  const navigate = useNavigate();
+  const { products, loading, addProduct, updateProduct, deleteProduct, updateSku, deleteSku } = useProductsNew();
   const { setFileVersionAsCurrent } = usePrintFiles();
   const [viewMode, setViewMode] = useState<'list' | 'grid'>('grid');
   const [expandedProducts, setExpandedProducts] = useState<Set<string>>(new Set());
   const [isProductModalOpen, setIsProductModalOpen] = useState(false);
-  const [isSkuModalOpen, setIsSkuModalOpen] = useState(false);
-  
+
   const [selectedProduct, setSelectedProduct] = useState<ProductWithDetails | null>(null);
-  const [selectedSku, setSelectedSku] = useState<ProductSku | null>(null);
-  const [selectedProductForSku, setSelectedProductForSku] = useState<string>('');
   const [isEditMode, setIsEditMode] = useState(false);
   const { toast } = useToast();
 
@@ -79,18 +79,6 @@ const Products = () => {
     setIsProductModalOpen(true);
   };
 
-  const handleAddSku = (productId: string) => {
-    setSelectedProductForSku(productId);
-    setSelectedSku(null);
-    setIsSkuModalOpen(true);
-  };
-
-  const handleEditSku = (sku: ProductSku) => {
-    setSelectedSku(sku);
-    setSelectedProductForSku(sku.product_id);
-    setIsSkuModalOpen(true);
-  };
-
   const handleProductSave = async (productData: any) => {
     try {
       if (selectedProduct) {
@@ -104,19 +92,6 @@ const Products = () => {
       setIsEditMode(false);
     } catch (error) {
       console.error('Error saving product:', error);
-    }
-  };
-
-  const handleSkuSave = async (skuData: any) => {
-    try {
-      if (selectedSku) {
-        await updateSku(selectedSku.id, skuData);
-      } else {
-        await addSku(skuData);
-      }
-      setSelectedSku(null);
-    } catch (error) {
-      console.error('Error in handleSkuSave:', error);
     }
   };
 
@@ -154,6 +129,10 @@ const Products = () => {
               <List className="h-4 w-4" />
             </ToggleGroupItem>
           </ToggleGroup>
+          <Button variant="outline" onClick={() => navigate('/wiki-management')}>
+            <BookOpen className="mr-2 h-4 w-4" />
+            Wiki
+          </Button>
           <Button onClick={handleAddProduct}>
             <PlusCircle className="mr-2 h-4 w-4" />
             Add Product
@@ -199,7 +178,7 @@ const Products = () => {
                     <CardDescription>{product.description}</CardDescription>
                   </div>
                 </div>
-                <Badge variant="outline" className="shrink-0">
+                <Badge className="shrink-0 text-white hover:bg-[#1a2e56]" style={{ backgroundColor: '#192A52' }}>
                   {product.skus.length} SKU{product.skus.length !== 1 ? 's' : ''}
                 </Badge>
               </CardHeader>
@@ -211,28 +190,40 @@ const Products = () => {
                       {product.file_name || product.print_file?.name || 'No print file'}
                     </span>
                   </div>
-                  {product.requires_assembly && (
+                  {!!product.requires_assembly && product.components.length > 0 && (
                     <div className="flex items-center gap-2">
                       <Package className="h-4 w-4 text-muted-foreground" />
                       <span className="text-sm text-muted-foreground">{product.components.length} component{product.components.length !== 1 ? 's' : ''}</span>
                     </div>
                   )}
-                  <div className="text-sm">
-                    <span className="font-medium">Total Stock: </span>
-                    {product.skus.reduce((sum, sku) => sum + sku.stock_level, 0)} units
-                  </div>
                 </div>
               </CardContent>
               <CardFooter>
-                <div className="flex items-center justify-between w-full">
-                  {product.skus.length > 0 && (
-                    <span className="text-sm text-muted-foreground">
-                      ${Math.min(...product.skus.map(s => s.price || 0))} - ${Math.max(...product.skus.map(s => s.price || 0))}
-                    </span>
-                  )}
-                  {product.requires_assembly && (
-                    <Badge variant="secondary" className="text-xs">Assembly Required</Badge>
-                  )}
+                <div className="flex flex-col gap-2 w-full">
+                  <div className="text-sm">
+                    <span className="font-medium">Total Stock: </span>
+                    {formatNumber(product.skus.reduce((sum, sku) => sum + (sku.finishedGoodsStock || 0), 0))} units
+                  </div>
+                  <div className="flex items-center justify-between w-full">
+                    {product.skus.length > 0 && (() => {
+                      const minPrice = Math.min(...product.skus.map(s => s.price || 0));
+                      const maxPrice = Math.max(...product.skus.map(s => s.price || 0));
+                      return (
+                        <span className="text-sm text-muted-foreground">
+                          {formatCurrency(minPrice)}{minPrice !== maxPrice ? ` - ${formatCurrency(maxPrice)}` : ''}
+                        </span>
+                      );
+                    })()}
+                    {(!!product.requires_assembly || !!product.requires_post_processing) && (
+                      <Badge variant="secondary" className="text-xs">
+                        {product.requires_assembly && product.requires_post_processing
+                          ? "Processing + Assembly Required"
+                          : product.requires_assembly
+                          ? "Assembly Required"
+                          : "Post-Processing Required"}
+                      </Badge>
+                    )}
+                  </div>
                 </div>
               </CardFooter>
             </Card>
@@ -268,7 +259,7 @@ const Products = () => {
               <div className="divide-y divide-border">
                 {products.map((product) => {
                   const isExpanded = expandedProducts.has(product.id);
-                  const totalStock = product.skus.reduce((sum, sku) => sum + sku.stock_level, 0);
+                  const totalStock = product.skus.reduce((sum, sku) => sum + (sku.finishedGoodsStock || 0), 0);
 
                   return (
                     <div key={product.id}>
@@ -323,7 +314,7 @@ const Products = () => {
 
                         {/* Total Stock Column */}
                         <div className="col-span-2 flex flex-col items-center justify-center">
-                          <div className="font-medium">{totalStock}</div>
+                          <div className="font-medium">{formatNumber(totalStock)}</div>
                           <div className="text-sm text-muted-foreground">units</div>
                         </div>
 
@@ -353,13 +344,6 @@ const Products = () => {
                               <DropdownMenuItem onClick={() => handleEditProduct(product)}>
                                 <Edit className="mr-2 h-4 w-4" />
                                 Edit Product
-                              </DropdownMenuItem>
-                              <DropdownMenuItem onClick={(e) => {
-                                e.stopPropagation();
-                                handleAddSku(product.id);
-                              }}>
-                                <PlusCircle className="mr-2 h-4 w-4" />
-                                Add SKU
                               </DropdownMenuItem>
                             </DropdownMenuContent>
                           </DropdownMenu>
@@ -393,7 +377,7 @@ const Products = () => {
                           {/* Print File Column */}
                           <div className="col-span-2 flex items-center">
                             <div className="text-sm text-muted-foreground">
-                              ${sku.price?.toFixed(2) || '0.00'}
+                              {formatCurrency(sku.price || 0)}
                             </div>
                           </div>
 
@@ -404,8 +388,8 @@ const Products = () => {
 
                           {/* Stock Column */}
                           <div className="col-span-2 flex flex-col items-center justify-center">
-                            <div className="font-medium">{sku.stock_level}</div>
-                            {getStatusBadge(sku.stock_level)}
+                            <div className="font-medium">{formatNumber(sku.finishedGoodsStock || 0)}</div>
+                            {getStatusBadge(sku.finishedGoodsStock || 0)}
                           </div>
 
                           {/* Assembly Column */}
@@ -422,13 +406,6 @@ const Products = () => {
                                 </Button>
                               </DropdownMenuTrigger>
                               <DropdownMenuContent align="end">
-                                <DropdownMenuItem onClick={(e) => {
-                                  e.stopPropagation();
-                                  handleEditSku(sku);
-                                }}>
-                                  <Edit className="mr-2 h-4 w-4" />
-                                  Edit SKU
-                                </DropdownMenuItem>
                                 <DropdownMenuItem onClick={() => deleteSku(sku.id)}>
                                   Delete SKU
                                 </DropdownMenuItem>
@@ -458,19 +435,6 @@ const Products = () => {
         onSave={handleProductSave}
         onDelete={handleDeleteProduct}
         initialEditMode={isEditMode}
-      />
-
-      {/* SKU Modal */}
-      <SkuModal
-        sku={selectedSku}
-        productId={selectedProductForSku}
-        isOpen={isSkuModalOpen}
-        onClose={() => {
-          setIsSkuModalOpen(false);
-          setSelectedSku(null);
-          setSelectedProductForSku('');
-        }}
-        onSave={handleSkuSave}
       />
 
     </div>

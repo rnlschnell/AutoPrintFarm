@@ -79,3 +79,10 @@ config/private.yaml
 # Test files
 test_*.py
 *_test.py
+
+# Database files
+*.db
+!data/tenant.db
+data/tenant.db.backup*
+data/backups/*.db
+data/old_empty_databases/

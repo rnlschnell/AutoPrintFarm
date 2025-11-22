@@ -1,15 +1,17 @@
 printers:
-- access_code: '37284012'
-  enabled: true
-  id: '1'
-  ip: 192.168.4.24
-  model: A1
-  name: reconnecta1
-  serial: 03919C452802615
-- access_code: '11104364'
-  enabled: true
-  id: '2'
-  ip: 192.168.4.48
-  model: A1
-  name: MicahsA1
-  serial: 03919C461200853
+  - id: "4"
+    name: "Nates A1"
+    model: "A1"
+    manufacturer: "Bambu Labs"
+    ip: "192.168.4.24"
+    access_code: "37284012"
+    serial: "03919C452802615"
+    enabled: true
+  - id: "5"
+    name: "A1 Minii"
+    model: "A1 Mini"
+    manufacturer: "Bambu Labs"
+    ip: "192.168.4.50"
+    access_code: "15371686"
+    serial: "0309CA4C1201622"
+    enabled: true

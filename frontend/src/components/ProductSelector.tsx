@@ -1,7 +1,7 @@
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useAvailableProducts, type AvailableProduct } from "@/hooks/useAvailableFiles";
-import { Package, HardDrive, Clock, FileText } from "lucide-react";
+import { Package } from "lucide-react";
 
 interface ProductSelectorProps {
   value: string;
@@ -11,22 +11,6 @@ interface ProductSelectorProps {
 
 const ProductSelector = ({ value, onValueChange, disabled = false }: ProductSelectorProps) => {
   const { products, loading } = useAvailableProducts();
-
-  const formatFileSize = (sizeBytes: number): string => {
-    if (sizeBytes < 1024 * 1024) {
-      return `${Math.round(sizeBytes / 1024)} KB`;
-    }
-    return `${Math.round(sizeBytes / (1024 * 1024) * 10) / 10} MB`;
-  };
-
-  const formatDate = (dateString: string): string => {
-    try {
-      const date = new Date(dateString);
-      return date.toLocaleDateString() + ' ' + date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    } catch {
-      return 'Unknown';
-    }
-  };
 
   return (
     <div className="space-y-2">
@@ -63,32 +47,8 @@ const ProductSelector = ({ value, onValueChange, disabled = false }: ProductSele
                     {product.name}
                   </div>
                   {product.description && (
-                    <div className="text-xs text-muted-foreground truncate mb-1">
+                    <div className="text-xs text-muted-foreground truncate">
                       {product.description}
-                    </div>
-                  )}
-                  <div className="flex items-center gap-3 text-xs text-muted-foreground">
-                    {product.category && (
-                      <span className="px-1.5 py-0.5 bg-muted rounded text-xs">
-                        {product.category}
-                      </span>
-                    )}
-                    {product.file_info && (
-                      <>
-                        <span className="flex items-center gap-1">
-                          <FileText className="h-3 w-3" />
-                          {formatFileSize(product.file_info.size_bytes)}
-                        </span>
-                        <span className="flex items-center gap-1">
-                          <Clock className="h-3 w-3" />
-                          {formatDate(product.file_info.created_at)}
-                        </span>
-                      </>
-                    )}
-                  </div>
-                  {product.requires_assembly && (
-                    <div className="text-xs text-amber-600 mt-1">
-                      ⚠️ Requires assembly
                     </div>
                   )}
                 </div>

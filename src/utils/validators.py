@@ -67,6 +67,37 @@ def validate_fan_speed(speed: int) -> None:
     if not 0 <= speed <= 100:
         raise ValidationError(f"Invalid fan speed: {speed} (must be between 0 and 100)")
 
+def sanitize_bambu_filename(filename: str) -> str:
+    """
+    Sanitize filename to be compatible with Bambu Lab printers.
+    Replaces spaces with underscores and removes invalid characters.
+    Preserves the file extension.
+
+    Args:
+        filename: Original filename that may contain spaces or invalid characters
+
+    Returns:
+        Sanitized filename safe for Bambu Lab printers
+
+    Example:
+        "Quick ReleaseAMS.gcode" -> "Quick_ReleaseAMS.gcode"
+        "My File (2).3mf" -> "My_File_2.3mf"
+    """
+    # Split filename and extension
+    if '.' in filename:
+        name_part, ext = filename.rsplit('.', 1)
+    else:
+        name_part, ext = filename, ''
+
+    # Replace spaces with underscores
+    name_part = name_part.replace(' ', '_')
+
+    # Remove any characters that aren't alphanumeric, dots, hyphens, or underscores
+    name_part = re.sub(r'[^a-zA-Z0-9._-]', '', name_part)
+
+    # Reconstruct filename
+    return f"{name_part}.{ext}" if ext else name_part
+
 def validate_bambu_file_path(file_path: str) -> None:
     """Validate Bambu Labs file path format"""
     if not file_path.endswith(('.3mf', '.gcode', '.g')):

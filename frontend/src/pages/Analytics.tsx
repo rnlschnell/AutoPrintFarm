@@ -27,10 +27,16 @@ const Analytics = () => {
 
   const getFilteredOrders = () => {
     const now = new Date();
-    
+
+    // Add defensive check for orders array
+    if (!orders || !Array.isArray(orders)) {
+      return [];
+    }
+
     switch (dateRange) {
       case '7days':
         return orders.filter(order => {
+          if (!order?.orderDate) return false;
           const orderDate = parseISO(order.orderDate);
           return isWithinInterval(orderDate, {
             start: subDays(now, 7),
@@ -39,6 +45,7 @@ const Analytics = () => {
         });
       case '30days':
         return orders.filter(order => {
+          if (!order?.orderDate) return false;
           const orderDate = parseISO(order.orderDate);
           return isWithinInterval(orderDate, {
             start: subDays(now, 30),
@@ -48,6 +55,7 @@ const Analytics = () => {
       default:
         if (customDateRange.from && customDateRange.to) {
           return orders.filter(order => {
+            if (!order?.orderDate) return false;
             const orderDate = parseISO(order.orderDate);
             return isWithinInterval(orderDate, {
               start: customDateRange.from!,
@@ -83,10 +91,10 @@ const Analytics = () => {
   const filteredOrders = getFilteredOrders();
   const analyticsData = {
     filteredOrders,
-    totalRevenue: filteredOrders.reduce((sum, order) => sum + order.totalRevenue, 0),
-    totalUnits: filteredOrders.reduce((sum, order) => 
-      sum + order.items.reduce((itemSum, item) => itemSum + item.quantity, 0), 0
-    ),
+    totalRevenue: filteredOrders?.reduce((sum, order) => sum + (order?.totalRevenue || 0), 0) || 0,
+    totalUnits: filteredOrders?.reduce((sum, order) =>
+      sum + (order?.items?.reduce((itemSum, item) => itemSum + (item?.quantity || 0), 0) || 0), 0
+    ) || 0,
   };
 
   return (

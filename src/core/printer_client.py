@@ -1,11 +1,13 @@
 import asyncio
 import logging
 import os
+import sqlite3
+from datetime import datetime
 from typing import Dict, Any, Optional, List
 import bambulabs_api as bl
 from src.utils.exceptions import PrinterConnectionError, PrinterNotFoundError
 from src.utils.validators import (
-    validate_bambu_print_params, validate_bambu_mqtt_command, 
+    validate_bambu_print_params, validate_bambu_mqtt_command,
     validate_bambu_sequence_id, validate_bambu_file_path
 )
 from .connection_manager import connection_manager
@@ -13,9 +15,40 @@ from ..utils.resource_monitor import resource_monitor
 
 logger = logging.getLogger(__name__)
 
+def _test_printer_connectivity(ip: str, port: int = 8883, timeout: float = 3.0) -> tuple[bool, str]:
+    """Quick test if printer's MQTT port is reachable
+
+    Args:
+        ip: Printer IP address
+        port: MQTT port (default 8883 for Bambu printers)
+        timeout: Connection timeout in seconds
+
+    Returns:
+        (reachable: bool, reason: str) - Whether port is reachable and why
+    """
+    import socket
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        result = sock.connect_ex((ip, port))
+        sock.close()
+
+        if result == 0:
+            return True, "MQTT port reachable"
+        elif result == 113:
+            return False, "No route to host (errno 113)"
+        elif result == 111:
+            return False, "Connection refused (errno 111)"
+        else:
+            return False, f"Connection failed (errno {result})"
+    except socket.timeout:
+        return False, f"Connection timeout after {timeout}s"
+    except Exception as e:
+        return False, f"Network error: {e}"
+
 class PrinterClientManager:
     """Manages connections to multiple Bambu Lab printers"""
-    
+
     def __init__(self):
         self.clients: Dict[str, bl.Printer] = {}
         self.printer_configs: Dict[str, Dict[str, Any]] = {}
@@ -24,7 +57,98 @@ class PrinterClientManager:
         self.reconnect_interval: int = 30  # seconds
         self.max_reconnect_attempts: int = 5
         self.reconnect_tasks: Dict[str, asyncio.Task] = {}  # Track reconnection tasks
-    
+
+        # Debouncing for database writes
+        self.last_db_write: Dict[str, float] = {}  # Track last DB write time per printer
+        self.pending_db_state: Dict[str, bool] = {}  # Track pending connection state per printer
+        self.state_change_time: Dict[str, float] = {}  # Track when state last changed per printer
+
+        # Track last layer for cleared status management
+        self.last_layer_seen: Dict[str, int] = {}  # Track last layer number per printer
+        self.printing_start_time: Dict[str, float] = {}  # Track when printer entered 'printing' status
+
+    def _update_connection_status_db(self, printer_id: str, is_connected: bool, user_action: bool = False) -> None:
+        """Debounced SQLite update for printer connection status
+
+        Args:
+            printer_id: Printer identifier
+            is_connected: Connection status
+            user_action: True if this is a user-initiated action (skip debouncing)
+        """
+        import time
+        current_time = time.time()
+
+        # Store the pending state
+        self.pending_db_state[printer_id] = is_connected
+
+        # Update state change time if state actually changed
+        if printer_id not in self.pending_db_state or self.pending_db_state.get(printer_id) != is_connected:
+            self.state_change_time[printer_id] = current_time
+
+        # Determine if we should write to DB now
+        should_write = False
+
+        if user_action:
+            # User-initiated actions always write immediately
+            should_write = True
+            reason = "user action"
+        else:
+            last_write = self.last_db_write.get(printer_id, 0)
+            time_since_last_write = current_time - last_write
+
+            # Get when state last changed
+            state_change_time = self.state_change_time.get(printer_id, current_time)
+            time_since_state_change = current_time - state_change_time
+
+            # Write if:
+            # 1. State has been stable for 5+ seconds, OR
+            # 2. It's been 60+ seconds since last write (periodic sync)
+            if time_since_state_change >= 5:
+                should_write = True
+                reason = "state stable for 5+ seconds"
+            elif time_since_last_write >= 60:
+                should_write = True
+                reason = "periodic sync (60+ seconds)"
+
+        if not should_write:
+            logger.debug(f"Debouncing DB write for printer {printer_id} (state will be written when stable)")
+            return
+
+        try:
+            # Simple direct SQLite update - no complex dependencies
+            db_path = "/home/pi/PrintFarmSoftware/data/tenant.db"
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+
+            # Update is_connected field AND status based on printer_id (integer ID from config)
+            # When disconnected, set status to 'offline' to keep UI in sync
+            if is_connected:
+                cursor.execute("""
+                    UPDATE printers
+                    SET is_connected = ?,
+                        updated_at = ?
+                    WHERE printer_id = ?
+                """, (1, datetime.utcnow().isoformat(), int(printer_id)))
+            else:
+                cursor.execute("""
+                    UPDATE printers
+                    SET is_connected = ?,
+                        status = 'offline',
+                        updated_at = ?
+                    WHERE printer_id = ?
+                """, (0, datetime.utcnow().isoformat(), int(printer_id)))
+
+            conn.commit()
+            conn.close()
+
+            # Update last write time
+            self.last_db_write[printer_id] = current_time
+
+            logger.debug(f"Updated DB connection status for printer {printer_id}: connected={is_connected} (reason: {reason})")
+        except Exception as e:
+            # Don't fail the connection process if DB update fails
+            logger.error(f"Failed to update DB connection status for printer {printer_id}: {e}")
+
     def add_printer(self, printer_id: str, config: Dict[str, Any]) -> None:
         """Add a printer configuration"""
         self.printer_configs[printer_id] = config
@@ -85,8 +209,21 @@ class PrinterClientManager:
             raise PrinterConnectionError("System resources overloaded, connection throttled")
         
         config = self.printer_configs[printer_id]
-        
+
         try:
+            # LAYER 1: Pre-connection network check
+            # Quick test if printer's MQTT port is reachable before creating client
+            logger.info(f"Pre-check: Testing connectivity to {config['ip']}:8883...")
+            reachable, reason = _test_printer_connectivity(config["ip"], port=8883, timeout=3.0)
+
+            if not reachable:
+                error_msg = f"Printer unreachable: {reason}"
+                connection_manager.record_connection_attempt(printer_id, False, error_msg)
+                logger.warning(f"Connection pre-check failed for printer {printer_id}: {error_msg}")
+                raise PrinterConnectionError(error_msg)
+
+            logger.info(f"Pre-check passed: {reason}")
+
             # Create printer client using bambulabs_api
             # bl.Printer expects positional arguments: (IP, ACCESS_CODE, SERIAL)
             client = bl.Printer(
@@ -95,16 +232,115 @@ class PrinterClientManager:
                 config["serial"]
             )
             
+            # Log client attributes for debugging
+            logger.info(f"Printer {printer_id} client created - IP: {config['ip']}, Model: {config.get('model', 'unknown')}")
+            logger.info(f"  Available MQTT client attributes: {[attr for attr in dir(client.mqtt_client) if not attr.startswith('_')]}")
+
+            # Set up instant MQTT disconnect callback BEFORE connecting
+            def on_disconnect_callback(mqtt_client_obj, client_obj, userdata, flags, reason_code, properties):
+                """Instant callback when MQTT disconnects - immediately updates DB and removes client"""
+                logger.warning(f"[DISCONNECT EVENT] MQTT disconnected for printer {printer_id}: reason_code={reason_code}")
+                logger.info(f"[DISCONNECT EVENT] Updating database: is_connected=False, status='offline' for printer {printer_id}")
+                self._update_connection_status_db(printer_id, False, user_action=True)
+
+                # Remove client object to stop internal MQTT reconnection loop
+                if printer_id in self.clients:
+                    try:
+                        del self.clients[printer_id]
+                        connection_manager.record_disconnection(printer_id)
+                        logger.info(f"[DISCONNECT EVENT] Removed client object for printer {printer_id} - reconnection loop stopped")
+                    except Exception as e:
+                        logger.error(f"[DISCONNECT EVENT] Error removing client for printer {printer_id}: {e}")
+
+            # Set up instant MQTT connect callback
+            def on_connect_callback(mqtt_client_obj, client_obj, userdata, flags, reason_code, properties):
+                """Instant callback when MQTT connects - immediately updates DB
+
+                LAYER 3: Enhanced callback to handle connection failures
+                """
+                logger.info(f"[CONNECT EVENT] MQTT connected for printer {printer_id}: reason_code={reason_code}")
+
+                # Check if connection actually succeeded
+                if reason_code == 0 or not reason_code.is_failure:
+                    logger.info(f"[CONNECT EVENT] Connection successful - Updating database: is_connected=True for printer {printer_id}")
+                    self._update_connection_status_db(printer_id, True, user_action=True)
+                else:
+                    # Connection failed with error code
+                    logger.error(f"[CONNECT EVENT] MQTT connection failed for printer {printer_id}: {reason_code}")
+                    # Remove client immediately to prevent reconnection loop
+                    if printer_id in self.clients:
+                        try:
+                            del self.clients[printer_id]
+                            connection_manager.record_disconnection(printer_id)
+                            logger.info(f"[CONNECT EVENT] Removed failed client for printer {printer_id}")
+                        except Exception as e:
+                            logger.error(f"[CONNECT EVENT] Error removing client: {e}")
+
+            # Try multiple ways to attach callbacks (library may use different attribute names)
+            callback_attached = False
+
+            # Method 1: Try on_disconnect_handler / on_connect_handler (current approach)
+            if hasattr(client.mqtt_client, 'on_disconnect_handler'):
+                client.mqtt_client.on_disconnect_handler = on_disconnect_callback
+                client.mqtt_client.on_connect_handler = on_connect_callback
+                logger.info(f"Attached callbacks using *_handler attributes for printer {printer_id}")
+                callback_attached = True
+
+            # Method 2: Try standard paho-mqtt on_disconnect / on_connect
+            elif hasattr(client.mqtt_client, 'on_disconnect'):
+                client.mqtt_client.on_disconnect = on_disconnect_callback
+                client.mqtt_client.on_connect = on_connect_callback
+                logger.info(f"Attached callbacks using standard paho-mqtt attributes for printer {printer_id}")
+                callback_attached = True
+
+            if not callback_attached:
+                logger.warning(f"Could not attach MQTT callbacks for printer {printer_id} - attributes not found")
+
             # Connect to printer with timeout
             await asyncio.wait_for(
                 asyncio.to_thread(client.connect),
                 timeout=30.0  # 30 second timeout
             )
-            
+
+            # LAYER 2: Post-connection MQTT verification
+            # Verify MQTT actually connected before declaring success
+            logger.info(f"Verifying MQTT connection for printer {printer_id}...")
+            mqtt_connected = False
+            verification_timeout = 10.0
+            check_interval = 0.5
+            elapsed = 0
+
+            while elapsed < verification_timeout:
+                if client.mqtt_client.is_connected():
+                    mqtt_connected = True
+                    logger.info(f"MQTT connection verified for printer {printer_id}")
+                    break
+                await asyncio.sleep(check_interval)
+                elapsed += check_interval
+
+            if not mqtt_connected:
+                # MQTT failed to connect - clean up and fail
+                error_msg = f"MQTT connection verification failed after {verification_timeout}s"
+                logger.error(f"Printer {printer_id}: {error_msg}")
+
+                # CRITICAL: Stop the MQTT client to prevent reconnection loop
+                try:
+                    client.disconnect()
+                except Exception as e:
+                    logger.warning(f"Error during cleanup disconnect: {e}")
+
+                # Record failure and throw exception
+                connection_manager.record_connection_attempt(printer_id, False, error_msg)
+                raise PrinterConnectionError(error_msg)
+
+            # Only if verification passed, add to active clients
             self.clients[printer_id] = client
             connection_manager.record_connection_attempt(printer_id, True)
             logger.info(f"Connected to printer: {printer_id}")
-            
+
+            # Update database connection status to connected (user-initiated, write immediately)
+            self._update_connection_status_db(printer_id, True, user_action=True)
+
             # Start auto-reconnection monitoring with reduced frequency
             if self.auto_reconnect_enabled:
                 self._start_connection_monitor(printer_id)
@@ -134,10 +370,14 @@ class PrinterClientManager:
                 self.clients[printer_id].disconnect()
                 del self.clients[printer_id]
                 connection_manager.record_disconnection(printer_id)
+                # Update database connection status to disconnected (user-initiated, write immediately)
+                self._update_connection_status_db(printer_id, False, user_action=True)
                 logger.info(f"Disconnected from printer: {printer_id}")
             except Exception as e:
                 logger.error(f"Error disconnecting from printer {printer_id}: {e}")
                 connection_manager.record_disconnection(printer_id)  # Still record disconnection
+                # Update database even on error (user-initiated, write immediately)
+                self._update_connection_status_db(printer_id, False, user_action=True)
     
     def get_client(self, printer_id: str) -> bl.Printer:
         """Get connected client for a printer"""
@@ -155,20 +395,20 @@ class PrinterClientManager:
         logger.debug(f"Started connection monitor for printer {printer_id}")
     
     async def _connection_monitor_loop(self, printer_id: str) -> None:
-        """Monitor connection and handle reconnection with heavy rate limiting"""
+        """Monitor connection and handle reconnection - relies on MQTT callbacks for disconnect detection"""
         attempt = 0
-        # Balanced monitor interval - responsive but not overwhelming
-        monitor_interval = 75  # 75 seconds - balanced between responsiveness and resource usage
-        
+        # Significantly reduced monitor interval - MQTT callbacks handle most disconnect detection
+        monitor_interval = 300  # 5 minutes - safety net only, MQTT callbacks are primary detector
+
         while self.auto_reconnect_enabled and printer_id in self.printer_configs:
             try:
                 await asyncio.sleep(monitor_interval)
-                
+
                 # Check system resources first
                 if resource_monitor.should_throttle_operation("reconnect"):
                     logger.info(f"Connection monitor throttled for printer {printer_id} due to system resources")
                     continue
-                
+
                 # Check if still connected
                 if printer_id not in self.clients:
                     # Only attempt reconnection if allowed by rate limiter
@@ -179,8 +419,8 @@ class PrinterClientManager:
                     else:
                         logger.info(f"Reconnection skipped for printer {printer_id}: {reason}")
                 else:
-                    # Only test connection occasionally to reduce resource usage
-                    if attempt % 3 == 0:  # Test every 3rd cycle (15 minutes)
+                    # Only test connection very occasionally - rely on MQTT callbacks for disconnect detection
+                    if attempt % 10 == 0:  # Test every 10th cycle (50 minutes) - just a safety net
                         try:
                             client = self.clients[printer_id]
                             # Simplified connection test
@@ -191,12 +431,22 @@ class PrinterClientManager:
                                 )
                                 if not connected:
                                     logger.warning(f"MQTT connection lost for printer {printer_id}")
+                                    # Update database connection status to disconnected
+                                    self._update_connection_status_db(printer_id, False)
+                                    # Remove stale client from dictionary
+                                    try:
+                                        self.clients[printer_id].disconnect()
+                                    except Exception:
+                                        pass  # Ignore errors during disconnect
+                                    del self.clients[printer_id]
+                                    connection_manager.record_disconnection(printer_id)
+                                    logger.info(f"Removed stale client for printer {printer_id} from active connections")
                                     # Don't immediately reconnect, just log it
                         except Exception as e:
                             logger.debug(f"Connection test failed for printer {printer_id}: {e}")
-                
-                # Reset attempt counter on successful check
-                attempt = 0
+
+                # Increment attempt counter
+                attempt += 1
                 
             except asyncio.CancelledError:
                 logger.debug(f"Connection monitor cancelled for printer {printer_id}")
@@ -324,17 +574,20 @@ class PrinterClientManager:
                 "flow_cali": params.get("flow_calibration", False),
                 "vibration_cali": params.get("vibration_calibration", False),
                 "layer_inspect": params.get("layer_inspect", False),
-                "use_ams": params.get("use_ams", True),
+                "use_ams": params.get("use_ams", False),
                 "timelapse": params.get("timelapse", False)
             }
             
             # Add plate number (1-based to 0-based conversion)
             if "plate_number" in params:
                 mqtt_params["bed_type"] = params["plate_number"] - 1
-                
-            # Add AMS mapping if provided
+
+            # Add AMS mapping - default to external spool [254] when not using AMS
             if "ams_mapping" in params and params["ams_mapping"]:
                 mqtt_params["ams_mapping"] = params["ams_mapping"]
+            elif not params.get("use_ams", False):
+                # When not using AMS, explicitly map to external spool holder (value 254)
+                mqtt_params["ams_mapping"] = [254]
             
             # Create proper MQTT message structure for print command
             mqtt_message = self.create_mqtt_message(printer_id, "print_start", mqtt_params)
@@ -359,10 +612,31 @@ class PrinterClientManager:
                 }
             elif hasattr(client, 'start_print'):
                 # Use bambulabs_api start_print method with correct parameters
-                # Based on bambulabs_api v2.6.3: start_print(file_path: str, plate_number: int = 1)
+                # Based on bambulabs_api docs: start_print(filename, plate_number, use_ams=True, ams_mapping=[0], skip_objects=None, flow_calibration=True)
                 plate_number = params.get('plate_number', 1)  # Default to plate 1
-                logger.info(f"Calling bambulabs_api start_print with filename: {filename}, plate_number: {plate_number}")
-                result = await asyncio.to_thread(client.start_print, filename, plate_number)
+                use_ams = params.get('use_ams', False)  # Default to False for no AMS
+
+                # Set ams_mapping based on use_ams parameter
+                if "ams_mapping" in params and params["ams_mapping"]:
+                    ams_mapping = params["ams_mapping"]
+                elif not use_ams:
+                    # When not using AMS, explicitly map to external spool holder (value 254)
+                    ams_mapping = [254]
+                else:
+                    # Default AMS mapping when use_ams=True
+                    ams_mapping = [0]
+
+                flow_calibration = params.get('flow_calibration', False)
+
+                logger.info(f"Calling bambulabs_api start_print with filename: {filename}, plate_number: {plate_number}, use_ams: {use_ams}, ams_mapping: {ams_mapping}, flow_calibration: {flow_calibration}")
+                result = await asyncio.to_thread(
+                    client.start_print,
+                    filename,
+                    plate_number,
+                    use_ams=use_ams,
+                    ams_mapping=ams_mapping,
+                    flow_calibration=flow_calibration
+                )
                 logger.info(f"bambulabs_api start_print result: {result}")
                 
                 return {
@@ -472,10 +746,10 @@ class PrinterClientManager:
         """Cancel current print job using Bambu Labs MQTT protocol"""
         client = self.get_client(printer_id)
         try:
-            # Create MQTT message for print cancel
+            # Create MQTT message for print stop (cancel and stop are the same in Bambu Labs)
             mqtt_params = {}
-            mqtt_message = self.create_mqtt_message(printer_id, "print_cancel", mqtt_params)
-            
+            mqtt_message = self.create_mqtt_message(printer_id, "print_stop", mqtt_params)
+
             # Try to send using bambulabs_api
             if hasattr(client, 'publish') or hasattr(client, 'send_command'):
                 if hasattr(client, 'publish'):
@@ -483,12 +757,12 @@ class PrinterClientManager:
                 elif hasattr(client, 'send_command'):
                     await asyncio.to_thread(client.send_command, mqtt_message)
                 logger.info(f"Sent print cancel command: {mqtt_message}")
-            elif hasattr(client, 'cancel_print'):
-                await asyncio.to_thread(client.cancel_print)
+            elif hasattr(client, 'stop_print'):
+                await asyncio.to_thread(client.stop_print)
             else:
                 logger.warning("Print cancel method not available in bambulabs_api")
                 logger.info(f"Would send MQTT: {mqtt_message}")
-                
+
             return True
         except Exception as e:
             logger.error(f"Failed to cancel print: {e}")
@@ -812,7 +1086,38 @@ class PrinterClientManager:
         except Exception as e:
             logger.warning(f"Failed to get uptime info: {e}")
             return None
-    
+
+    async def _set_printer_cleared_status(self, printer_id: str, cleared: bool) -> None:
+        """
+        Update printer cleared status in database
+
+        Args:
+            printer_id: Printer identifier
+            cleared: New cleared status (True = ready, False = needs clearing)
+        """
+        try:
+            # Simple direct SQLite update - matching pattern used for is_connected
+            db_path = "/home/pi/PrintFarmSoftware/data/tenant.db"
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+
+            # Update cleared field based on printer_id (integer ID from config)
+            cursor.execute("""
+                UPDATE printers
+                SET cleared = ?,
+                    updated_at = ?
+                WHERE printer_id = ?
+            """, (1 if cleared else 0, datetime.utcnow().isoformat(), int(printer_id)))
+
+            conn.commit()
+            conn.close()
+
+            logger.debug(f"Printer {printer_id} cleared status set to {cleared}")
+
+        except Exception as e:
+            logger.error(f"Failed to update cleared status for printer {printer_id}: {e}")
+            raise
+
     # Lighting Control Methods
     async def get_light_status(self, printer_id: str) -> Dict[str, Any]:
         """Get current light status using proper bambulabs_api method with caching"""
@@ -1144,7 +1449,28 @@ class PrinterClientManager:
         except Exception as e:
             logger.error(f"Failed to cut filament: {e}")
             raise PrinterConnectionError(f"Failed to cut filament: {e}")
-    
+
+    async def calibrate_printer(self, printer_id: str, bed_level: bool = True,
+                                vibration_compensation: bool = True,
+                                motor_noise_calibration: bool = True) -> bool:
+        """Calibrate printer with specified calibration options"""
+        client = self.get_client(printer_id)
+        try:
+            if hasattr(client, 'calibrate_printer'):
+                await asyncio.to_thread(
+                    client.calibrate_printer,
+                    bed_level=bed_level,
+                    vibration_compensation=vibration_compensation,
+                    motor_noise_calibration=motor_noise_calibration
+                )
+            else:
+                logger.warning("calibrate_printer method not available in bambulabs_api")
+                pass
+            return True
+        except Exception as e:
+            logger.error(f"Failed to calibrate printer: {e}")
+            raise PrinterConnectionError(f"Failed to calibrate printer: {e}")
+
     # File Operations Methods
     async def list_files(self, printer_id: str) -> List[Dict[str, Any]]:
         """List files on printer storage using FTP client"""
@@ -1358,47 +1684,86 @@ class PrinterClientManager:
     
     # Camera Operations Methods
     async def take_snapshot(self, printer_id: str) -> Dict[str, Any]:
-        """Take camera snapshot"""
+        """Take camera snapshot using get_camera_frame() for direct base64"""
+        from datetime import datetime
         client = self.get_client(printer_id)
-        try:
-            # Use real bambulabs_api camera method
-            image = await asyncio.to_thread(client.get_camera_image)
-            
-            if image is not None:
-                # Convert PIL Image to base64
-                import io
-                import base64
-                from datetime import datetime
-                
-                # Convert to JPEG bytes
-                buffer = io.BytesIO()
-                image.save(buffer, format='JPEG')
-                image_bytes = buffer.getvalue()
-                
-                # Encode to base64
-                image_base64 = base64.b64encode(image_bytes).decode('utf-8')
-                
+
+        # Log diagnostic information
+        logger.info(f"Camera snapshot request for printer {printer_id} - IP: {client.ip_address}, camera_alive: {client.camera_client_alive()}")
+        logger.info(f"  Camera client configured IP: {client.camera_client._PrinterCamera__hostname}")
+
+        # Ensure camera is started (only start once, let daemon run)
+        if not client.camera_client_alive():
+            logger.info(f"Starting camera for printer {printer_id}...")
+            try:
+                client.camera_start()
+            except RuntimeError as e:
+                if "threads can only be started once" not in str(e):
+                    raise
+            await asyncio.sleep(1)  # Brief delay for camera daemon to start
+
+        # Retry logic: wait up to 30 seconds for first frame (A1 needs more time than A1 Mini)
+        max_retries = 15
+        retry_delay = 2.0
+
+        for attempt in range(max_retries):
+            try:
+                # Use get_camera_frame() to get base64 directly (more efficient than get_camera_image)
+                # This returns the JPEG already encoded as base64 string
+                image_base64 = await asyncio.to_thread(client.get_camera_frame)
+
+                logger.info(f"Successfully captured camera snapshot for printer {printer_id}")
                 return {
                     "image_data": image_base64,
                     "timestamp": datetime.utcnow().isoformat() + "Z",
-                    "resolution": f"{image.width}x{image.height}"
+                    "resolution": "1920x1080"  # Default Bambu Lab camera resolution
                 }
-            else:
-                logger.warning("Camera image returned None - camera may not be available")
-                return {
-                    "image_data": "",
-                    "timestamp": "2024-01-01T00:00:00Z",
-                    "resolution": "640x480"
-                }
-        except Exception as e:
-            logger.error(f"Failed to take snapshot: {e}")
-            # Return valid mock data when camera fails
-            return {
-                "image_data": "",
-                "timestamp": "2024-01-01T00:00:00Z", 
-                "resolution": "640x480"
-            }
-    
+
+            except Exception as e:
+                error_msg = str(e)
+                if "No frame available" in error_msg and attempt < max_retries - 1:
+                    logger.debug(f"Camera not ready for printer {printer_id}, waiting... (attempt {attempt + 1}/{max_retries})")
+                    await asyncio.sleep(retry_delay)
+                    continue
+                elif attempt == max_retries - 1:
+                    logger.error(f"Failed to take snapshot for printer {printer_id} after {max_retries} attempts: {e}")
+                    logger.error(f"  Printer IP: {client.ip_address}")
+                    logger.error(f"  Camera alive: {client.camera_client_alive()}")
+                    logger.error(f"  Access code (masked): {'*' * (len(client.access_code) - 2)}{client.access_code[-2:] if len(client.access_code) > 2 else '**'}")
+                    logger.error(f"  Troubleshooting: Verify printer has 'LAN Only Mode' enabled, camera not disabled in settings, and correct access code")
+                    # Return empty data when camera fails
+                    return {
+                        "image_data": "",
+                        "timestamp": "2024-01-01T00:00:00Z",
+                        "resolution": "1920x1080"
+                    }
+                else:
+                    # Other unexpected errors
+                    logger.error(f"Failed to take snapshot for printer {printer_id}: {e}")
+                    return {
+                        "image_data": "",
+                        "timestamp": "2024-01-01T00:00:00Z",
+                        "resolution": "1920x1080"
+                    }
+
+        # Fallback if loop completes without returning
+        logger.warning(f"Camera snapshot failed for printer {printer_id} - no frames available")
+        return {
+            "image_data": "",
+            "timestamp": "2024-01-01T00:00:00Z",
+            "resolution": "1920x1080"
+        }
+
+    async def stop_camera(self, printer_id: str) -> bool:
+        """Stop camera connection for a printer"""
+        client = self.get_client(printer_id)
+        if client.camera_client_alive():
+            await asyncio.to_thread(client.camera_stop)
+            logger.info(f"Camera stopped for printer {printer_id}")
+            return True
+        logger.info(f"Camera already stopped for printer {printer_id}")
+        return False
+
     # System Commands & Control Methods
     async def send_gcode(self, printer_id: str, command: str, wait: bool = False) -> bool:
         """Send custom G-code command"""
@@ -1501,7 +1866,9 @@ class PrinterClientManager:
                     "bed": {"current": 0.0, "target": 0.0, "is_heating": False},
                     "chamber": {"current": 0.0, "target": 0.0, "is_heating": False}
                 },
-                "current_job": None
+                "current_job": None,
+                "raw_gcode_state": None,  # Raw state from printer for job completion detection
+                "error_code": None  # Error code for failed prints
             }
             
             if mqtt_data and isinstance(mqtt_data, dict):
@@ -1510,11 +1877,18 @@ class PrinterClientManager:
                 if isinstance(print_data, dict):
                     # Get print status
                     gcode_state = print_data.get('gcode_state', 'idle')
+                    error_code = print_data.get('mc_print_error_code', 0)
+
+                    # Store raw state and error code for downstream services to use
+                    status["raw_gcode_state"] = gcode_state if isinstance(gcode_state, str) else None
+                    status["error_code"] = error_code
+
                     if isinstance(gcode_state, str):
                         # Map Bambu states to our enum values
                         state_mapping = {
                             'idle': 'idle',
-                            'printing': 'printing', 
+                            'printing': 'printing',
+                            'pause': 'paused',      # MQTT reports "PAUSE" which becomes "pause" when lowercased
                             'paused': 'paused',
                             'stopped': 'stopped',
                             'finished': 'finished',
@@ -1522,7 +1896,17 @@ class PrinterClientManager:
                             'prepare': 'printing',
                             'running': 'printing'
                         }
-                        status["status"] = state_mapping.get(gcode_state.lower(), 'idle')
+                        mapped_status = state_mapping.get(gcode_state.lower(), 'idle')
+
+                        # Check if "failed" is due to cancellation (no error) or actual failure (has error code)
+                        if mapped_status == 'failed':
+                            # Check for error code - if it's 0 or missing, it was a user cancellation
+                            if error_code == 0 or error_code is None:
+                                # No error code means user canceled - show as idle
+                                mapped_status = 'idle'
+                            # Otherwise keep it as 'failed' for actual errors
+
+                        status["status"] = mapped_status
                     
                     # Get print progress
                     mc_percent = print_data.get('mc_percent', 0)
@@ -1533,8 +1917,8 @@ class PrinterClientManager:
                     # Calculate elapsed time (rough estimate)
                     elapsed_time = 0
                     if mc_percent > 0 and mc_remaining_time > 0:
-                        total_estimated = (mc_remaining_time * 60) / (1 - (mc_percent / 100))
-                        elapsed_time = int(total_estimated - (mc_remaining_time * 60))
+                        total_estimated = mc_remaining_time / (1 - (mc_percent / 100))
+                        elapsed_time = int(total_estimated - mc_remaining_time)
                     
                     if mc_percent > 0 or current_layer > 0:
                         status["progress"] = {
@@ -1544,7 +1928,44 @@ class PrinterClientManager:
                             "current_layer": int(current_layer) if current_layer else None,
                             "total_layers": int(total_layers) if total_layers else None
                         }
-                    
+
+                    # Check if we need to mark printer as needing to be cleared
+                    # Set cleared=false when print reaches layer 1 AND has been printing for 45+ seconds
+                    if mapped_status == 'printing':
+                        import time
+                        current_time = time.time()
+
+                        # Track when printer entered 'printing' status
+                        if printer_id not in self.printing_start_time:
+                            self.printing_start_time[printer_id] = current_time
+                            logger.debug(f"Printer {printer_id} entered 'printing' status at {current_time}")
+
+                        # Calculate how long printer has been printing
+                        printing_duration = current_time - self.printing_start_time[printer_id]
+
+                        # Only set cleared=false if printing for 45+ seconds AND layer is 1
+                        if current_layer >= 1 and printing_duration >= 45:
+                            last_layer = self.last_layer_seen.get(printer_id, 0)
+                            # Only update if this is the first time we're seeing layer 1 or higher
+                            if last_layer == 0 and current_layer >= 1:
+                                try:
+                                    await self._set_printer_cleared_status(printer_id, False)
+                                    logger.info(f"Printer {printer_id} marked as needing to be cleared (layer {current_layer}, printing for {printing_duration:.1f}s)")
+                                    # Only update tracking if database update succeeded
+                                    self.last_layer_seen[printer_id] = current_layer
+                                except Exception as e:
+                                    logger.error(f"Failed to set cleared status for printer {printer_id}: {e}")
+                                    # Don't update last_layer_seen so we retry on next poll
+                            elif last_layer > 0:
+                                # Update layer tracking for subsequent layers
+                                self.last_layer_seen[printer_id] = current_layer
+                    elif mapped_status in ['idle', 'finished', 'failed', 'stopped']:
+                        # Reset layer tracking and printing start time when print is done or idle
+                        self.last_layer_seen[printer_id] = 0
+                        if printer_id in self.printing_start_time:
+                            del self.printing_start_time[printer_id]
+                            logger.debug(f"Printer {printer_id} exited 'printing' status, cleared timestamp")
+
                     # Extract current job information from MQTT data
                     try:
                         current_filename = await self._get_current_filename(client)
@@ -1587,7 +2008,10 @@ class PrinterClientManager:
                 # Add light status to live data
                 light_status = await self.get_light_status(printer_id)
                 status["light_on"] = light_status.get("is_on", False)
-            
+
+            # Add is_connected field based on whether printer is in active clients
+            status["is_connected"] = printer_id in self.clients
+
             return status
             
         except Exception as e:
@@ -1612,6 +2036,7 @@ class PrinterClientManager:
                     
                     # Only include connected printers with realistic temperature readings
                     if nozzle_temp > 15.0 or bed_temp > 15.0:
+                        status["is_connected"] = True
                         all_status.append(status)
                         logger.debug(f"Including connected printer {printer_id} with temps: nozzle={nozzle_temp}°C, bed={bed_temp}°C")
                     else:
@@ -1620,6 +2045,7 @@ class PrinterClientManager:
                         offline_status = {
                             "printer_id": printer_id,
                             "status": "offline",
+                            "is_connected": False,
                             "progress": None,
                             "temperatures": {
                                 "nozzle": {"current": 0.0, "target": 0.0, "is_heating": False},
@@ -1633,6 +2059,7 @@ class PrinterClientManager:
                     offline_status = {
                         "printer_id": printer_id,
                         "status": "offline",
+                        "is_connected": False,
                         "progress": None,
                         "temperatures": {
                             "nozzle": {"current": 0.0, "target": 0.0, "is_heating": False},
@@ -1649,6 +2076,7 @@ class PrinterClientManager:
                 offline_status = {
                     "printer_id": printer_id,
                     "status": "offline",
+                    "is_connected": False,
                     "progress": None,
                     "temperatures": {
                         "nozzle": {"current": 0.0, "target": 0.0, "is_heating": False},

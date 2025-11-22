@@ -89,14 +89,6 @@ const QualityTab = ({ analyticsData }: QualityTabProps) => {
                 <span className="text-sm font-medium">Quality Score</span>
                 <span className="text-sm font-semibold text-green-600">{quality.qualityScore}/100</span>
               </div>
-              <div className="flex justify-between items-center">
-                <span className="text-sm font-medium">Customer Satisfaction</span>
-                <span className="text-sm font-semibold">{quality.customerSatisfaction}/5.0</span>
-              </div>
-              <div className="flex justify-between items-center">
-                <span className="text-sm font-medium">Return Rate</span>
-                <span className="text-sm font-semibold">{quality.returnRate}%</span>
-              </div>
             </div>
             <div className="space-y-4">
               <div className="flex justify-between items-center">
@@ -106,14 +98,6 @@ const QualityTab = ({ analyticsData }: QualityTabProps) => {
               <div className="flex justify-between items-center">
                 <span className="text-sm font-medium">Material Waste</span>
                 <span className="text-sm font-semibold">3.2%</span>
-              </div>
-              <div className="flex justify-between items-center">
-                <span className="text-sm font-medium">Dimensional Accuracy</span>
-                <span className="text-sm font-semibold">±0.1mm</span>
-              </div>
-              <div className="flex justify-between items-center">
-                <span className="text-sm font-medium">Surface Finish Grade</span>
-                <span className="text-sm font-semibold">A</span>
               </div>
             </div>
           </div>

@@ -11,6 +11,7 @@ from datetime import datetime
 from ..services.database_service import get_database_service
 from ..services.config_service import get_config_service
 from ..services.sync_service import get_sync_service
+from ..services.auth_service import get_auth_service
 from ..models.database import Product
 from pydantic import BaseModel
 
@@ -18,13 +19,18 @@ logger = logging.getLogger(__name__)
 
 # Pydantic models for requests/responses
 class ProductCreateRequest(BaseModel):
+    id: Optional[str] = None  # Optional pre-generated UUID (for image upload)
     name: str
     description: Optional[str] = None
     category: Optional[str] = None
     print_file_id: Optional[str] = None
     file_name: Optional[str] = None
     requires_assembly: bool = False
+    requires_post_processing: bool = False
     image_url: Optional[str] = None
+    components: Optional[List[dict]] = None
+    printer_priority: Optional[str] = None
+    wiki_id: Optional[str] = None
 
 class ProductUpdateRequest(BaseModel):
     name: Optional[str] = None
@@ -33,7 +39,11 @@ class ProductUpdateRequest(BaseModel):
     print_file_id: Optional[str] = None
     file_name: Optional[str] = None
     requires_assembly: Optional[bool] = None
+    requires_post_processing: Optional[bool] = None
     image_url: Optional[str] = None
+    components: Optional[List[dict]] = None
+    printer_priority: Optional[str] = None
+    wiki_id: Optional[str] = None
 
 router = APIRouter(
     prefix="/products-sync",
@@ -177,8 +187,8 @@ async def get_products_sync_status():
 async def create_product(product_request: ProductCreateRequest):
     """
     Create a new product (local-first)
-    
-    Creates a new product in the local SQLite database and queues backup to Supabase.
+
+    Creates a new product in the local SQLite database.
     This is the local-first approach where SQLite is the source of truth.
     """
     try:
@@ -189,10 +199,10 @@ async def create_product(product_request: ProductCreateRequest):
         
         if not tenant_id:
             raise HTTPException(status_code=400, detail="Tenant not configured")
-        
-        # Generate UUID for new product
-        product_id = str(uuid.uuid4())
-        
+
+        # Use provided ID if exists (for image upload), otherwise generate new UUID
+        product_id = product_request.id or str(uuid.uuid4())
+
         # Create product data dict
         product_data = {
             'id': product_id,
@@ -203,24 +213,29 @@ async def create_product(product_request: ProductCreateRequest):
             'print_file_id': product_request.print_file_id,
             'file_name': product_request.file_name,
             'requires_assembly': product_request.requires_assembly,
+            'requires_post_processing': product_request.requires_post_processing,
             'image_url': product_request.image_url,
+            'printer_priority': product_request.printer_priority,
+            'wiki_id': product_request.wiki_id,
             'is_active': True,
             'created_at': datetime.utcnow(),
             'updated_at': datetime.utcnow()
         }
         
-        # Insert into local SQLite (will automatically queue backup to Supabase)
+        # Insert into local SQLite
         db_service = await get_database_service()
         success = await db_service.upsert_product(product_data)
-        
-        if success:
-            return {
-                'success': True,
-                'message': f"Product '{product_request.name}' created successfully",
-                'product': product_data
-            }
-        else:
+
+        if not success:
             raise HTTPException(status_code=500, detail="Failed to create product")
+
+        # Components are handled by frontend directly to Supabase (with user auth context)
+
+        return {
+            'success': True,
+            'message': f"Product '{product_request.name}' created successfully",
+            'product': product_data
+        }
         
     except HTTPException:
         raise
@@ -232,8 +247,8 @@ async def create_product(product_request: ProductCreateRequest):
 async def update_product(product_id: str, product_request: ProductUpdateRequest):
     """
     Update an existing product (local-first)
-    
-    Updates a product in the local SQLite database and queues backup to Supabase.
+
+    Updates a product in the local SQLite database.
     """
     try:
         # Get tenant ID from config
@@ -253,7 +268,7 @@ async def update_product(product_id: str, product_request: ProductUpdateRequest)
         
         # Build update data (only include fields that were provided)
         update_data = {'id': product_id, 'tenant_id': tenant_id, 'updated_at': datetime.utcnow()}
-        
+
         if product_request.name is not None:
             update_data['name'] = product_request.name
         if product_request.description is not None:
@@ -266,22 +281,30 @@ async def update_product(product_id: str, product_request: ProductUpdateRequest)
             update_data['file_name'] = product_request.file_name
         if product_request.requires_assembly is not None:
             update_data['requires_assembly'] = product_request.requires_assembly
+        if product_request.requires_post_processing is not None:
+            update_data['requires_post_processing'] = product_request.requires_post_processing
         if product_request.image_url is not None:
             update_data['image_url'] = product_request.image_url
-        
-        # Update in local SQLite (will automatically queue backup to Supabase)
+        if product_request.printer_priority is not None:
+            update_data['printer_priority'] = product_request.printer_priority
+        if product_request.wiki_id is not None:
+            update_data['wiki_id'] = product_request.wiki_id
+
+        # Update in local SQLite
         success = await db_service.upsert_product(update_data)
-        
-        if success:
-            # Get updated product
-            updated_product = await db_service.get_product_by_id(product_id)
-            return {
-                'success': True,
-                'message': f"Product '{product_id}' updated successfully",
-                'product': updated_product.to_dict() if updated_product else update_data
-            }
-        else:
+
+        if not success:
             raise HTTPException(status_code=500, detail="Failed to update product")
+
+        # Components are handled by frontend directly to Supabase (with user auth context)
+
+        # Get updated product
+        updated_product = await db_service.get_product_by_id(product_id)
+        return {
+            'success': True,
+            'message': f"Product '{product_id}' updated successfully",
+            'product': updated_product.to_dict() if updated_product else update_data
+        }
         
     except HTTPException:
         raise
@@ -293,8 +316,8 @@ async def update_product(product_id: str, product_request: ProductUpdateRequest)
 async def delete_product(product_id: str):
     """
     Delete a product (local-first)
-    
-    Deletes a product from the local SQLite database and queues backup to Supabase.
+
+    Deletes a product from the local SQLite database.
     """
     try:
         # Get tenant ID from config
@@ -308,31 +331,30 @@ async def delete_product(product_id: str):
         # Check if product exists
         db_service = await get_database_service()
         existing_product = await db_service.get_product_by_id(product_id)
-        
+
         if not existing_product:
             raise HTTPException(status_code=404, detail="Product not found")
-        
+
+        # Delete product_components from Supabase (Supabase-only table)
+        # This must happen before local deletion to ensure cleanup
+        auth_service = get_auth_service()
+        if auth_service and auth_service.supabase:
+            try:
+                auth_service.supabase.table('product_components').delete().eq('product_id', product_id).execute()
+                logger.info(f"Deleted components for product {product_id}")
+            except Exception as e:
+                logger.warning(f"Failed to delete components for product {product_id}: {e}")
+
         # Delete from local SQLite
         success = await db_service.delete_product(product_id, tenant_id)
-        
-        if success:
-            # Queue backup deletion to Supabase
-            from ..services.backup_service import get_backup_service
-            backup_service = get_backup_service()
-            if backup_service:
-                await backup_service.queue_change(
-                    'products',
-                    'delete',
-                    product_id,
-                    {'id': product_id, 'tenant_id': tenant_id, 'is_active': False, 'deleted_at': datetime.utcnow()}
-                )
-            
-            return {
-                'success': True,
-                'message': f"Product '{product_id}' deleted successfully"
-            }
-        else:
+
+        if not success:
             raise HTTPException(status_code=500, detail="Failed to delete product")
+
+        return {
+            'success': True,
+            'message': f"Product '{product_id}' deleted successfully"
+        }
         
     except HTTPException:
         raise

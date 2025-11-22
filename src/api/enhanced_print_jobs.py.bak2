@@ -1,0 +1,360 @@
+"""
+Enhanced print job API with auto-processing capabilities
+Direct file transfer to printers without slicing
+SIMPLIFIED VERSION - Direct printer manager validation only
+"""
+
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Request
+from pydantic import BaseModel
+import os
+import logging
+from pathlib import Path
+from typing import Optional, Dict, Any
+from datetime import datetime
+import asyncio
+import re
+
+from ..services.config_service import get_config_service
+from ..utils.tenant_utils import get_tenant_id_or_raise
+from ..services.database_service import get_database_service
+from ..services.job_queue_service import job_queue_service, JobPriority
+from ..core.printer_client import printer_manager
+from supabase import create_client, Client
+from ..services.auth_service import get_auth_service
+from ..services.sync_service import get_sync_service
+
+logger = logging.getLogger(__name__)
+
+def clean_filename(filename: str) -> str:
+    """
+    Remove timestamp and random characters from filename if present.
+    Handles patterns like: 
+    - 1755983326688-SFGood3MF.gcode
+    - SFGood3MF_1755983326688_eo6b.gcode  
+    - 12d13552-62c3-4ff0-913c-484cfa2db316.3mf (falls back to UUID.ext)
+    Returns the clean filename without timestamp/UUID.
+    """
+    if not filename:
+        return filename
+    
+    # Pattern 1: timestamp prefix (13 digits followed by dash)
+    pattern1 = r'^\d{13}-'
+    cleaned = re.sub(pattern1, '', filename)
+    
+    # Pattern 2: name_timestamp_randomchars.ext -> name.ext
+    pattern2 = r'_\d{13}_\w+(\.\w+)$'
+    match = re.search(pattern2, cleaned)
+    if match:
+        # Extract base name before first underscore and add extension
+        base_name = cleaned.split('_')[0]
+        extension = match.group(1)
+        cleaned = base_name + extension
+    
+    return cleaned
+
+# Supabase client initialization
+async def get_supabase_client() -> Client:
+    """Get Supabase client instance from sync service"""
+    sync_service = await get_sync_service()
+    if not sync_service:
+        logger.error("Sync service not available")
+        raise Exception("Sync service not available")
+    
+    return sync_service.supabase
+
+router = APIRouter(
+    prefix="/enhanced-print-jobs",
+    tags=["Enhanced Print Jobs"],
+    responses={404: {"description": "Not found"}},
+)
+
+async def validate_printer_connection(printer_id: str, user_action: bool = True) -> Dict[str, Any]:
+    """
+    Simplified printer connection validation using only the printer manager
+    Only accepts legitimate printer IDs (4 and 7)
+    
+    Args:
+        printer_id: ID of the printer to validate
+        user_action: If True, allows bypass of rate limits for user-initiated actions
+        
+    Returns:
+        Dict with validation result and printer info
+    """
+    # Remove hardcoded printer validation - validate against actual tenant printers instead
+    # The printer manager will validate if the printer exists for this tenant
+    
+    # Get current printer status from printer manager directly
+    try:
+        printers_list = printer_manager.list_printers()
+        logger.info(f"Printer manager has {len(printers_list)} printers")
+        
+        # Find the target printer
+        target_printer = None
+        for p in printers_list:
+            logger.info(f"Checking printer: id={p.get('id')}, name={p.get('name')}, connected={p.get('connected')}")
+            if str(p.get("id")) == str(printer_id):
+                target_printer = p
+                break
+        
+        if not target_printer:
+            logger.warning(f"Printer with ID {printer_id} not found in printer manager")
+            return {
+                "valid": False,
+                "error": f"Printer with ID {printer_id} not found in system",
+                "printer_name": "Unknown"
+            }
+        
+        printer_name = f"{target_printer.get('name', 'Unknown')} ({target_printer.get('model', 'Unknown')})"
+        
+        # Check if printer is connected and do real connection test
+        is_connected = target_printer.get("connected", False)
+        logger.info(f"Printer {printer_id} basic connection status: {is_connected}")
+        
+        # Try to get a client to verify real connection
+        try:
+            client = printer_manager.get_client(printer_id)
+            if client:
+                logger.info(f"Printer {printer_id} client available: {client}")
+                # Try to get basic status to verify connection works
+                try:
+                    status = await printer_manager.get_printer_status(printer_id)
+                    logger.info(f"Printer {printer_id} status test successful: {status}")
+                    return {
+                        "valid": True,
+                        "printer_name": printer_name,
+                        "status": "connected",
+                        "connection_test": "passed"
+                    }
+                except Exception as status_error:
+                    logger.warning(f"Printer {printer_id} status test failed: {status_error}")
+                    # Client exists but status check failed - still allow if basic connection is true
+                    if is_connected:
+                        return {
+                            "valid": True,
+                            "printer_name": printer_name,
+                            "status": "connected",
+                            "connection_test": "warning",
+                            "warning": f"Status check failed: {str(status_error)}"
+                        }
+            
+            # No client available - check if we should try to connect
+            if not is_connected:
+                logger.warning(f"Printer {printer_id} ({printer_name}) is not connected")
+                return {
+                    "valid": False,
+                    "error": f"Printer '{printer_name}' is not connected. Please check printer connection and try again.",
+                    "printer_name": printer_name
+                }
+            else:
+                # Marked as connected but no client - allow but warn
+                logger.warning(f"Printer {printer_id} marked connected but no client available")
+                return {
+                    "valid": True,
+                    "printer_name": printer_name,
+                    "status": "connected",
+                    "connection_test": "no_client",
+                    "warning": "Marked as connected but client not available"
+                }
+                
+        except Exception as client_error:
+            logger.error(f"Error getting client for printer {printer_id}: {client_error}")
+            # If there's an error getting client but printer is marked connected, still allow
+            if is_connected:
+                return {
+                    "valid": True,
+                    "printer_name": printer_name,
+                    "status": "connected",
+                    "connection_test": "error",
+                    "warning": f"Client error: {str(client_error)}"
+                }
+            else:
+                return {
+                    "valid": False,
+                    "error": f"Printer '{printer_name}' client error: {str(client_error)}",
+                    "printer_name": printer_name
+                }
+        
+    except Exception as e:
+        logger.error(f"Error checking printer connection for {printer_id}: {e}")
+        return {
+            "valid": False,
+            "error": f"Error checking printer connection: {str(e)}",
+            "printer_name": "Unknown"
+        }
+
+class CreateJobRequest(BaseModel):
+    """Request model for creating enhanced print jobs"""
+    job_type: str  # 'print_file' or 'product'
+    target_id: str  # product_id only now
+    product_sku_id: str  # SKU id for the selected product variant
+    printer_id: str
+    color: str
+    filament_type: str
+    material_type: str
+    copies: int = 1
+    spacing_mm: float = 5.0
+    use_ams: bool = False
+    start_print: bool = True
+    priority: int = 0
+
+class JobResponse(BaseModel):
+    """Response model for job creation"""
+    success: bool
+    message: str
+    job_id: Optional[str] = None
+    processing_status: Optional[Dict[str, Any]] = None
+    error_details: Optional[str] = None
+
+@router.post("/create", response_model=JobResponse)
+async def create_enhanced_print_job(
+    request: CreateJobRequest,
+    background_tasks: BackgroundTasks,
+    fastapi_request: Request
+):
+    """
+    Create an enhanced print job with automatic processing
+    Supports both print file and product modes
+    """
+    logger.info("=== ENHANCED JOB CREATION STARTED ===")
+    logger.info(f"Job request details:")
+    logger.info(f"  - Job type: {request.job_type}")
+    logger.info(f"  - Target ID: {request.target_id}")
+    logger.info(f"  - Printer ID: {request.printer_id}")
+    logger.info(f"  - Color: {request.color}")
+    logger.info(f"  - Filament type: {request.filament_type}")
+    logger.info(f"  - Copies: {request.copies}")
+    logger.info(f"  - Start print: {request.start_print}")
+    
+    try:
+        # Get tenant ID from authenticated request
+        logger.info("Step 1: Getting tenant configuration from authenticated context")
+        tenant_id = get_tenant_id_or_raise(fastapi_request)
+        logger.info(f"Tenant ID resolved from auth context: {tenant_id}")
+        
+        # Validate printer connection using centralized function
+        logger.info("Step 2: Validating printer connection")
+        logger.info(f"Validating printer ID: {request.printer_id}")
+        validation_result = await validate_printer_connection(request.printer_id, user_action=True)
+        logger.info(f"Printer validation result: {validation_result}")
+        
+        if not validation_result["valid"]:
+            logger.error(f"Printer validation failed: {validation_result['error']}")
+            raise HTTPException(
+                status_code=404,
+                detail=validation_result["error"]
+            )
+        
+        logger.info(f"✓ Printer validation passed: {validation_result['printer_name']} - {validation_result.get('status', 'connected')}")
+        
+        # Get file path based on job type with enhanced error handling
+        logger.info("Step 3: Getting file information")
+        try:
+            file_info = await _get_file_info(request.job_type, request.target_id, tenant_id)
+            logger.info(f"File info retrieved: {file_info}")
+            
+            if not file_info["exists"]:
+                logger.error(f"File not found: {file_info['expected_path']}")
+                logger.error(f"Job type: {request.job_type}, Target ID: {request.target_id}, Tenant: {tenant_id}")
+                
+                # Check if directory exists
+                from pathlib import Path
+                file_dir = Path(file_info['expected_path']).parent
+                dir_exists = file_dir.exists()
+                logger.error(f"Parent directory exists: {dir_exists} ({file_dir})")
+                
+                if dir_exists:
+                    # List available files in directory for debugging
+                    try:
+                        available_files = [f.name for f in file_dir.iterdir() if f.is_file()]
+                        logger.error(f"Available files in directory: {available_files[:10]}")  # Limit to first 10
+                    except Exception as list_error:
+                        logger.error(f"Could not list directory contents: {list_error}")
+                
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Print file not available on Pi. Expected: {file_info['expected_path']}. Directory exists: {dir_exists}"
+                )
+        except HTTPException:
+            raise  # Re-raise HTTP exceptions
+        except Exception as file_error:
+            logger.error(f"Error getting file info: {file_error}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to validate file: {str(file_error)}"
+            )
+        
+        # Create database record first
+        logger.info("Step 4: Creating database record")
+        db_service = await get_database_service()
+        logger.info("Database service obtained")
+        
+        # Step 4.5: Ensure print file exists in local database
+        logger.info(f"Step 4.5: Ensuring print file {file_info['print_file_id']} exists in local database")
+        existing_file = await db_service.get_print_file_by_id(file_info['print_file_id'])
+        if not existing_file:
+            logger.info(f"Print file {file_info['print_file_id']} not found in local DB, creating it")
+            # Create the print file in local database
+            print_file_data = {
+                'id': file_info['print_file_id'],
+                'tenant_id': tenant_id,
+                'name': file_info['filename'],
+                'file_size_bytes': 0,  # We don't have the actual size here
+                'number_of_units': 1
+            }
+            created_file = await db_service.create_print_file(print_file_data)
+            if not created_file:
+                logger.error(f"Failed to create print file {file_info['print_file_id']} in local database")
+                raise HTTPException(
+                    status_code=500,
+                    detail="Failed to create print file record in local database"
+                )
+            logger.info(f"Successfully created print file {file_info['print_file_id']} in local database")
+        else:
+            logger.info(f"Print file {file_info['print_file_id']} already exists in local database")
+        
+        # Resolve printer_id (4,7) to actual database UUID for foreign key with detailed error handling
+        logger.info(f"Step 5: Resolving printer UUID for printer_id: {request.printer_id}")
+        try:
+            printer_uuid = await _resolve_printer_uuid(request.printer_id, db_service, tenant_id)
+            logger.info(f"Printer UUID resolution result: {printer_uuid}")
+            if not printer_uuid:
+                logger.error(f"Printer UUID resolution failed - no printer found with printer_id {request.printer_id} for tenant {tenant_id}")
+                
+                # List available printers for debugging
+                available_printers = await db_service.get_printers_by_tenant(tenant_id)
+                printer_ids = [str(p.printer_id) for p in available_printers if p.printer_id]
+                logger.error(f"Available printer IDs for tenant {tenant_id}: {printer_ids}")
+                
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Printer with ID {request.printer_id} not found in database. Available printers: {printer_ids}"
+                )
+        except Exception as resolve_error:
+            logger.error(f"Error during printer UUID resolution: {resolve_error}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to resolve printer reference: {str(resolve_error)}"
+            )
+        
+        # Fetch SKU data if product_sku_id is provided
+        requires_assembly = False
+        quantity_per_print = 1
+        
+        if hasattr(request, 'product_sku_id') and request.product_sku_id:
+            logger.info(f"Fetching SKU data for {request.product_sku_id}")
+            try:
+                # Get the SKU details
+                sku = await db_service.get_product_sku_by_id(request.product_sku_id)
+                if sku:
+                    quantity_per_print = sku.quantity
+                    
+                    # Get product to check assembly requirement
+                    product = await db_service.get_product_by_id(request.target_id)
+                    if product:
+                        requires_assembly = product.requires_assembly
+                        
+                    logger.info(f"SKU data: quantity={quantity_per_print}, assembly={requires_assembly}")
+            except Exception as sku_error:
+                logger.warning(f"Failed to fetch SKU data: {sku_error}")
+        
+        # Prepare job data for database

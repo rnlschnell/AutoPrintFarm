@@ -72,6 +72,12 @@ const MaterialsTable = ({
               <ArrowUpDown className="h-4 w-4" />
             </div>
           </TableHead>
+          <TableHead className="cursor-pointer" onClick={() => onSort('location')}>
+            <div className="flex items-center gap-1">
+              Storage Location
+              <ArrowUpDown className="h-4 w-4" />
+            </div>
+          </TableHead>
           <TableHead>
             <span className="sr-only">Actions</span>
           </TableHead>
@@ -95,39 +101,39 @@ const MaterialsTable = ({
             <TableCell>{material.brand || '-'}</TableCell>
             <TableCell>{material.remaining}{category === 'Filament' ? 'g' : ' units'}</TableCell>
             <TableCell>{getStatusBadge(material.status || '')}</TableCell>
+            <TableCell>{material.location || '-'}</TableCell>
             <TableCell>
-              {material.reorder_link && (
-                <Button 
-                  variant="outline" 
-                  size="sm"
-                  onClick={() => window.open(material.reorder_link, '_blank')}
-                  className="mr-2"
-                >
-                  Reorder
-                </Button>
-              )}
-            </TableCell>
-            <TableCell>
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button aria-haspopup="true" size="icon" variant="ghost">
-                    <MoreHorizontal className="h-4 w-4" />
-                    <span className="sr-only">Toggle menu</span>
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end">
-                  <DropdownMenuLabel>Actions</DropdownMenuLabel>
-                  <DropdownMenuItem onClick={() => onEdit(material)}>
-                    Edit {category}
-                  </DropdownMenuItem>
-                  <DropdownMenuItem 
-                    onClick={() => onDelete(material)}
-                    className="text-red-600"
+              <div className="flex items-center gap-2">
+                {material.reorder_link && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => window.open(material.reorder_link, '_blank')}
                   >
-                    Delete {category}
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
+                    Reorder
+                  </Button>
+                )}
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button aria-haspopup="true" size="icon" variant="ghost">
+                      <MoreHorizontal className="h-4 w-4" />
+                      <span className="sr-only">Toggle menu</span>
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    <DropdownMenuLabel>Actions</DropdownMenuLabel>
+                    <DropdownMenuItem onClick={() => onEdit(material)}>
+                      Edit {category}
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      onClick={() => onDelete(material)}
+                      className="text-red-600"
+                    >
+                      Delete {category}
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </div>
             </TableCell>
           </TableRow>
         ))}

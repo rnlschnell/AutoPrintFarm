@@ -27,7 +27,7 @@ class SyncService:
     SIMPLIFIED FOR LOCAL-FIRST ARCHITECTURE:
     - No initial sync from Supabase (prevents restored deleted data)
     - No real-time sync from Supabase (local is source of truth)
-    - Backup service handles one-way sync TO Supabase
+    - Local SQLite is the authoritative data source
     """
     
     def __init__(self, tenant_id: str, supabase_url: str, supabase_key: str):
@@ -186,7 +186,7 @@ class SyncService:
         LOCAL-FIRST ARCHITECTURE:
         - No initial sync from Supabase (prevents data restoration)
         - No real-time sync from Supabase (local is source of truth)
-        - Backup service handles one-way sync TO Supabase
+        - Local SQLite is the authoritative data source
         """
         if self.is_running:
             logger.warning("Sync service is already running")
@@ -224,7 +224,7 @@ class SyncService:
         """
         logger.info("🚫 Initial sync DISABLED for local-first architecture")
         logger.info("📋 Local SQLite is the source of truth")
-        logger.info("☁️ Supabase serves as backup only via backup_service")
+        logger.info("☁️ Supabase serves as backup only")
         logger.info("✅ No data restoration from Supabase (prevents deleted job reappearance)")
         
         # If you need to restore from backup in the future, create a separate 

@@ -62,38 +62,39 @@ class FileAssociationService:
     async def _match_by_id(self, record: PrintFile) -> bool:
         """
         Primary matching strategy: look for file with record ID as filename
-        
+
         Args:
             record: PrintFile record
-            
+
         Returns:
             bool: True if matched and associated
         """
-        tenant_dir = self.base_file_path / record.tenant_id
-        
+        # Use tenant-agnostic storage directory
+        storage_dir = self.base_file_path
+
         # Check for all supported file extensions
         supported_extensions = ['.3mf', '.stl', '.gcode', '.obj', '.amf']
-        
+
         for ext in supported_extensions:
-            expected_path = tenant_dir / f"{record.id}{ext}"
-            
+            expected_path = storage_dir / f"{record.id}{ext}"
+
             if expected_path.exists():
                 # File found, associate with record
                 await self._update_record_with_path(record.id, str(expected_path))
                 return True
-        
+
         # Also check unmatched directory with all extensions
         for ext in supported_extensions:
             unmatched_path = self.unmatched_path / f"{record.id}{ext}"
             if unmatched_path.exists():
                 # Move file to proper location and associate
-                tenant_dir.mkdir(parents=True, exist_ok=True)
-                final_path = tenant_dir / f"{record.id}{ext}"
+                storage_dir.mkdir(parents=True, exist_ok=True)
+                final_path = storage_dir / f"{record.id}{ext}"
                 unmatched_path.rename(final_path)
                 await self._update_record_with_path(record.id, str(final_path))
                 logger.info(f"Moved file from unmatched to proper location: {final_path}")
                 return True
-        
+
         return False
     
     async def _fallback_match(self, record: PrintFile) -> bool:

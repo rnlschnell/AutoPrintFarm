@@ -1,8 +1,8 @@
-import { useState, useMemo } from "react";
+import { useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
-import { MoreHorizontal, Clock, Palette, Plus, GripVertical, LayoutGrid, List, Package, Settings, Thermometer } from "lucide-react";
+import { MoreHorizontal, Clock, Palette, Plus, GripVertical, LayoutGrid, List, Package, Settings, Thermometer, Pencil, Square, Layers2, Check, ArrowRight, X, Wrench } from "lucide-react";
 import { usePrinterWebSocket, type LivePrinterData } from "@/hooks/useWebSocket";
 import {
   DropdownMenu,
@@ -48,9 +48,15 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import PrinterDetailsModal from "@/components/PrinterDetailsModal";
 import PrinterMaintenanceModal from "@/components/PrinterMaintenanceModal";
+import CompleteMaintenanceModal from "@/components/CompleteMaintenanceModal";
+import CalibrationModal from "@/components/CalibrationModal";
+import { FilamentLevelModal } from "@/components/FilamentLevelModal";
 import ColorSwatch from "@/components/ColorSwatch";
 import PrinterColorSelector from "@/components/PrinterColorSelector";
+import PrinterBuildPlateSelector from "@/components/PrinterBuildPlateSelector";
+import PrintControlButtons from "@/components/PrintControlButtons";
 import { usePrinters, type Printer } from "@/hooks/usePrinters";
+import { formatTime, formatLayerProgress } from "@/lib/utils";
 
 // Global color settings - this would normally come from a global store or context
 const globalColors = [
@@ -83,10 +89,20 @@ interface PrinterCardProps {
   liveData?: LivePrinterData;
   onViewDetails: (printer: Printer) => void;
   onStartMaintenance: (printer: Printer) => void;
+  onCompleteMaintenance: (printer: Printer) => void;
+  onStartCalibration: (printer: Printer) => void;
+  onEditFilament: (printer: Printer) => void;
+  onToggleCleared?: (printerId: string) => Promise<void>;
+  updatePrinter: (id: string, updates: Partial<Printer>) => Promise<Printer>;
   isDragging?: boolean;
 }
 
-const PrinterCard = ({ printer, liveData, onViewDetails, onStartMaintenance, isDragging = false }: PrinterCardProps) => {
+const PrinterCard = ({ printer, liveData, onViewDetails, onStartMaintenance, onCompleteMaintenance, onStartCalibration, onEditFilament, onToggleCleared, updatePrinter, isDragging = false }: PrinterCardProps) => {
+  const [clearedClickCount, setClearedClickCount] = useState(0);
+
+  // DEBUG: Log what printer prop the component receives
+  console.log(`[PrinterCard] Rendering ${printer.name} (${printer.id.substring(0, 8)}):`, { color: printer.currentColor, hex: printer.currentColorHex });
+
   const {
     attributes,
     listeners,
@@ -148,12 +164,10 @@ const PrinterCard = ({ printer, liveData, onViewDetails, onStartMaintenance, isD
 
   const temperatures = getTemperatures();
 
-  // Memoize printer color to ensure re-renders when color changes
-  const printerColor = useMemo(() => {
-    return printer.currentColorHex && printer.currentColor 
-      ? `${printer.currentColor}|${printer.currentColorHex}`
-      : globalColors[0];
-  }, [printer.currentColor, printer.currentColorHex, printer.id]);
+  // Direct computation - no memoization needed for simple string concatenation
+  const printerColor = printer.currentColorHex && printer.currentColor
+    ? `${printer.currentColor}|${printer.currentColorHex}`
+    : null;
 
   // Get progress from live data only - no mock data
   const getProgress = () => {
@@ -193,6 +207,31 @@ const PrinterCard = ({ printer, liveData, onViewDetails, onStartMaintenance, isD
     }
   };
 
+  const handleClearedBadgeClick = async () => {
+    if (clearedClickCount === 0) {
+      // First click: change text to "Printer Ready?"
+      setClearedClickCount(1);
+    } else if (clearedClickCount === 1) {
+      // Second click: call API to set cleared=true and remove badge
+      if (onToggleCleared && printer.printerId) {
+        await onToggleCleared(printer.printerId.toString());
+        setClearedClickCount(0); // Reset state
+      }
+    }
+  };
+
+  const getClearedBadgeText = () => {
+    if (clearedClickCount === 0) {
+      return "Needs to be cleared";
+    } else {
+      return "Printer Ready?";
+    }
+  };
+
+  // Show cleared badge if printer.cleared is false/0 OR if user has clicked once
+  // Using !printer.cleared handles both boolean false and integer 0 from SQLite
+  const showClearedBadge = !printer.cleared || clearedClickCount === 1;
+
   return (
     <Card 
       ref={setNodeRef} 
@@ -230,6 +269,9 @@ const PrinterCard = ({ printer, liveData, onViewDetails, onStartMaintenance, isD
             <DropdownMenuItem onClick={() => onStartMaintenance(printer)}>
               Start Maintenance
             </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => onStartCalibration(printer)}>
+              Calibrate
+            </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
@@ -244,12 +286,31 @@ const PrinterCard = ({ printer, liveData, onViewDetails, onStartMaintenance, isD
               <span className="text-sm font-medium capitalize">
                 {connectionStatus === 'connected' ? 'Connected' : 'Offline'}
               </span>
+              {isConnected && (
+                <PrintControlButtons
+                  printerId={liveData?.printer_id || printer.printerId?.toString() || ''}
+                  status={printJobStatus}
+                />
+              )}
             </div>
-            {printJobStatus === 'printing' && (
-              <div className="text-right space-y-1">
-                <div className="text-xs text-muted-foreground">31/74 layers</div>
-              </div>
-            )}
+            <div className="flex items-center gap-2">
+              {printer.inMaintenance && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-8 gap-1.5 text-yellow-700 bg-yellow-100 hover:text-yellow-800 hover:bg-yellow-200 rounded-md dark:bg-yellow-900/40 dark:text-yellow-400 dark:hover:bg-yellow-900/60 dark:hover:text-yellow-300"
+                  onClick={() => onCompleteMaintenance(printer)}
+                >
+                  <Wrench className="h-4 w-4" />
+                  <span className="text-xs font-medium">Maintenance</span>
+                </Button>
+              )}
+              {printJobStatus === 'printing' && (
+                <div className="text-right space-y-1">
+                  <div className="text-xs text-muted-foreground">{formatLayerProgress(liveData?.progress?.current_layer, liveData?.progress?.total_layers)}</div>
+                </div>
+              )}
+            </div>
           </div>
           <div className="space-y-1">
             <Progress 
@@ -259,7 +320,7 @@ const PrinterCard = ({ printer, liveData, onViewDetails, onStartMaintenance, isD
             <div className="flex items-center justify-between text-xs text-muted-foreground">
               <span>{getProgressText()}</span>
               {printJobStatus === 'printing' && (
-                <span>1hr 35m left</span>
+                <span>{formatTime(liveData?.progress?.remaining_time)} left</span>
               )}
             </div>
           </div>
@@ -282,12 +343,66 @@ const PrinterCard = ({ printer, liveData, onViewDetails, onStartMaintenance, isD
         {/* Filament Information */}
         <div className="space-y-1">
           <div className="flex items-center gap-2">
-            <ColorSwatch color={printerColor} size="sm" />
-            <span className="text-sm font-medium">{printerColor.split('|')[0]}</span>
-            <span className="text-sm text-muted-foreground">{printer.currentFilamentType || 'PLA'}</span>
-            <PrinterColorSelector printer={printer} />
+            {printerColor ? (
+              <>
+                <ColorSwatch color={printerColor} size="sm" />
+                <span className="text-sm font-medium">{printerColor.split('|')[0]}</span>
+                <span className="text-sm text-muted-foreground">{printer.currentFilamentType || 'PLA'}</span>
+              </>
+            ) : (
+              <span className="text-sm text-muted-foreground">No Filament Added</span>
+            )}
+            <PrinterColorSelector printer={printer} updatePrinter={updatePrinter} />
           </div>
-          <div className="text-xs text-muted-foreground">362g left</div>
+          <div className="flex items-center gap-2">
+            <Layers2 className="h-3 w-3 text-muted-foreground" />
+            <PrinterBuildPlateSelector printer={printer} variant="inline" updatePrinter={updatePrinter} />
+          </div>
+          <div className="flex items-center justify-between gap-1.5">
+            <div className="flex items-center gap-1.5">
+              <span className="text-xs text-muted-foreground">{printer.filamentLevel || 0}g left</span>
+              <button
+                onClick={() => onEditFilament(printer)}
+                className="text-muted-foreground hover:text-foreground transition-colors"
+                aria-label="Edit filament level"
+              >
+                <Pencil className="h-3 w-3" />
+              </button>
+            </div>
+            {/* Cleared Status Badge - Inline Right */}
+            {showClearedBadge && (
+              <div className="flex items-center gap-1">
+                {clearedClickCount === 1 && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setClearedClickCount(0);
+                    }}
+                    className="text-muted-foreground hover:text-foreground transition-colors"
+                    aria-label="Undo"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                )}
+                <Badge
+                  variant="outline"
+                  className={`cursor-pointer hover:bg-accent transition-colors flex items-center gap-1.5 ${
+                    clearedClickCount === 0
+                      ? 'bg-yellow-100 dark:bg-yellow-900/30 border-yellow-500 text-yellow-700 dark:text-yellow-400'
+                      : 'bg-green-100 dark:bg-green-900/30 border-green-500 text-green-700 dark:text-green-400'
+                  }`}
+                  onClick={handleClearedBadgeClick}
+                >
+                  <span className="text-xs">{getClearedBadgeText()}</span>
+                  {clearedClickCount === 0 ? (
+                    <ArrowRight className="h-3 w-3" />
+                  ) : (
+                    <Check className="h-3 w-3" />
+                  )}
+                </Badge>
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </Card>
@@ -299,9 +414,11 @@ interface PrinterRowProps {
   liveData?: LivePrinterData;
   onViewDetails: (printer: Printer) => void;
   onStartMaintenance: (printer: Printer) => void;
+  onStartCalibration: (printer: Printer) => void;
+  updatePrinter: (id: string, updates: Partial<Printer>) => Promise<Printer>;
 }
 
-const PrinterRow = ({ printer, liveData, onViewDetails, onStartMaintenance }: PrinterRowProps) => {
+const PrinterRow = ({ printer, liveData, onViewDetails, onStartMaintenance, onStartCalibration, updatePrinter }: PrinterRowProps) => {
   const {
     attributes,
     listeners,
@@ -320,12 +437,10 @@ const PrinterRow = ({ printer, liveData, onViewDetails, onStartMaintenance }: Pr
   const connectionStatus = isConnected ? 'connected' : 'offline';
   const printJobStatus = liveData ? liveData.status : (printer.status === 'offline' ? 'idle' : printer.status);
 
-  // Memoize printer color to ensure re-renders when color changes
-  const printerColor = useMemo(() => {
-    return printer.currentColorHex && printer.currentColor 
-      ? `${printer.currentColor}|${printer.currentColorHex}`
-      : globalColors[0];
-  }, [printer.currentColor, printer.currentColorHex, printer.id]);
+  // Direct computation - no memoization needed for simple string concatenation
+  const printerColor = printer.currentColorHex && printer.currentColor
+    ? `${printer.currentColor}|${printer.currentColorHex}`
+    : null;
 
   return (
     <TableRow ref={setNodeRef} style={style}>
@@ -345,16 +460,18 @@ const PrinterRow = ({ printer, liveData, onViewDetails, onStartMaintenance }: Pr
         </div>
       </TableCell>
       <TableCell>{getStatusBadge(connectionStatus === 'connected' ? 'Connected' : 'Offline')}</TableCell>
-      <TableCell className="truncate max-w-32">N/A</TableCell>
-      <TableCell>N/A</TableCell>
+      <TableCell className="truncate max-w-32">{liveData?.current_job?.filename || 'N/A'}</TableCell>
+      <TableCell>{printJobStatus === 'printing' ? formatTime(liveData?.progress?.remaining_time) : 'N/A'}</TableCell>
       <TableCell>
-        {printer.currentColor && (
+        {printerColor ? (
           <div className="flex items-center gap-2">
             <ColorSwatch color={printerColor} size="sm" />
             <span className="truncate">{printerColor.split('|')[0]}</span>
             <span className="text-sm text-muted-foreground">{printer.currentFilamentType || 'PLA'}</span>
-            <PrinterColorSelector printer={printer} />
+            <PrinterColorSelector printer={printer} updatePrinter={updatePrinter} />
           </div>
+        ) : (
+          <span className="text-sm text-muted-foreground">No Filament Added</span>
         )}
       </TableCell>
       <TableCell>
@@ -372,6 +489,9 @@ const PrinterRow = ({ printer, liveData, onViewDetails, onStartMaintenance }: Pr
             <DropdownMenuItem onClick={() => onStartMaintenance(printer)}>
               Start Maintenance
             </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => onStartCalibration(printer)}>
+              Calibrate
+            </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
       </TableCell>
@@ -380,13 +500,17 @@ const PrinterRow = ({ printer, liveData, onViewDetails, onStartMaintenance }: Pr
 };
 
 const Printers = () => {
-  const { printers, loading, addPrinter, updatePrintersOrder } = usePrinters();
+  const { printers, loading, addPrinter, updatePrinter, updatePrintersOrder, toggleCleared, refetch } = usePrinters();
   const { data: liveData, isConnected, isReconnecting } = usePrinterWebSocket();
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [viewMode, setViewMode] = useState('grid');
   const [selectedPrinter, setSelectedPrinter] = useState<Printer | null>(null);
   const [isDetailsModalOpen, setIsDetailsModalOpen] = useState(false);
   const [isMaintenanceModalOpen, setIsMaintenanceModalOpen] = useState(false);
+  const [isCompleteMaintenanceModalOpen, setIsCompleteMaintenanceModalOpen] = useState(false);
+  const [isCalibrationModalOpen, setIsCalibrationModalOpen] = useState(false);
+  const [isFilamentModalOpen, setIsFilamentModalOpen] = useState(false);
+  const [selectedFilamentPrinter, setSelectedFilamentPrinter] = useState<Printer | null>(null);
   const [activeId, setActiveId] = useState(null);
   const [statusFilter, setStatusFilter] = useState('all');
   const [newPrinter, setNewPrinter] = useState({
@@ -473,6 +597,29 @@ const Printers = () => {
   const handleStartMaintenance = (printer: Printer) => {
     setSelectedPrinter(printer);
     setIsMaintenanceModalOpen(true);
+  };
+
+  const handleCompleteMaintenance = (printer: Printer) => {
+    setSelectedPrinter(printer);
+    setIsCompleteMaintenanceModalOpen(true);
+  };
+
+  const handleStartCalibration = (printer: Printer) => {
+    setSelectedPrinter(printer);
+    setIsCalibrationModalOpen(true);
+  };
+
+  const handleEditFilament = (printer: Printer) => {
+    setSelectedFilamentPrinter(printer);
+    setIsFilamentModalOpen(true);
+  };
+
+  const handleUpdateFilament = async (printerId: string, filamentLevel: number) => {
+    try {
+      await updatePrinter(printerId, { filamentLevel });
+    } catch (error) {
+      // Error handling is done in the hook
+    }
   };
 
   const activePrinter = printers.find(printer => printer.id === activeId);
@@ -694,12 +841,17 @@ const Printers = () => {
           {viewMode === 'grid' ? (
             <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
               {filteredPrinters.map((printer) => (
-                <PrinterCard 
-                  key={printer.id} 
-                  printer={printer} 
+                <PrinterCard
+                  key={printer.id}
+                  printer={printer}
                   liveData={getLiveDataForPrinter(printer.printerId)}
                   onViewDetails={handleViewDetails}
                   onStartMaintenance={handleStartMaintenance}
+                  onCompleteMaintenance={handleCompleteMaintenance}
+                  onStartCalibration={handleStartCalibration}
+                  onEditFilament={handleEditFilament}
+                  onToggleCleared={toggleCleared}
+                  updatePrinter={updatePrinter}
                 />
               ))}
             </div>
@@ -718,12 +870,14 @@ const Printers = () => {
                 </TableHeader>
                 <TableBody>
                   {filteredPrinters.map((printer) => (
-                    <PrinterRow 
-                      key={printer.id} 
-                      printer={printer} 
+                    <PrinterRow
+                      key={printer.id}
+                      printer={printer}
                       liveData={getLiveDataForPrinter(printer.printerId)}
                       onViewDetails={handleViewDetails}
                       onStartMaintenance={handleStartMaintenance}
+                      onStartCalibration={handleStartCalibration}
+                      updatePrinter={updatePrinter}
                     />
                   ))}
                 </TableBody>
@@ -734,10 +888,11 @@ const Printers = () => {
         <DragOverlay>
           {activeId && activePrinter ? (
             viewMode === 'grid' ? (
-              <PrinterCard 
+              <PrinterCard
                 printer={activePrinter}
                 onViewDetails={handleViewDetails}
                 onStartMaintenance={handleStartMaintenance}
+                onEditFilament={handleEditFilament}
                 isDragging={false}
               />
             ) : (
@@ -766,7 +921,30 @@ const Printers = () => {
         printer={selectedPrinter}
         isOpen={isMaintenanceModalOpen}
         onClose={() => setIsMaintenanceModalOpen(false)}
+        onMaintenanceStarted={refetch}
       />
+
+      <CompleteMaintenanceModal
+        printer={selectedPrinter}
+        isOpen={isCompleteMaintenanceModalOpen}
+        onClose={() => setIsCompleteMaintenanceModalOpen(false)}
+        onMaintenanceCompleted={refetch}
+      />
+
+      <CalibrationModal
+        printer={selectedPrinter}
+        isOpen={isCalibrationModalOpen}
+        onClose={() => setIsCalibrationModalOpen(false)}
+      />
+
+      {selectedFilamentPrinter && (
+        <FilamentLevelModal
+          open={isFilamentModalOpen}
+          onClose={() => setIsFilamentModalOpen(false)}
+          printer={selectedFilamentPrinter}
+          onUpdateFilament={handleUpdateFilament}
+        />
+      )}
     </div>
   );
 };

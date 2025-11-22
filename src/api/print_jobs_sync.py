@@ -44,8 +44,8 @@ async def create_print_job(job_data: dict):
             raise HTTPException(status_code=500, detail="Failed to create print job")
         
         logger.info(f"Print job created successfully in local database: {new_job.id}")
-        
-        # Trigger immediate backup to Supabase
+
+        # Trigger sync service
         sync_service = await get_sync_service()
         if sync_service:
             await sync_service.trigger_immediate_backup('print_jobs', new_job.id)
@@ -194,18 +194,20 @@ async def delete_print_job(job_id: str):
         # If job is actively printing, try to stop it first
         if job.status == 'printing' and job.printer_id:
             try:
-                logger.info(f"Job {job_id} is printing - attempting to stop printer {job.printer_id}")
+                logger.info(f"Job {job_id} is printing - attempting to cancel printer {job.printer_id}")
                 # Import here to avoid circular imports
-                from ..core.printer_client_manager import get_printer_client_manager
-                printer_manager = get_printer_client_manager()
-                printer_client = printer_manager.get_client(str(job.printer_id))
-                if printer_client:
-                    await printer_client.stop_print()
-                    logger.info(f"Successfully sent stop command to printer {job.printer_id}")
+                from ..core.printer_client import printer_manager
+
+                # Get the integer printer_id from the printers table (job.printer_id is UUID)
+                printer = await db_service.get_printer_by_id(job.printer_id)
+                if printer and printer.printer_id:
+                    integer_printer_id = str(printer.printer_id)
+                    await printer_manager.cancel_print(integer_printer_id)
+                    logger.info(f"Successfully sent cancel command to printer {integer_printer_id} (UUID: {job.printer_id})")
                 else:
-                    logger.warning(f"Could not get printer client for printer {job.printer_id}")
+                    logger.warning(f"Could not find integer printer_id for UUID {job.printer_id}")
             except Exception as e:
-                logger.warning(f"Failed to stop printer for job {job_id}: {e} - continuing with deletion anyway")
+                logger.warning(f"Failed to cancel printer for job {job_id}: {e} - continuing with deletion anyway")
         
         # Delete the job from local database - simplified call
         success = await db_service.delete_print_job_simple(job_id)

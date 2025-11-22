@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useToast } from '@/hooks/use-toast';
+import { getApiBaseUrl } from '@/utils/apiUrl';
 
 export interface AvailableFile {
   id: string;
@@ -40,15 +41,8 @@ export const useAvailableFiles = () => {
     try {
       setLoading(true);
       
-      // Determine API base URL (similar to piFileService logic)
-      const currentHost = window.location.hostname;
-      let baseUrl: string;
-      
-      if (currentHost === '192.168.4.45' || currentHost === 'localhost' || currentHost === '127.0.0.1') {
-        baseUrl = `${window.location.protocol}//${window.location.host}`;
-      } else {
-        baseUrl = 'http://192.168.4.45:8080';
-      }
+      // Use central API URL utility
+      const baseUrl = getApiBaseUrl();
 
       const response = await fetch(`${baseUrl}/api/available-files/print-files`);
       
@@ -97,15 +91,8 @@ export const useAvailableProducts = () => {
     try {
       setLoading(true);
       
-      // Determine API base URL
-      const currentHost = window.location.hostname;
-      let baseUrl: string;
-      
-      if (currentHost === '192.168.4.45' || currentHost === 'localhost' || currentHost === '127.0.0.1') {
-        baseUrl = `${window.location.protocol}//${window.location.host}`;
-      } else {
-        baseUrl = 'http://192.168.4.45:8080';
-      }
+      // Use central API URL utility
+      const baseUrl = getApiBaseUrl();
 
       const response = await fetch(`${baseUrl}/api/available-files/products-with-files`);
       

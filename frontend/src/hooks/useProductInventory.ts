@@ -7,6 +7,8 @@ export interface ProductInventoryItem {
   productName: string;
   requiresAssembly: boolean;
   totalStock: number;
+  totalAssembled: number;
+  totalNeedsAssembly: number;
   totalValue: number;
   imageUrl?: string;
   skus: {
@@ -15,10 +17,13 @@ export interface ProductInventoryItem {
     sku: string;
     color: string;
     currentStock: number;
+    quantityAssembled: number;
+    quantityNeedsAssembly: number;
     unitPrice: number;
     assemblyStatus: 'printed' | 'needs_assembly' | 'assembled';
     status: string;
     material: string;
+    lowStockThreshold: number;
   }[];
 }
 
@@ -58,20 +63,29 @@ export const useProductInventory = () => {
           // Find finished good for this SKU
           const finishedGood = finishedGoods.find((fg: any) => fg.product_sku_id === sku.id);
 
+          const quantityAssembled = finishedGood?.quantity_assembled || 0;
+          const quantityNeedsAssembly = finishedGood?.quantity_needs_assembly || 0;
+          const totalStock = quantityAssembled + quantityNeedsAssembly;
+
           return {
             id: finishedGood?.id || `sku-${sku.id}`,
             skuId: sku.id,
             sku: sku.sku,
             color: sku.color,
-            currentStock: finishedGood?.current_stock || 0,
-            unitPrice: finishedGood?.unit_price || sku.price || 0,
+            currentStock: totalStock,
+            quantityAssembled,
+            quantityNeedsAssembly,
+            unitPrice: sku.price || finishedGood?.unit_price || 0,
             assemblyStatus: (finishedGood?.assembly_status || 'printed') as 'printed' | 'needs_assembly' | 'assembled',
             status: finishedGood?.status || 'out_of_stock',
-            material: finishedGood?.material || 'PLA'
+            material: finishedGood?.material || 'PLA',
+            lowStockThreshold: finishedGood?.low_stock_threshold ?? 5
           };
         });
 
         const totalStock = transformedSkus.reduce((sum, sku) => sum + sku.currentStock, 0);
+        const totalAssembled = transformedSkus.reduce((sum, sku) => sum + sku.quantityAssembled, 0);
+        const totalNeedsAssembly = transformedSkus.reduce((sum, sku) => sum + sku.quantityNeedsAssembly, 0);
         const totalValue = transformedSkus.reduce((sum, sku) => sum + (sku.currentStock * sku.unitPrice), 0);
 
         return {
@@ -79,6 +93,8 @@ export const useProductInventory = () => {
           productName: product.name,
           requiresAssembly: product.requires_assembly,
           totalStock,
+          totalAssembled,
+          totalNeedsAssembly,
           totalValue,
           imageUrl: product.image_url,
           skus: transformedSkus
@@ -99,21 +115,38 @@ export const useProductInventory = () => {
     }
   };
 
-  const updateStock = async (finishedGoodId: string, newStock: number) => {
+  const updateStock = async (finishedGoodId: string, newQuantity: number, assemblyType?: 'assembled' | 'needs_assembly') => {
     try {
-      const response = await fetch(`/api/finished-goods-sync/${finishedGoodId}`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          current_stock: newStock,
-          status: newStock === 0 ? 'out_of_stock' :
-                  newStock < 5 ? 'low_stock' : 'in_stock'
-        }),
-      });
+      if (assemblyType) {
+        // Use new assembly-specific endpoint
+        const response = await fetch(`/api/finished-goods-sync/${finishedGoodId}/assembly-stock`, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            new_quantity: newQuantity,
+            assembly_type: assemblyType
+          }),
+        });
 
-      if (!response.ok) throw new Error('Failed to update stock');
+        if (!response.ok) throw new Error('Failed to update assembly stock');
+      } else {
+        // Fallback to old endpoint for backward compatibility
+        const response = await fetch(`/api/finished-goods-sync/${finishedGoodId}`, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            current_stock: newQuantity,
+            status: newQuantity === 0 ? 'out_of_stock' :
+                    newQuantity < 5 ? 'low_stock' : 'in_stock'
+          }),
+        });
+
+        if (!response.ok) throw new Error('Failed to update stock');
+      }
 
       toast({
         title: "Success",
@@ -142,8 +175,8 @@ export const useProductInventory = () => {
     return productInventory.map(product => ({
       ...product,
       skus: product.skus.filter(sku => {
-        if (filter === 'assembled') return sku.assemblyStatus === 'assembled';
-        if (filter === 'needs_assembly') return sku.assemblyStatus === 'needs_assembly';
+        if (filter === 'assembled') return sku.quantityAssembled > 0;
+        if (filter === 'needs_assembly') return sku.quantityNeedsAssembly > 0;
         return true;
       })
     })).filter(product => product.skus.length > 0);

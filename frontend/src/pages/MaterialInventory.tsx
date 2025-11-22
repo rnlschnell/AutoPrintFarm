@@ -48,7 +48,6 @@ const MaterialInventory = () => {
     type: '',
     color: '',
     brand: '',
-    spoolSize: '',
     diameter: '',
     costPerSpool: '',
     location: '',
@@ -179,7 +178,6 @@ const MaterialInventory = () => {
         type: '',
         color: '',
         brand: '',
-        spoolSize: '',
         diameter: '',
         costPerSpool: '',
         location: '',
@@ -253,7 +251,7 @@ const MaterialInventory = () => {
 
 
   const exportToCSV = () => {
-    const headers = ['Category', 'Type', 'Color', 'Brand', 'Spool Size', 'Diameter', 'Cost Per Spool', 'Reorder Link', 'Remaining', 'Status', 'Low Threshold'];
+    const headers = ['Category', 'Type', 'Color', 'Brand', 'Diameter', 'Cost Per Spool', 'Reorder Link', 'Remaining', 'Status', 'Low Threshold'];
     const csvContent = [
       headers.join(','),
       ...materialList.filter(m => m.category === activeTab).map(material => [
@@ -261,7 +259,6 @@ const MaterialInventory = () => {
         material.type,
         material.color.split('|')[0] || material.color,
         material.brand || '',
-        material.spoolSize,
         material.diameter || '',
         material.cost_per_unit || '',
         material.reorder_link || '',
@@ -291,7 +288,6 @@ const MaterialInventory = () => {
       type: '',
       color: '',
       brand: '',
-      spoolSize: '',
       diameter: '',
       costPerSpool: '',
       location: '',
@@ -310,7 +306,6 @@ const MaterialInventory = () => {
       type: material.type,
       color: material.color || '',
       brand: material.brand || '',
-      spoolSize: material.remaining?.toString() || '',
       diameter: material.diameter || '',
       costPerSpool: material.cost_per_unit?.toString() || '',
       location: material.location || '',
@@ -356,7 +351,6 @@ const MaterialInventory = () => {
           type: '',
           color: '',
           brand: '',
-          spoolSize: '',
           diameter: '',
           costPerSpool: '',
           location: '',
@@ -413,7 +407,6 @@ const MaterialInventory = () => {
             type: '',
             color: '',
             brand: '',
-            spoolSize: '',
             diameter: '',
             costPerSpool: '',
             location: '',
@@ -442,7 +435,6 @@ const MaterialInventory = () => {
             type: '',
             color: '',
             brand: '',
-            spoolSize: '',
             diameter: '',
             costPerSpool: '',
             location: '',

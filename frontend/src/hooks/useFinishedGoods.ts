@@ -1,5 +1,4 @@
 import { useState, useEffect } from 'react';
-import { supabase } from '@/integrations/supabase/client';
 import { useToast } from '@/hooks/use-toast';
 import { useTenant } from '@/hooks/useTenant';
 
@@ -43,71 +42,15 @@ export const useFinishedGoods = () => {
 
   const fetchFinishedGoods = async () => {
     if (!tenant?.id) return;
-    
+
     try {
       setLoading(true);
-      // Fetch all product SKUs with their finished goods data
-      const { data, error } = await supabase
-        .from('product_skus')
-        .select(`
-          *,
-          product:products (
-            id,
-            name,
-            requires_assembly
-          ),
-          finished_goods (
-            id,
-            current_stock,
-            unit_price,
-            assembly_status,
-            status,
-            material,
-            print_job_id
-          )
-        `)
-        .eq('tenant_id', tenant?.id)
-        .eq('is_active', true)
-        .order('created_at', { ascending: false });
-
-      if (error) throw error;
-      
-      // Transform data to show all SKUs, even without finished goods
-      const transformedData = (data || []).map(item => {
-        const finishedGood = item.finished_goods?.[0];
-        return {
-          id: finishedGood?.id || `sku-${item.id}`,
-          tenant_id: tenant?.id || '',
-          product_sku_id: item.id,
-          sku: item.sku,
-          color: item.color,
-          material: finishedGood?.material || 'PLA',
-          current_stock: finishedGood?.current_stock || 0,
-          assembly_status: (finishedGood?.assembly_status || 'printed') as FinishedGoodItem['assembly_status'],
-          print_job_id: finishedGood?.print_job_id,
-          unit_price: finishedGood?.unit_price || item.price || 0,
-          status: finishedGood?.status || 'out_of_stock',
-          created_at: item.created_at,
-          updated_at: item.updated_at,
-          product_sku: {
-            id: item.id,
-            sku: item.sku,
-            color: item.color,
-            product: item.product
-          }
-        };
-      });
-      
-      setFinishedGoods(transformedData as FinishedGoodItem[]);
+      // NOTE: Supabase calls removed - this hook is deprecated
+      // Use useProductInventory instead which uses local /api/finished-goods-sync/
+      console.warn('useFinishedGoods is deprecated - use useProductInventory instead');
+      setFinishedGoods([]);
     } catch (error: any) {
       console.error('Error fetching finished goods:', error);
-      if (error?.code !== 'PGRST116' && error?.code !== '42P01') {
-        toast({
-          title: "Error",
-          description: "Failed to load finished goods",
-          variant: "destructive",
-        });
-      }
       setFinishedGoods([]);
     } finally {
       setLoading(false);
@@ -115,57 +58,25 @@ export const useFinishedGoods = () => {
   };
 
   const updateStock = async (id: string, newStock: number) => {
-    try {
-      const { error } = await supabase
-        .from('finished_goods')
-        .update({ 
-          current_stock: newStock,
-          status: newStock === 0 ? 'out_of_stock' : 
-                  newStock < 5 ? 'low_stock' : 'in_stock'
-        })
-        .eq('id', id);
-
-      if (error) throw error;
-
-      toast({
-        title: "Success",
-        description: "Stock updated successfully",
-      });
-
-      await fetchFinishedGoods();
-    } catch (error) {
-      console.error('Error updating stock:', error);
-      toast({
-        title: "Error",
-        description: "Failed to update stock",
-        variant: "destructive",
-      });
-    }
+    // NOTE: Supabase calls removed - this hook is deprecated
+    // Use useProductInventory instead which uses local /api/finished-goods-sync/
+    console.warn('useFinishedGoods.updateStock is deprecated - use useProductInventory instead');
+    toast({
+      title: "Error",
+      description: "This hook is deprecated. Please use useProductInventory.",
+      variant: "destructive",
+    });
   };
 
   const updateAssemblyStatus = async (id: string, status: FinishedGoodItem['assembly_status']) => {
-    try {
-      const { error } = await supabase
-        .from('finished_goods')
-        .update({ assembly_status: status })
-        .eq('id', id);
-
-      if (error) throw error;
-
-      toast({
-        title: "Success",
-        description: `Assembly status updated to ${status}`,
-      });
-
-      await fetchFinishedGoods();
-    } catch (error) {
-      console.error('Error updating assembly status:', error);
-      toast({
-        title: "Error",
-        description: "Failed to update assembly status",
-        variant: "destructive",
-      });
-    }
+    // NOTE: Supabase calls removed - this hook is deprecated
+    // Use useProductInventory instead which uses local /api/finished-goods-sync/
+    console.warn('useFinishedGoods.updateAssemblyStatus is deprecated - use useProductInventory instead');
+    toast({
+      title: "Error",
+      description: "This hook is deprecated. Please use useProductInventory.",
+      variant: "destructive",
+    });
   };
 
   // Filter functions for different views

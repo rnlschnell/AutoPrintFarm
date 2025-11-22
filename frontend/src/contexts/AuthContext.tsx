@@ -14,6 +14,7 @@ interface Profile {
 interface Tenant {
   id: string;
   company_name: string;
+  subdomain?: string | null;
 }
 
 interface AuthContextType {
@@ -24,7 +25,7 @@ interface AuthContextType {
   tenant: Tenant | null;
   loading: boolean;
   signIn: (email: string, password: string) => Promise<{ error: any }>;
-  signUp: (email: string, password: string, firstName: string, lastName: string, companyName: string) => Promise<{ error: any }>;
+  signUp: (email: string, password: string, firstName: string, lastName: string, companyName: string, subdomain?: string) => Promise<{ error: any }>;
   signOut: () => Promise<void>;
 }
 
@@ -46,6 +47,35 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   const [tenant, setTenant] = useState<Tenant | null>(null);
   const [loading, setLoading] = useState(true);
 
+  const fetchTenant = async (tenantId: string, userMetadata: any) => {
+    try {
+      const { data: tenantData, error } = await supabase
+        .from('tenants')
+        .select('id, company_name, subdomain')
+        .eq('id', tenantId)
+        .single();
+
+      if (tenantData && !error) {
+        setTenant(tenantData);
+      } else {
+        // Fallback to metadata if database fetch fails
+        setTenant({
+          id: tenantId,
+          company_name: userMetadata?.company_name || 'AutoPrintFarm',
+          subdomain: null
+        });
+      }
+    } catch (error) {
+      console.error('Error fetching tenant:', error);
+      // Fallback to metadata on error
+      setTenant({
+        id: tenantId,
+        company_name: userMetadata?.company_name || 'AutoPrintFarm',
+        subdomain: null
+      });
+    }
+  };
+
   const fetchProfile = async (userId: string, userTenantId: string | null, userMetadata: any) => {
     try {
       const { data: profileData, error } = await supabase
@@ -53,7 +83,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
         .select('*')
         .eq('id', userId)
         .single();
-      
+
       if (profileData && !error) {
         setProfile(profileData);
       } else {
@@ -86,29 +116,25 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session);
       setUser(session?.user ?? null);
-      
+
       const userTenantId = session?.user?.user_metadata?.tenant_id ?? null;
       setTenantId(userTenantId);
-      
-      // Set tenant from metadata
-      if (userTenantId) {
-        setTenant({
-          id: userTenantId,
-          company_name: session?.user?.user_metadata?.company_name || 'PrintFlow'
-        });
-      } else {
-        setTenant(null);
-      }
-      
-      // Defer profile fetching to avoid deadlock
+
+      // Defer profile and tenant fetching to avoid deadlock
       if (session?.user) {
         setTimeout(() => {
           fetchProfile(session.user.id, userTenantId, session.user.user_metadata);
+
+          // Fetch tenant details from database (including subdomain)
+          if (userTenantId) {
+            fetchTenant(userTenantId, session.user.user_metadata);
+          }
         }, 0);
       } else {
         setProfile(null);
+        setTenant(null);
       }
-      
+
       setLoading(false);
     });
 
@@ -117,29 +143,25 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       (event, session) => {
         setSession(session);
         setUser(session?.user ?? null);
-        
+
         const userTenantId = session?.user?.user_metadata?.tenant_id ?? null;
         setTenantId(userTenantId);
-        
-        // Set tenant from metadata
-        if (userTenantId) {
-          setTenant({
-            id: userTenantId,
-            company_name: session?.user?.user_metadata?.company_name || 'PrintFlow'
-          });
-        } else {
-          setTenant(null);
-        }
-        
-        // Defer profile fetching to avoid deadlock
+
+        // Defer profile and tenant fetching to avoid deadlock
         if (session?.user) {
           setTimeout(() => {
             fetchProfile(session.user.id, userTenantId, session.user.user_metadata);
+
+            // Fetch tenant details from database (including subdomain)
+            if (userTenantId) {
+              fetchTenant(userTenantId, session.user.user_metadata);
+            }
           }, 0);
         } else {
           setProfile(null);
+          setTenant(null);
         }
-        
+
         setLoading(false);
       }
     );
@@ -148,95 +170,71 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   }, []);
 
   const signIn = async (email: string, password: string) => {
-    const { error } = await supabase.auth.signInWithPassword({
-      email,
-      password,
-    });
-    return { error };
-  };
-
-  const signUp = async (email: string, password: string, firstName: string, lastName: string, companyName: string) => {
     try {
-      // Generate a simple subdomain from company name
-      const subdomain = companyName
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, "-")
-        .replace(/^-+|-+$/g, "")
-        + "-" + Date.now().toString(36);
-
-      // Create tenant first
-      const { data: tenantData, error: tenantError } = await supabase
-        .from("tenants")
-        .insert({
-          company_name: companyName,
-          subdomain: subdomain,
-          is_active: true
-        })
-        .select("*")
-        .single();
-
-      if (tenantError) {
-        // If subdomain already exists, try with a different one
-        if (tenantError.code === "23505") {
-          const altSubdomain = subdomain + "-" + Math.random().toString(36).substring(7);
-          const { data: altTenantData, error: altTenantError } = await supabase
-            .from("tenants")
-            .insert({
-              company_name: companyName,
-              subdomain: altSubdomain,
-              is_active: true
-            })
-            .select("*")
-            .single();
-          
-          if (altTenantError) {
-            return { error: new Error("Failed to create company account") };
-          }
-          
-          tenantData.id = altTenantData.id;
-        } else {
-          return { error: tenantError };
-        }
-      }
-
-      // Sign up user with tenant_id in metadata
-      const { data: authData, error: authError } = await supabase.auth.signUp({
-        email,
-        password,
-        options: {
-          data: {
-            first_name: firstName,
-            last_name: lastName,
-            tenant_id: tenantData.id,
-            company_name: companyName,
-            role: "admin"
-          }
-        }
+      // Call Pi backend authentication endpoint to update tenant_config.yaml
+      const response = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password })
       });
 
-      if (authError) {
-        // Clean up tenant on failure
-        await supabase.from("tenants").delete().eq("id", tenantData.id);
-        return { error: authError };
+      const data = await response.json();
+
+      if (!response.ok) {
+        return { error: new Error(data.detail || 'Login failed') };
       }
 
-      // Create profile manually if trigger does not work
-      if (authData.user) {
-        const { error: profileError } = await supabase
-          .from("profiles")
-          .insert({
-            id: authData.user.id,
-            tenant_id: tenantData.id,
-            email: email,
-            first_name: firstName,
-            last_name: lastName,
-            role: "admin",
-            is_active: true
-          });
+      // Backend has updated tenant_config.yaml, now authenticate with Supabase
+      const { error } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      });
 
-        if (profileError && profileError.code !== "23505") {
-          console.error("Profile creation error:", profileError);
-        }
+      if (error) {
+        return { error };
+      }
+
+      return { error: null };
+    } catch (error: any) {
+      return { error };
+    }
+  };
+
+  const signUp = async (email: string, password: string, firstName: string, lastName: string, companyName: string, subdomain?: string) => {
+    try {
+      // Call backend signup API endpoint
+      const response = await fetch('/api/auth/signup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email,
+          password,
+          first_name: firstName,
+          last_name: lastName,
+          company_name: companyName,
+          subdomain: subdomain || null  // Pass subdomain or null for auto-generation
+        })
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        return { error: new Error(data.detail || 'Signup failed') };
+      }
+
+      // Sign in after successful signup
+      const { error: signInError } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      });
+
+      if (signInError) {
+        return { error: signInError };
+      }
+
+      // Display success message with subdomain info
+      if (data.subdomain) {
+        console.log(`Account created successfully! Your domain: ${data.full_domain}`);
       }
 
       return { error: null };

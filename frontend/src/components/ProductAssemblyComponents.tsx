@@ -12,6 +12,7 @@ import { useMaterialInventory } from '@/hooks/useMaterialInventory';
 interface ComponentData {
   id?: string;
   component_name: string;
+  accessory_id?: string;
   component_id?: string;
   quantity_required: number;
 }
@@ -215,7 +216,14 @@ export const ProductAssemblyComponents = ({
                 <Label htmlFor="new-component">Component</Label>
                 <Select
                   value={newComponent.component_name}
-                  onValueChange={(value) => setNewComponent({ ...newComponent, component_name: value })}
+                  onValueChange={(value) => {
+                    const selectedItem = componentsInventory.find(item => item.type === value);
+                    setNewComponent({
+                      ...newComponent,
+                      component_name: value,
+                      accessory_id: selectedItem?.id
+                    });
+                  }}
                   disabled={materialsLoading}
                 >
                   <SelectTrigger>
@@ -284,7 +292,14 @@ const ComponentEditForm = ({
             <Label htmlFor="edit-component" className="text-xs font-medium text-muted-foreground">Component</Label>
             <Select
               value={editComponent.component_name}
-              onValueChange={(value) => setEditComponent({ ...editComponent, component_name: value })}
+              onValueChange={(value) => {
+                const selectedItem = componentsInventory.find(item => item.type === value);
+                setEditComponent({
+                  ...editComponent,
+                  component_name: value,
+                  accessory_id: selectedItem?.id
+                });
+              }}
             >
               <SelectTrigger>
                 <SelectValue placeholder="Select component" />

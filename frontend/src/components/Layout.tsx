@@ -10,7 +10,7 @@ const Layout = () => {
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
   return (
-    <div className="min-h-screen w-full bg-background text-foreground flex">
+    <div className="h-screen overflow-hidden w-full bg-background text-foreground flex">
       <Sidebar 
         sidebarOpen={sidebarOpen} 
         setSidebarOpen={setSidebarOpen} 

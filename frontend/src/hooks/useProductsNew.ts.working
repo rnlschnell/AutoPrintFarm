@@ -1,0 +1,822 @@
+import { useState, useEffect, useCallback } from 'react';
+import { supabase } from '@/integrations/supabase/client';
+import { useTenant } from '@/hooks/useTenant';
+import { useToast } from '@/hooks/use-toast';
+
+export interface Product {
+  id: string;
+  tenant_id: string;
+  name: string;
+  description?: string;
+  category?: string;
+  print_file_id?: string;
+  file_name?: string;
+  requires_assembly: boolean;
+  image_url?: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProductSku {
+  id: string;
+  product_id: string;
+  sku: string;
+  color: string;
+  filament_type?: string;
+  hex_code?: string;
+  quantity: number;
+  stock_level: number;
+  price?: number;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProductComponent {
+  id: string;
+  product_id: string;
+  component_name: string;
+  component_type?: string;
+  quantity_required: number;
+  notes?: string;
+  created_at: string;
+}
+
+export interface ProductWithDetails extends Product {
+  skus: ProductSku[];
+  components: ProductComponent[];
+  print_file?: {
+    id: string;
+    name: string;
+  };
+}
+
+export const useProductsNew = () => {
+  const [products, setProducts] = useState<ProductWithDetails[]>([]);
+  const [loading, setLoading] = useState(true);
+  const { tenant } = useTenant();
+  const { toast } = useToast();
+
+  const fetchProducts = useCallback(async () => {
+    if (!tenant?.id) {
+      console.log('No tenant ID available, setting loading to false');
+      setLoading(false);
+      return;
+    }
+
+    try {
+      setLoading(true);
+      console.log('Fetching products for tenant:', tenant?.id);
+      
+      // Fetch products from local-first API
+      const productsResponse = await fetch('/api/products-sync/');
+      if (!productsResponse.ok) {
+        throw new Error(`Failed to fetch products: ${productsResponse.statusText}`);
+      }
+      const productsData = await productsResponse.json();
+      console.log('Products fetched successfully:', productsData?.length || 0, 'products');
+      
+      // Fetch print files from local-first API  
+      const printFilesResponse = await fetch('/api/print-files-sync/');
+      if (!printFilesResponse.ok) {
+        throw new Error(`Failed to fetch print files: ${printFilesResponse.statusText}`);
+      }
+      const printFilesData = await printFilesResponse.json();
+
+      // Fetch SKUs from local-first API
+      const skusResponse = await fetch('/api/product-skus-sync/');
+      if (!skusResponse.ok) {
+        throw new Error(`Failed to fetch product SKUs: ${skusResponse.statusText}`);
+      }
+      const skusData = await skusResponse.json();
+
+      // Fetch components from Supabase (still using direct access for non-local-first table)
+      const { data: componentsData, error: componentsError } = await supabase
+        .from('product_components')
+        .select('*')
+        .eq('tenant_id', tenant?.id);
+
+      if (componentsError) throw componentsError;
+
+      // Combine data from local-first APIs and Supabase
+      const productsWithDetails: ProductWithDetails[] = (productsData || []).map(product => {
+        // Find associated print file
+        const printFile = printFilesData.find(file => file.id === product.print_file_id);
+        
+        return {
+          ...product,
+          skus: (skusData || []).filter(sku => sku.product_id === product.id),
+          components: (componentsData || []).filter(component => component.product_id === product.id),
+          print_file: printFile ? { id: printFile.id, name: printFile.name } : null
+        };
+      });
+
+      console.log('Final products with details:', productsWithDetails.length);
+      setProducts(productsWithDetails);
+    } catch (error: any) {
+      console.error('Error fetching products:', error);
+      // Only show error toast for actual errors, not missing tables (empty tenant scenarios)
+      if (error?.code !== 'PGRST116' && error?.code !== '42P01') {
+        toast({
+          title: "Error",
+          description: "Failed to load products",
+          variant: "destructive",
+        });
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, [tenant?.id, toast]);
+
+  // Set up real-time subscription for Supabase-only tables (local-first tables don't need real-time)
+  useEffect(() => {
+    if (!tenant?.id) return;
+
+    const channel = supabase
+      .channel('product-supabase-changes')
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'finished_goods',
+          filter: `tenant_id=eq.${tenant.id}`
+        },
+        (payload) => {
+          console.log('Finished goods stock updated:', payload);
+          // Refetch products when finished goods stock changes
+          fetchProducts();
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'product_components',
+          filter: `tenant_id=eq.${tenant.id}`
+        },
+        (payload) => {
+          console.log('Product components changed:', payload);
+          // Refetch products when components change
+          fetchProducts();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [tenant?.id, fetchProducts]);
+
+  const addProduct = useCallback(async (productData: Omit<Product, 'id' | 'tenant_id' | 'created_at' | 'updated_at'> & {
+    components?: any[];
+    skus?: any[];
+  }) => {
+    if (!tenant?.id) {
+      toast({
+        title: "Error",
+        description: "No tenant context available",
+        variant: "destructive",
+      });
+      return;
+    }
+    
+    try {
+      // Extract components and skus from productData
+      const { components, skus, ...productFields } = productData;
+
+      console.log('Adding product with data:', productFields);
+
+      // Create product via local-first API
+      const productResponse = await fetch('/api/products-sync/', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          ...productFields
+        }),
+      });
+
+      if (!productResponse.ok) {
+        throw new Error(`Failed to create product: ${productResponse.statusText}`);
+      }
+      
+      const productResult = await productResponse.json();
+      
+      if (!productResult.success) {
+        throw new Error(productResult.message || 'Failed to create product');
+      }
+      
+      const data = productResult.product;
+      console.log('Product created successfully:', data);
+
+      // Save components if they exist
+      if (components && components.length > 0) {
+        const componentInserts = components.map(component => ({
+          product_id: data.id,
+          component_name: component.component_name,
+          component_type: component.component_type,
+          quantity_required: component.quantity_required,
+          notes: component.notes,
+          tenant_id: tenant?.id
+        }));
+
+        const { error: componentError } = await supabase
+          .from('product_components')
+          .insert(componentInserts);
+
+        if (componentError) {
+          console.error('Error saving components:', componentError);
+          // Don't throw here - product is already created
+        }
+      }
+
+      // Save SKUs via local-first API if they exist
+      if (skus && skus.length > 0) {
+        for (const sku of skus) {
+          try {
+            const skuResponse = await fetch('/api/product-skus-sync/', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                product_id: data.id,
+                sku: sku.sku,
+                color: sku.color,
+                filament_type: sku.filament_type,
+                hex_code: sku.hex_code,
+                quantity: sku.quantity,
+                stock_level: sku.stock_level || 0,
+                price: sku.price
+              }),
+            });
+            
+            if (!skuResponse.ok) {
+              throw new Error(`Failed to create SKU: ${skuResponse.statusText}`);
+            }
+            
+            const skuResult = await skuResponse.json();
+            if (!skuResult.success) {
+              throw new Error(skuResult.message || 'Failed to create SKU');
+            }
+          } catch (error) {
+            console.error('Error saving SKU:', error);
+            // Don't throw here - product is already created
+          }
+        }
+      }
+
+      toast({
+        title: "Success",
+        description: "Product added successfully",
+      });
+
+      await fetchProducts();
+      return data;
+    } catch (error) {
+      console.error('Error adding product:', error);
+      toast({
+        title: "Error",
+        description: "Failed to add product",
+        variant: "destructive",
+      });
+    }
+  }, [tenant?.id, toast, fetchProducts]);
+
+  const updateProduct = useCallback(async (id: string, updates: Partial<Product> & {
+    components?: any[];
+    skus?: any[];
+  }) => {
+    try {
+      // Extract components and skus from updates
+      const { components, skus, ...productUpdates } = updates;
+
+      // Get current product to check for print file changes
+      const currentProduct = products.find(p => p.id === id);
+      const oldPrintFileId = currentProduct?.print_file_id;
+      const newPrintFileId = productUpdates.print_file_id;
+      
+      // Check if print file is being changed
+      const isPrintFileChanged = oldPrintFileId !== newPrintFileId;
+      
+      console.log('Updating product:', {
+        productId: id,
+        oldPrintFileId,
+        newPrintFileId,
+        isPrintFileChanged
+      });
+
+      // Update product via local-first API
+      const productResponse = await fetch(`/api/products-sync/${id}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(productUpdates),
+      });
+
+      if (!productResponse.ok) {
+        throw new Error(`Failed to update product: ${productResponse.statusText}`);
+      }
+      
+      const productResult = await productResponse.json();
+      
+      if (!productResult.success) {
+        throw new Error(productResult.message || 'Failed to update product');
+      }
+      
+      const data = productResult.product;
+      
+      // Handle print file cleanup if file was replaced or removed
+      if (isPrintFileChanged && oldPrintFileId) {
+        try {
+          // Delete the old print file via local-first API
+          const deleteResponse = await fetch(`/api/print-files-sync/${oldPrintFileId}`, {
+            method: 'DELETE',
+          });
+          
+          if (!deleteResponse.ok || !(await deleteResponse.json()).success) {
+            console.error('Failed to delete old print file via API');
+            // Don't fail the whole operation, but log the error
+            toast({
+              title: "Warning",
+              description: "Old file may not have been cleaned up properly",
+              variant: "default",
+            });
+          } else {
+            console.log('Successfully deleted old print file:', oldPrintFileId);
+          }
+        } catch (cleanupError) {
+          console.error('Error during print file cleanup:', cleanupError);
+          // Continue - don't fail the product update
+        }
+      }
+
+      // Handle components if they exist
+      if (components !== undefined) {
+        // Delete existing components
+        await supabase
+          .from('product_components')
+          .delete()
+          .eq('product_id', id);
+
+        // Insert new components
+        if (components.length > 0) {
+          const componentInserts = components.map(component => ({
+            product_id: id,
+            component_name: component.component_name,
+            component_type: component.component_type,
+            quantity_required: component.quantity_required,
+            notes: component.notes,
+            tenant_id: tenant?.id
+          }));
+
+          const { error: componentError } = await supabase
+            .from('product_components')
+            .insert(componentInserts);
+
+          if (componentError) {
+            console.error('Error updating components:', componentError);
+          }
+        }
+      }
+
+      // Handle SKUs - simplified approach for product edit
+      if (skus !== null && skus !== undefined && Array.isArray(skus)) {
+        console.log('Updating SKUs for product:', id, skus);
+        
+        // Get current SKUs from database
+// Get current SKUs from local database        const response = await fetch();        if (!response.ok) {          const errorText = await response.text();          console.error('Error fetching current SKUs:', errorText);          throw new Error();        }        const currentSkus = await response.json();
+        }
+        
+        // Create maps for easier comparison
+        const currentSkusMap = new Map();
+        currentSkus?.forEach(sku => {
+          currentSkusMap.set(sku.id, sku);
+        });
+        
+        const newSkusMap = new Map();
+        const skusToInsert = [];
+        const skusToUpdate = [];
+        
+        // Process incoming SKUs
+        skus.forEach(sku => {
+          if (sku.id && sku.id.startsWith('temp-')) {
+            // This is a new SKU (temp ID)
+            skusToInsert.push({
+              product_id: id,
+              sku: sku.sku,
+              color: sku.color,
+              filament_type: sku.filament_type,
+              hex_code: sku.hex_code,
+              quantity: sku.quantity,
+              stock_level: sku.stock_level || 0,
+              price: sku.price,
+              tenant_id: tenant?.id
+            });
+          } else if (sku.id && currentSkusMap.has(sku.id)) {
+            // This is an existing SKU that might need updates
+            const currentSku = currentSkusMap.get(sku.id);
+            newSkusMap.set(sku.id, sku);
+            
+            // Check if any fields have changed
+            const hasChanges = (
+              currentSku.sku !== sku.sku ||
+              currentSku.color !== sku.color ||
+              currentSku.filament_type !== sku.filament_type ||
+              currentSku.hex_code !== sku.hex_code ||
+              currentSku.quantity !== sku.quantity ||
+              currentSku.stock_level !== sku.stock_level ||
+              currentSku.price !== sku.price
+            );
+            
+            if (hasChanges) {
+              skusToUpdate.push({
+                id: sku.id,
+                sku: sku.sku,
+                color: sku.color,
+                filament_type: sku.filament_type,
+                hex_code: sku.hex_code,
+                quantity: sku.quantity,
+                stock_level: sku.stock_level || 0,
+                price: sku.price
+              });
+            }
+          }
+        });
+        
+        // Find SKUs that were deleted (exist in current but not in new)
+        const skusToDelete = [];
+        currentSkus?.forEach(currentSku => {
+          if (!newSkusMap.has(currentSku.id) && !skus.some(s => s.id === currentSku.id)) {
+            skusToDelete.push(currentSku.id);
+          }
+        });
+        
+        // Execute the changes
+        
+        // 1. Insert new SKUs
+        if (skusToInsert.length > 0) {
+          const { error: insertError } = await supabase
+            .from('product_skus')
+            .insert(skusToInsert);
+            
+          if (insertError) {
+            console.error('Error inserting new SKUs:', insertError);
+            throw insertError;
+          }
+        }
+        
+        // 2. Update existing SKUs
+        for (const skuUpdate of skusToUpdate) {
+          const { id, ...updateFields } = skuUpdate;
+          const { error: updateError } = await supabase
+            .from('product_skus')
+            .update(updateFields)
+            .eq('id', id);
+            
+          if (updateError) {
+            console.error('Error updating SKU:', updateError);
+            throw updateError;
+          }
+        }
+        
+        // 3. Hard delete removed SKUs
+        if (skusToDelete.length > 0) {
+          const { error: deleteError } = await supabase
+            .from('product_skus')
+            .delete()
+            .in('id', skusToDelete);
+            
+          if (deleteError) {
+            console.error('Error deleting SKUs:', deleteError);
+            throw deleteError;
+          }
+        }
+        
+        console.log('SKU operations completed:', {
+          inserted: skusToInsert.length,
+          updated: skusToUpdate.length,
+          deleted: skusToDelete.length
+        });
+      } else {
+        console.log('No SKUs to update - preserving existing SKUs for product:', id);
+      }
+
+      toast({
+        title: "Success",
+        description: "Product updated successfully",
+      });
+
+      await fetchProducts();
+      return data;
+    } catch (error) {
+      console.error('Error updating product:', error);
+      toast({
+        title: "Error",
+        description: "Failed to update product",
+        variant: "destructive",
+      });
+      throw error; // Re-throw to let the modal handle it
+    }
+  }, [tenant?.id, toast, fetchProducts, products]);
+
+  const deleteProduct = useCallback(async (id: string) => {
+    try {
+      // First get the product from local state to find the print_file_id
+      const product = products.find(p => p.id === id);
+      
+      // Delete the product via local-first API (SKUs will be cascade deleted automatically)
+      const deleteResponse = await fetch(`/api/products-sync/${id}`, {
+        method: 'DELETE',
+      });
+
+      if (!deleteResponse.ok) {
+        throw new Error(`Failed to delete product: ${deleteResponse.statusText}`);
+      }
+      
+      const result = await deleteResponse.json();
+      if (!result.success) {
+        throw new Error(result.message || 'Failed to delete product');
+      }
+
+      // Delete the associated print file if it exists
+      if (product?.print_file_id) {
+        try {
+          const printFileResponse = await fetch(`/api/print-files-sync/${product.print_file_id}`, {
+            method: 'DELETE',
+          });
+          
+          if (!printFileResponse.ok || !(await printFileResponse.json()).success) {
+            console.warn('Failed to delete associated print file via API');
+            // Don't fail the whole operation if print file deletion fails
+          }
+        } catch (error) {
+          console.warn('Failed to delete associated print file:', error);
+        }
+      }
+      
+      // Delete components via Supabase (still non-local-first)
+      if (product?.components && product.components.length > 0) {
+        const { error: componentError } = await supabase
+          .from('product_components')
+          .delete()
+          .eq('product_id', id);
+        
+        if (componentError) {
+          console.warn('Failed to delete product components:', componentError);
+          // Don't fail the whole operation
+        }
+      }
+
+      // Trigger cleanup of orphaned files on Pi
+      try {
+        const currentHost = window.location.hostname;
+        let baseUrl: string;
+        
+        if (currentHost === '192.168.4.45' || currentHost === 'localhost' || currentHost === '127.0.0.1') {
+          baseUrl = `${window.location.protocol}//${window.location.host}`;
+        } else {
+          baseUrl = 'http://192.168.4.45:8080';
+        }
+
+        const cleanupResponse = await fetch(`${baseUrl}/api/available-files/maintenance/cleanup-orphaned`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          }
+        });
+
+        if (cleanupResponse.ok) {
+          const cleanupData = await cleanupResponse.json();
+          console.log('Cleanup successful:', cleanupData);
+        } else {
+          console.warn('Failed to trigger cleanup:', cleanupResponse.status);
+        }
+      } catch (cleanupError) {
+        console.warn('Error triggering cleanup:', cleanupError);
+        // Don't fail the main operation if cleanup fails
+      }
+
+      toast({
+        title: "Success",
+        description: "Product, associated SKUs, and print file deleted successfully",
+      });
+
+      await fetchProducts();
+    } catch (error) {
+      console.error('Error deleting product:', error);
+      toast({
+        title: "Error",
+        description: "Failed to delete product",
+        variant: "destructive",
+      });
+    }
+  }, [toast, fetchProducts]);
+
+  const addSku = useCallback(async (skuData: Omit<ProductSku, 'id' | 'created_at' | 'updated_at'>) => {
+    console.log('addSku called with:', skuData);
+    try {
+      // Insert the new SKU
+      const { data: skuResult, error: skuError } = await supabase
+        .from('product_skus')
+        .insert({
+          ...skuData,
+          tenant_id: tenant?.id
+        })
+        .select()
+        .single();
+
+      if (skuError) {
+        console.error('Supabase error in addSku:', skuError);
+        throw skuError;
+      }
+
+      console.log('addSku successful, data:', skuResult);
+
+      // Create corresponding finished_goods record
+      const { error: finishedGoodsError } = await supabase
+        .from('finished_goods')
+        .insert({
+          tenant_id: tenant?.id,
+          product_sku_id: skuResult.id,
+          sku: skuData.sku,
+          color: skuData.color,
+          material: skuData.filament_type || 'PLA', // Use filament_type from SKU
+          current_stock: skuData.stock_level || 0,
+          assembly_status: 'printed',
+          unit_price: skuData.price || 0,
+          status: (skuData.stock_level || 0) > 0 ? ((skuData.stock_level || 0) <= 5 ? 'low_stock' : 'in_stock') : 'out_of_stock'
+        });
+
+      if (finishedGoodsError) {
+        console.warn('Warning: Could not create finished_goods record:', finishedGoodsError);
+        // Don't fail the whole operation if finished_goods creation fails
+      }
+
+      toast({
+        title: "Success",
+        description: "SKU added successfully",
+      });
+
+      await fetchProducts();
+      return skuResult;
+    } catch (error) {
+      console.error('Error adding SKU:', error);
+      toast({
+        title: "Error",
+        description: "Failed to add SKU",
+        variant: "destructive",
+      });
+      throw error; // Re-throw to ensure calling code knows about the failure
+    }
+  }, [tenant?.id, toast, fetchProducts]);
+
+  const updateSku = useCallback(async (id: string, updates: Partial<ProductSku>) => {
+    console.log('updateSku called with:', id, updates);
+    try {
+      const { data, error } = await supabase
+        .from('product_skus')
+        .update(updates)
+        .eq('id', id)
+        .select()
+        .single();
+
+      if (error) {
+        console.error('Supabase error in updateSku:', error);
+        throw error;
+      }
+
+      console.log('updateSku successful, data:', data);
+      toast({
+        title: "Success",
+        description: "SKU updated successfully",
+      });
+
+      await fetchProducts();
+      return data;
+    } catch (error) {
+      console.error('Error updating SKU:', error);
+      toast({
+        title: "Error",
+        description: "Failed to update SKU",
+        variant: "destructive",
+      });
+      throw error; // Re-throw to ensure calling code knows about the failure
+    }
+  }, [toast, fetchProducts]);
+
+  const deleteSku = useCallback(async (id: string) => {
+    try {
+      // Hard delete the SKU
+      const { error: skuError } = await supabase
+        .from('product_skus')
+        .delete()
+        .eq('id', id);
+
+      if (skuError) throw skuError;
+
+      // Also hard delete the corresponding finished_goods record
+      const { error: finishedGoodsError } = await supabase
+        .from('finished_goods')
+        .delete()
+        .eq('product_sku_id', id);
+
+      if (finishedGoodsError) {
+        console.warn('Warning: Could not delete finished_goods record:', finishedGoodsError);
+        // Don't fail the whole operation if finished_goods deletion fails
+      }
+
+      toast({
+        title: "Success",
+        description: "SKU deleted successfully",
+      });
+
+      await fetchProducts();
+    } catch (error) {
+      console.error('Error deleting SKU:', error);
+      toast({
+        title: "Error",
+        description: "Failed to delete SKU",
+        variant: "destructive",
+      });
+    }
+  }, [toast, fetchProducts]);
+
+  const addComponent = useCallback(async (componentData: Omit<ProductComponent, 'id' | 'created_at'>) => {
+    try {
+      const { data, error } = await supabase
+        .from('product_components')
+        .insert({
+          ...componentData,
+          tenant_id: tenant?.id
+        })
+        .select()
+        .single();
+
+      if (error) throw error;
+
+      toast({
+        title: "Success",
+        description: "Component added successfully",
+      });
+
+      await fetchProducts();
+      return data;
+    } catch (error) {
+      console.error('Error adding component:', error);
+      toast({
+        title: "Error",
+        description: "Failed to add component",
+        variant: "destructive",
+      });
+    }
+  }, [tenant?.id, toast, fetchProducts]);
+
+  const deleteComponent = useCallback(async (id: string) => {
+    try {
+      const { error } = await supabase
+        .from('product_components')
+        .delete()
+        .eq('id', id);
+
+      if (error) throw error;
+
+      toast({
+        title: "Success",
+        description: "Component deleted successfully",
+      });
+
+      await fetchProducts();
+    } catch (error) {
+      console.error('Error deleting component:', error);
+      toast({
+        title: "Error",
+        description: "Failed to delete component",
+        variant: "destructive",
+      });
+    }
+  }, [toast, fetchProducts]);
+
+  useEffect(() => {
+    fetchProducts();
+  }, [fetchProducts]);
+
+  return {
+    products,
+    loading,
+    addProduct,
+    updateProduct,
+    deleteProduct,
+    addSku,
+    updateSku,
+    deleteSku,
+    addComponent,
+    deleteComponent,
+    refetch: fetchProducts,
+  };
+};

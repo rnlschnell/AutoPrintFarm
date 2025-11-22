@@ -1,25 +1,35 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Progress } from "@/components/ui/progress";
 import { useToast } from "@/hooks/use-toast";
-import { useTheme } from "next-themes";
 import { useAuth } from "@/contexts/AuthContext";
+import { useServerInfo } from "@/hooks/useServerInfo";
 import FilamentColorTypeModal from "@/components/FilamentColorTypeModal";
 import UserManagement from "@/components/auth/UserManagement";
+import LogsManagement from "@/components/LogsManagement";
+import BackupManagement from "@/components/BackupManagement";
+import TunnelStatus from "@/components/TunnelStatus";
+import { Activity, HardDrive, Cpu } from "lucide-react";
 
 const Settings = () => {
   const { toast } = useToast();
-  const { setTheme, theme } = useTheme();
   const { profile } = useAuth();
   const [isColorModalOpen, setIsColorModalOpen] = useState(false);
+  const { serverInfo, loading: serverLoading } = useServerInfo();
 
   const handleSave = () => {
     toast({
       title: "Settings Updated",
       description: "Your settings have been successfully updated.",
     });
+  };
+
+  const getStatusColor = (percent: number) => {
+    if (percent < 70) return "bg-green-500";
+    if (percent < 85) return "bg-yellow-500";
+    return "bg-red-500";
   };
 
 
@@ -34,46 +44,103 @@ const Settings = () => {
         <TabsList>
           <TabsTrigger value="general">General</TabsTrigger>
           {profile?.role === 'admin' && (
-            <TabsTrigger value="users">User Management</TabsTrigger>
+            <>
+              <TabsTrigger value="logs">System Logs</TabsTrigger>
+              <TabsTrigger value="users">User Management</TabsTrigger>
+              <TabsTrigger value="backup">Backup & Restore</TabsTrigger>
+            </>
           )}
         </TabsList>
 
         <TabsContent value="general" className="space-y-8">
+          {/* Remote Access Status */}
+          <TunnelStatus />
+
           <div className="rounded-lg border p-6">
             <h2 className="text-xl font-semibold mb-4">General Settings</h2>
             <p className="text-muted-foreground mb-6">Configure general preferences for your print farm.</p>
-            
-            <div className="grid grid-cols-2 gap-8">
-              <div className="space-y-4">
-                <div className="space-y-2">
-                  <Label htmlFor="theme">Theme</Label>
-                  <Select 
-                    value={theme || "system"} 
-                    onValueChange={(value) => setTheme(value)}
-                  >
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="light">Light</SelectItem>
-                      <SelectItem value="dark">Dark</SelectItem>
-                      <SelectItem value="system">System</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-              </div>
-              
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+              {/* Filament Colors & Types */}
               <div className="space-y-4">
                 <div className="space-y-2">
                   <Label>Filament Colors & Types</Label>
-                  <div className="text-sm text-muted-foreground mb-3">Manage the filament types and colors available for selection across the system</div>
-                  <Button 
-                    variant="outline" 
+                  <div className="text-sm text-muted-foreground mb-3">Manage the filament types and colors available for selection across the program. To add actual filament inventory, navigate to the Materials page.</div>
+                  <Button
+                    variant="outline"
                     onClick={() => setIsColorModalOpen(true)}
                     className="w-fit"
                   >
                     Manage Colors & Types
                   </Button>
+                </div>
+              </div>
+
+              {/* Server Info */}
+              <div className="space-y-4">
+                <div className="space-y-2">
+                  <Label>Server Info</Label>
+                  <div className="text-sm text-muted-foreground mb-3">Live server resource usage and performance metrics.</div>
+
+                  {serverLoading ? (
+                    <div className="text-sm text-muted-foreground">Loading server info...</div>
+                  ) : serverInfo ? (
+                    <div className="space-y-4">
+                      {/* CPU Usage */}
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between text-sm">
+                          <div className="flex items-center gap-2">
+                            <Cpu className="h-4 w-4" />
+                            <span>CPU Usage</span>
+                          </div>
+                          <span className="font-medium">{serverInfo.cpu_percent.toFixed(1)}%</span>
+                        </div>
+                        <Progress
+                          value={serverInfo.cpu_percent}
+                          className="h-2"
+                          indicatorClassName={getStatusColor(serverInfo.cpu_percent)}
+                        />
+                      </div>
+
+                      {/* Memory Usage */}
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between text-sm">
+                          <div className="flex items-center gap-2">
+                            <Activity className="h-4 w-4" />
+                            <span>Memory Usage</span>
+                          </div>
+                          <span className="font-medium">
+                            {serverInfo.memory_percent.toFixed(1)}% ({serverInfo.memory_available_mb.toFixed(0)} MB free)
+                          </span>
+                        </div>
+                        <Progress
+                          value={serverInfo.memory_percent}
+                          className="h-2"
+                          indicatorClassName={getStatusColor(serverInfo.memory_percent)}
+                        />
+                      </div>
+
+                      {/* Disk Usage */}
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between text-sm">
+                          <div className="flex items-center gap-2">
+                            <HardDrive className="h-4 w-4" />
+                            <span>Disk Usage</span>
+                          </div>
+                          <span className="font-medium">
+                            {serverInfo.disk_percent.toFixed(1)}% ({serverInfo.disk_free_gb.toFixed(1)} GB free)
+                          </span>
+                        </div>
+                        <Progress
+                          value={serverInfo.disk_percent}
+                          className="h-2"
+                          indicatorClassName={getStatusColor(serverInfo.disk_percent)}
+                        />
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="text-sm text-red-500">Failed to load server info</div>
+                  )}
                 </div>
               </div>
             </div>
@@ -82,7 +149,7 @@ const Settings = () => {
           <div className="rounded-lg border p-6">
             <h2 className="text-xl font-semibold mb-4">Billing & Account</h2>
             <p className="text-muted-foreground mb-6">Manage your subscription, billing, and account details.</p>
-            
+
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
               {/* Account Details */}
               <div className="space-y-4">
@@ -121,7 +188,7 @@ const Settings = () => {
             {/* Subscription Plans */}
             <div className="mt-8">
               <h3 className="text-lg font-medium mb-4">Subscription & Plans</h3>
-              
+
               {/* Billing Toggle */}
               <div className="flex items-center justify-center mb-6">
                 <span className="text-sm font-medium mr-3">Monthly</span>
@@ -195,9 +262,17 @@ const Settings = () => {
         </TabsContent>
 
         {profile?.role === 'admin' && (
-          <TabsContent value="users">
-            <UserManagement />
-          </TabsContent>
+          <>
+            <TabsContent value="logs">
+              <LogsManagement />
+            </TabsContent>
+            <TabsContent value="users">
+              <UserManagement />
+            </TabsContent>
+            <TabsContent value="backup">
+              <BackupManagement />
+            </TabsContent>
+          </>
         )}
       </Tabs>
 

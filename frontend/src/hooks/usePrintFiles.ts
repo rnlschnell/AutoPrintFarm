@@ -9,22 +9,8 @@ import {
   DbPrintFile 
 } from '@/lib/transformers';
 
-export interface PrintFileVersion {
-  id: string;
-  printFileId: string;
-  versionNumber?: number;
-  fileUrl?: string;
-  notes?: string;
-  isCurrentVersion?: boolean;
-  createdAt?: string;
-}
-
-export interface ExtendedPrintFile extends FrontendPrintFile {
-  versions: PrintFileVersion[];
-}
-
 export const usePrintFiles = () => {
-  const [printFiles, setPrintFiles] = useState<ExtendedPrintFile[]>([]);
+  const [printFiles, setPrintFiles] = useState<FrontendPrintFile[]>([]);
   const [loading, setLoading] = useState(true);
   const { toast } = useToast();
   const { tenant } = useTenant();
@@ -58,40 +44,23 @@ export const usePrintFiles = () => {
       // Sort by created_at descending
       filesData.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
 
-      const { data: versionsData, error: versionsError } = await supabase
-        .from('print_file_versions')
-        .select('*')
-        .order('version_number', { ascending: false });
-
-      if (versionsError) throw versionsError;
-
-      // Combine files with their versions and friendly names
-      const extendedFiles: ExtendedPrintFile[] = (filesData || []).map(file => {
-        const fileVersions = (versionsData || []).filter(v => v.print_file_id === file.id);
+      // Combine files with friendly names
+      const transformedFiles: FrontendPrintFile[] = (filesData || []).map(file => {
         const transformedFile = transformPrintFileFromDb(file as DbPrintFile);
         const productInfo = productFileMap.get(file.id);
-        
+
         // Use product name + original file name for display
-        const displayName = productInfo 
+        const displayName = productInfo
           ? `${productInfo.productName} (${productInfo.originalFileName || file.name})`
           : file.name;
-        
+
         return {
           ...transformedFile,
-          name: displayName, // Override with friendly name
-          versions: fileVersions.map(v => ({
-            id: v.id,
-            printFileId: v.print_file_id,
-            versionNumber: v.version_number,
-            fileUrl: v.file_url,
-            notes: v.notes,
-            isCurrentVersion: v.is_current_version,
-            createdAt: v.created_at
-          }))
+          name: displayName // Override with friendly name
         };
       });
 
-      setPrintFiles(extendedFiles);
+      setPrintFiles(transformedFiles);
     } catch (error) {
       console.error('Error fetching print files:', error);
       toast({
@@ -136,41 +105,15 @@ export const usePrintFiles = () => {
       
       const newFile = result.print_file;
 
-      // Create initial version
-      const { data: newVersion, error: versionError } = await supabase
-        .from('print_file_versions')
-        .insert({
-          print_file_id: newFile.id,
-          version_number: 1,
-          notes: fileData.notes || "Initial upload",
-          is_current_version: true
-        })
-        .select()
-        .single();
-
-      if (versionError) throw versionError;
-
       const transformedFile = transformPrintFileFromDb(newFile as DbPrintFile);
-      const extendedFile: ExtendedPrintFile = {
-        ...transformedFile,
-        versions: [{
-          id: newVersion.id,
-          printFileId: newVersion.print_file_id,
-          versionNumber: newVersion.version_number,
-          fileUrl: newVersion.file_url,
-          notes: newVersion.notes,
-          isCurrentVersion: newVersion.is_current_version,
-          createdAt: newVersion.created_at
-        }]
-      };
 
-      setPrintFiles(prev => [extendedFile, ...prev]);
+      setPrintFiles(prev => [transformedFile, ...prev]);
       toast({
         title: "Success",
         description: `${fileData.name} has been added to your library.`,
       });
 
-      return extendedFile;
+      return transformedFile;
     } catch (error) {
       console.error('Error adding print file:', error);
       toast({
@@ -232,41 +175,6 @@ export const usePrintFiles = () => {
     }
   };
 
-  const updateFileVersion = async (fileId: string, versionId: string, updates: { notes?: string; isCurrentVersion?: boolean }) => {
-    try {
-      const updateData = {
-        notes: updates.notes,
-        is_current_version: updates.isCurrentVersion
-      };
-
-      const { data, error } = await supabase
-        .from('print_file_versions')
-        .update(updateData)
-        .eq('id', versionId)
-        .select()
-        .single();
-
-      if (error) throw error;
-
-      // Refresh the entire file list to get updated version info
-      await fetchPrintFiles();
-
-      toast({
-        title: "Success",
-        description: "File version updated successfully.",
-      });
-
-      return data;
-    } catch (error) {
-      console.error('Error updating file version:', error);
-      toast({
-        title: "Error",
-        description: "Failed to update file version.",
-        variant: "destructive",
-      });
-      throw error;
-    }
-  };
 
   const deletePrintFile = async (id: string) => {
     try {
@@ -307,49 +215,12 @@ export const usePrintFiles = () => {
     }
   }, [tenant?.id]);
 
-  const setFileVersionAsCurrent = async (fileId: string, versionId: string) => {
-    try {
-      // Get all versions for this file
-      const fileVersions = printFiles.find(f => f.id === fileId)?.versions || [];
-      
-      // Update all versions in the database directly
-      await Promise.all(
-        fileVersions.map(async (v) => {
-          const { error } = await supabase
-            .from('print_file_versions')
-            .update({ is_current_version: v.id === versionId })
-            .eq('id', v.id);
-          
-          if (error) throw error;
-        })
-      );
-
-      // Refresh the entire file list to get updated version info
-      await fetchPrintFiles();
-
-      toast({
-        title: "Success",
-        description: "File version updated successfully.",
-      });
-    } catch (error) {
-      console.error('Error setting file version as current:', error);
-      toast({
-        title: "Error",
-        description: "Failed to update file version.",
-        variant: "destructive",
-      });
-      throw error;
-    }
-  };
-
   return {
     printFiles,
     loading,
     addPrintFile,
     updatePrintFile,
-    updateFileVersion,
     deletePrintFile,
-    setFileVersionAsCurrent,
     refetch: fetchPrintFiles
   };
 };

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -12,6 +12,8 @@ import { format } from "date-fns";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
 import { WorklistTask } from "@/hooks/useWorklistTasks";
+import ProductSelector from "@/components/ProductSelector";
+import ProductSkuSelector from "@/components/ProductSkuSelector";
 
 interface CreateTaskModalProps {
   isOpen: boolean;
@@ -31,8 +33,30 @@ const CreateTaskModal = ({ isOpen, onClose, onTaskCreated }: CreateTaskModalProp
     printer_id: '',
     order_number: ''
   });
-  
+
+  // Assembly-specific state
+  const [assemblyData, setAssemblyData] = useState({
+    productId: '',
+    productName: '',
+    skuId: '',
+    sku: '',
+    quantity: '1'
+  });
+
   const { toast } = useToast();
+
+  // Reset assembly data when task type changes
+  useEffect(() => {
+    if (taskData.task_type !== 'assembly') {
+      setAssemblyData({
+        productId: '',
+        productName: '',
+        skuId: '',
+        sku: '',
+        quantity: '1'
+      });
+    }
+  }, [taskData.task_type]);
 
   const taskTypes = [
     { value: 'assembly', label: 'Assembly', icon: Wrench },
@@ -49,29 +73,72 @@ const CreateTaskModal = ({ isOpen, onClose, onTaskCreated }: CreateTaskModalProp
   ];
 
   const handleCreateTask = () => {
-    if (!taskData.title.trim() || !taskData.task_type) {
-      toast({
-        title: "Error",
-        description: "Please fill in the title and task type.",
-        variant: "destructive",
-      });
-      return;
+    // Validation for assembly tasks
+    if (taskData.task_type === 'assembly') {
+      if (!assemblyData.productId || !assemblyData.skuId || !assemblyData.quantity) {
+        toast({
+          title: "Error",
+          description: "Please select a product, SKU, and enter quantity for assembly tasks.",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      const quantity = parseInt(assemblyData.quantity);
+      if (isNaN(quantity) || quantity < 1) {
+        toast({
+          title: "Error",
+          description: "Please enter a valid quantity (minimum 1).",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      // Create assembly task with metadata
+      const newTask: Partial<WorklistTask> & { metadata?: any } = {
+        title: `Assemble ${quantity}x ${assemblyData.productName} (${assemblyData.sku})`,
+        description: taskData.description.trim() || undefined,
+        task_type: 'assembly',
+        priority: taskData.priority as WorklistTask['priority'],
+        assigned_to: taskData.assigned_to || undefined,
+        estimated_time_minutes: taskData.estimated_time_minutes ? parseInt(taskData.estimated_time_minutes) : undefined,
+        due_date: taskData.due_date ? taskData.due_date.toISOString() : undefined,
+        metadata: {
+          productId: assemblyData.productId,
+          productName: assemblyData.productName,
+          skuId: assemblyData.skuId,
+          sku: assemblyData.sku,
+          quantity: quantity
+        }
+      };
+
+      onTaskCreated(newTask);
+    } else {
+      // Validation for non-assembly tasks
+      if (!taskData.title.trim() || !taskData.task_type) {
+        toast({
+          title: "Error",
+          description: "Please fill in the title and task type.",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      const newTask: Partial<WorklistTask> = {
+        title: taskData.title.trim(),
+        description: taskData.description.trim() || undefined,
+        task_type: taskData.task_type as WorklistTask['task_type'],
+        priority: taskData.priority as WorklistTask['priority'],
+        assigned_to: taskData.assigned_to || undefined,
+        estimated_time_minutes: taskData.estimated_time_minutes ? parseInt(taskData.estimated_time_minutes) : undefined,
+        due_date: taskData.due_date ? taskData.due_date.toISOString() : undefined,
+        printer_id: taskData.printer_id || undefined,
+        order_number: taskData.order_number.trim() || undefined,
+      };
+
+      onTaskCreated(newTask);
     }
 
-    const newTask: Partial<WorklistTask> = {
-      title: taskData.title.trim(),
-      description: taskData.description.trim() || undefined,
-      task_type: taskData.task_type as WorklistTask['task_type'],
-      priority: taskData.priority as WorklistTask['priority'],
-      assigned_to: taskData.assigned_to || undefined,
-      estimated_time_minutes: taskData.estimated_time_minutes ? parseInt(taskData.estimated_time_minutes) : undefined,
-      due_date: taskData.due_date ? taskData.due_date.toISOString() : undefined,
-      printer_id: taskData.printer_id || undefined,
-      order_number: taskData.order_number.trim() || undefined,
-    };
-
-    onTaskCreated(newTask);
-    
     // Reset form
     setTaskData({
       title: '',
@@ -84,7 +151,14 @@ const CreateTaskModal = ({ isOpen, onClose, onTaskCreated }: CreateTaskModalProp
       printer_id: '',
       order_number: ''
     });
-    
+    setAssemblyData({
+      productId: '',
+      productName: '',
+      skuId: '',
+      sku: '',
+      quantity: '1'
+    });
+
     onClose();
   };
 
@@ -102,7 +176,82 @@ const CreateTaskModal = ({ isOpen, onClose, onTaskCreated }: CreateTaskModalProp
         </DialogHeader>
         
         <div className="grid gap-4 py-4">
-          <div className="grid grid-cols-2 gap-4">
+          {/* Task Type Selection - Always visible */}
+          <div className="space-y-2">
+            <Label htmlFor="task_type">Task Type *</Label>
+            <Select value={taskData.task_type} onValueChange={(value) => setTaskData({ ...taskData, task_type: value })}>
+              <SelectTrigger>
+                <SelectValue placeholder="Select task type" />
+              </SelectTrigger>
+              <SelectContent>
+                {taskTypes.map((type) => {
+                  const Icon = type.icon;
+                  return (
+                    <SelectItem key={type.value} value={type.value}>
+                      <div className="flex items-center gap-2">
+                        <Icon className="h-4 w-4" />
+                        <span>{type.label}</span>
+                      </div>
+                    </SelectItem>
+                  );
+                })}
+              </SelectContent>
+            </Select>
+          </div>
+
+          {/* Assembly-specific fields */}
+          {taskData.task_type === 'assembly' && (
+            <>
+              <ProductSelector
+                value={assemblyData.productId}
+                onValueChange={async (productId) => {
+                  // Fetch product name
+                  try {
+                    const response = await fetch(`/api/products-sync/${productId}`);
+                    if (response.ok) {
+                      const product = await response.json();
+                      setAssemblyData({
+                        ...assemblyData,
+                        productId,
+                        productName: product.name,
+                        skuId: '', // Reset SKU when product changes
+                        sku: ''
+                      });
+                    }
+                  } catch (error) {
+                    console.error('Error fetching product:', error);
+                  }
+                }}
+              />
+
+              <ProductSkuSelector
+                productId={assemblyData.productId}
+                value={assemblyData.skuId}
+                onValueChange={(skuId, skuData) => {
+                  setAssemblyData({
+                    ...assemblyData,
+                    skuId,
+                    sku: skuData.sku
+                  });
+                }}
+              />
+
+              <div className="space-y-2">
+                <Label htmlFor="quantity">Quantity to Assemble *</Label>
+                <Input
+                  id="quantity"
+                  type="number"
+                  min="1"
+                  value={assemblyData.quantity}
+                  onChange={(e) => setAssemblyData({ ...assemblyData, quantity: e.target.value })}
+                  placeholder="e.g. 5"
+                />
+              </div>
+            </>
+          )}
+
+          {/* Generic task fields - Only for non-assembly tasks */}
+          {taskData.task_type !== 'assembly' && taskData.task_type !== '' && (
             <div className="space-y-2">
               <Label htmlFor="title">Title *</Label>
               <Input
@@ -112,29 +261,7 @@ const CreateTaskModal = ({ isOpen, onClose, onTaskCreated }: CreateTaskModalProp
                 placeholder="Enter task title"
               />
             </div>
-            
-            <div className="space-y-2">
-              <Label htmlFor="task_type">Task Type *</Label>
-              <Select value={taskData.task_type} onValueChange={(value) => setTaskData({ ...taskData, task_type: value })}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Select task type" />
-                </SelectTrigger>
-                <SelectContent>
-                  {taskTypes.map((type) => {
-                    const Icon = type.icon;
-                    return (
-                      <SelectItem key={type.value} value={type.value}>
-                        <div className="flex items-center gap-2">
-                          <Icon className="h-4 w-4" />
-                          <span>{type.label}</span>
-                        </div>
-                      </SelectItem>
-                    );
-                  })}
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
+          )}
 
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">

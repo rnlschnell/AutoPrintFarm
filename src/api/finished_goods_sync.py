@@ -24,7 +24,9 @@ class FinishedGoodsCreateRequest(BaseModel):
     material: str = 'PLA'
     current_stock: int = 0
     unit_price: float = 0.0
-    assembly_status: str = 'printed'
+    requires_assembly: bool = False
+    quantity_assembled: int = 0
+    quantity_needs_assembly: int = 0
     low_stock_threshold: int = 5
     quantity_per_sku: int = 1
     extra_cost: float = 0.0
@@ -34,7 +36,9 @@ class FinishedGoodsCreateRequest(BaseModel):
 class FinishedGoodsUpdateRequest(BaseModel):
     current_stock: Optional[int] = None
     unit_price: Optional[float] = None
-    assembly_status: Optional[str] = None
+    requires_assembly: Optional[bool] = None
+    quantity_assembled: Optional[int] = None
+    quantity_needs_assembly: Optional[int] = None
     status: Optional[str] = None
     low_stock_threshold: Optional[int] = None
     quantity_per_sku: Optional[int] = None
@@ -45,6 +49,10 @@ class FinishedGoodsUpdateRequest(BaseModel):
 
 class StockUpdateRequest(BaseModel):
     new_stock: int
+
+class AssemblyStockUpdateRequest(BaseModel):
+    new_quantity: int
+    assembly_type: str  # 'assembled' or 'needs_assembly'
 
 router = APIRouter(
     prefix="/finished-goods-sync",
@@ -147,7 +155,9 @@ async def create_finished_good(request: FinishedGoodsCreateRequest):
             material=request.material,
             current_stock=request.current_stock,
             unit_price=int(request.unit_price * 100),  # Convert to cents
-            assembly_status=request.assembly_status,
+            requires_assembly=request.requires_assembly,
+            quantity_assembled=request.quantity_assembled,
+            quantity_needs_assembly=request.quantity_needs_assembly,
             status='out_of_stock' if request.current_stock == 0 else 'low_stock' if request.current_stock < 5 else 'in_stock',
             low_stock_threshold=request.low_stock_threshold,
             quantity_per_sku=request.quantity_per_sku,
@@ -194,8 +204,12 @@ async def update_finished_good(finished_good_id: str, request: FinishedGoodsUpda
         
         if request.unit_price is not None:
             update_data['unit_price'] = request.unit_price
-        if request.assembly_status is not None:
-            update_data['assembly_status'] = request.assembly_status
+        if request.requires_assembly is not None:
+            update_data['requires_assembly'] = request.requires_assembly
+        if request.quantity_assembled is not None:
+            update_data['quantity_assembled'] = request.quantity_assembled
+        if request.quantity_needs_assembly is not None:
+            update_data['quantity_needs_assembly'] = request.quantity_needs_assembly
         if request.status is not None and 'status' not in update_data:
             update_data['status'] = request.status
         if request.low_stock_threshold is not None:
@@ -233,17 +247,55 @@ async def update_finished_good_stock(finished_good_id: str, request: StockUpdate
     try:
         db_service = await get_database_service()
         result = await db_service.update_finished_good_stock(finished_good_id, request.new_stock)
-        
+
         if not result:
             raise HTTPException(status_code=404, detail="Finished good not found")
-        
+
         logger.info(f"Updated stock for finished good {finished_good_id}: {request.new_stock}")
         return result.to_dict()
-        
+
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Failed to update stock for finished good {finished_good_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.put("/{finished_good_id}/assembly-stock", response_model=dict)
+async def update_finished_good_assembly_stock(finished_good_id: str, request: AssemblyStockUpdateRequest):
+    """
+    Update assembled or needs assembly stock for a finished good
+    """
+    try:
+        db_service = await get_database_service()
+
+        # Get the existing finished good
+        existing_fg = await db_service.get_finished_good_by_id(finished_good_id)
+        if not existing_fg:
+            raise HTTPException(status_code=404, detail="Finished good not found")
+
+        # Update the appropriate quantity field
+        update_data = {'id': finished_good_id, 'updated_at': datetime.utcnow()}
+
+        if request.assembly_type == 'assembled':
+            update_data['quantity_assembled'] = request.new_quantity
+        elif request.assembly_type == 'needs_assembly':
+            update_data['quantity_needs_assembly'] = request.new_quantity
+        else:
+            raise HTTPException(status_code=400, detail="Invalid assembly_type. Must be 'assembled' or 'needs_assembly'")
+
+        # Update in database
+        updated_fg = await db_service.update_finished_good(finished_good_id, update_data)
+
+        if not updated_fg:
+            raise HTTPException(status_code=500, detail="Failed to update assembly stock")
+
+        logger.info(f"Updated {request.assembly_type} stock for finished good {finished_good_id}: {request.new_quantity}")
+        return updated_fg.to_dict() if updated_fg else update_data
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to update assembly stock for finished good {finished_good_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.delete("/{finished_good_id}")

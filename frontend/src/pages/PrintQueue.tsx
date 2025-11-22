@@ -12,7 +12,8 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { usePrintJobs } from "@/hooks/usePrintJobs";
 import { usePrinterWebSocket } from "@/hooks/useWebSocket";
-import { MoreHorizontal, List, Kanban, Plus } from "lucide-react";
+import { usePrinters } from "@/hooks/usePrinters";
+import { MoreHorizontal, List, Kanban, Plus, Check } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -24,8 +25,10 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Progress } from "@/components/ui/progress";
 import JobDetailsModal from "@/components/JobDetailsModal";
 import CancelJobModal from "@/components/CancelJobModal";
+import CompleteJobModal from "@/components/CompleteJobModal";
 import CreateJobModalEnhanced from "@/components/CreateJobModalEnhanced";
 import ColorSwatch from "@/components/ColorSwatch";
+import PrintControlButtons from "@/components/PrintControlButtons";
 
 // Remove old mock data
 
@@ -50,7 +53,7 @@ const getStatusBadge = (status: string) => {
     }
 };
 
-const KanbanColumn = ({ title, jobs, status, onViewDetails, onCancelJob }: { title: string; jobs: any[]; status: string; onViewDetails: (job: any) => void; onCancelJob: (job: any) => void; }) => {
+const KanbanColumn = ({ title, jobs, status, onViewDetails, onCancelJob, onCompleteJob, getPrinterNumericId }: { title: string; jobs: any[]; status: string; onViewDetails: (job: any) => void; onCancelJob: (job: any) => void; onCompleteJob: (job: any) => void; getPrinterNumericId: (printerUuid: string) => string; }) => {
   const filteredJobs = jobs.filter(job => job.status.toLowerCase() === status.toLowerCase());
   
   return (
@@ -77,26 +80,41 @@ const KanbanColumn = ({ title, jobs, status, onViewDetails, onCancelJob }: { tit
               </CardDescription>
             </CardHeader>
             <CardContent className="pb-3">
-              {job.status === 'Printing' && (
-                <div className="flex items-center gap-2 mb-2">
-                  <Progress value={job.progress} className="flex-1" />
-                  <span className="text-xs text-muted-foreground">{job.progress}%</span>
-                </div>
-              )}
+              <div className="flex items-center gap-2 mb-2">
+                <Progress value={job.progressPercentage || 0} className="flex-1" />
+                <span className="text-xs text-muted-foreground">{job.progressPercentage || 0}%</span>
+                <PrintControlButtons
+                  printerId={getPrinterNumericId(job.printerId || '')}
+                  status={job.liveData?.status || job.status}
+                />
+              </div>
               <div className="flex justify-between items-center">
                 {getStatusBadge(job.status)}
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button aria-haspopup="true" size="icon" variant="ghost" className="h-6 w-6">
-                      <MoreHorizontal className="h-3 w-3" />
+                <div className="flex items-center gap-1">
+                  {job.status.toLowerCase() === 'completed' && (
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      onClick={() => onCompleteJob(job)}
+                      className="h-6 w-6 text-green-600 hover:text-green-700 hover:bg-green-50"
+                      title="Complete & Remove Job"
+                    >
+                      <Check className="h-3 w-3" />
                     </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end">
-                    <DropdownMenuLabel>Actions</DropdownMenuLabel>
-                    <DropdownMenuItem onClick={() => onViewDetails(job)}>View Details</DropdownMenuItem>
-                    <DropdownMenuItem onClick={() => onCancelJob(job)}>Cancel Job</DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
+                  )}
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button aria-haspopup="true" size="icon" variant="ghost" className="h-6 w-6">
+                        <MoreHorizontal className="h-3 w-3" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
+                      <DropdownMenuLabel>Actions</DropdownMenuLabel>
+                      <DropdownMenuItem onClick={() => onViewDetails(job)}>View Details</DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => onCancelJob(job)}>Cancel Job</DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </div>
               </div>
             </CardContent>
           </Card>
@@ -109,10 +127,18 @@ const KanbanColumn = ({ title, jobs, status, onViewDetails, onCancelJob }: { tit
 const PrintQueue = () => {
   const { printJobs: jobs, loading, addPrintJob } = usePrintJobs();
   const { data: liveData } = usePrinterWebSocket(); // Get live printer data
+  const { printers } = usePrinters(); // Get printer data for ID lookup
   const [viewMode, setViewMode] = useState<'table' | 'kanban'>('table');
+
+  // Create printer UUID to numeric ID lookup map
+  const getPrinterNumericId = (printerUuid: string) => {
+    const printer = printers.find(p => p.id === printerUuid);
+    return printer?.printerId?.toString() || '';
+  };
   const [selectedJob, setSelectedJob] = useState(null);
   const [isDetailsModalOpen, setIsDetailsModalOpen] = useState(false);
   const [isCancelModalOpen, setIsCancelModalOpen] = useState(false);
+  const [isCompleteModalOpen, setIsCompleteModalOpen] = useState(false);
   const [isCreateJobModalOpen, setIsCreateJobModalOpen] = useState(false);
 
   const handleViewDetails = (job: any) => {
@@ -125,6 +151,11 @@ const PrintQueue = () => {
     setIsCancelModalOpen(true);
   };
 
+  const handleCompleteJob = (job: any) => {
+    setSelectedJob(job);
+    setIsCompleteModalOpen(true);
+  };
+
   const handleJobCreated = () => {
     // Jobs will automatically appear via real-time subscription
     // No need to manually refresh
@@ -134,22 +165,60 @@ const PrintQueue = () => {
   // Enhanced jobs with optional live data overlay for immediate feedback
   const getEnhancedJobs = () => {
     const enhancedJobs = [...jobs]; // Start with database jobs (now kept up-to-date by backend sync service)
-    
+
     if (liveData) {
       // Add live data overlay for immediate feedback (before database sync catches up)
       enhancedJobs.forEach(job => {
-        const liveInfo = liveData.find(live => 
-          live.current_job?.filename === job.fileName &&
-          live.printer_id === job.printerId?.toString()
-        );
-        
-        if (liveInfo && liveInfo.status === 'printing') {
-          // Only overlay live progress if it's more recent than database
-          const liveProgress = liveInfo.progress?.percentage || 0;
-          if (liveProgress > job.progressPercentage) {
-            job.progressPercentage = liveProgress;
+        // Skip completed/failed/cancelled jobs - they should not be updated by live data
+        if (job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled') {
+          return;
+        }
+
+        // For printing jobs, match by printer ID only (the printing job IS the current job)
+        // For other jobs, also match filename to avoid false matches
+        const liveInfo = liveData.find(live => {
+          if (live.printer_id !== getPrinterNumericId(job.printerId || '')) {
+            return false;
           }
-          job.liveData = liveInfo; // Store for additional UI info like layer count
+          // If job is printing, match by printer ID alone
+          if (job.status === 'printing') {
+            return true;
+          }
+          // For other statuses, also verify filename
+          return live.current_job?.filename === job.fileName;
+        });
+
+        // Handle all status transitions for active jobs only
+        if (liveInfo) {
+          // Store live data for additional UI info
+          job.liveData = liveInfo;
+
+          // Update progress based on live data (copying successful pattern from Printers page)
+          if (liveInfo.status === 'printing') {
+            // Update progress if live data is more recent
+            const liveProgress = liveInfo.progress?.percent || 0;
+            if (liveProgress > job.progressPercentage) {
+              job.progressPercentage = liveProgress;
+            }
+          } else if (liveInfo.status === 'paused') {
+            // Update job status to paused for UI responsiveness
+            job.status = 'paused';
+          } else if (liveInfo.status === 'idle' && job.status === 'printing') {
+            // Job completed: printer went from printing to idle
+            job.status = 'completed';
+            job.progressPercentage = 100; // Ensure 100% completion
+          }
+        } else if (job.status === 'printing') {
+          // No live data for a printing job - check if printer is idle
+          const printerLiveData = liveData.find(live =>
+            live.printer_id === job.printerId?.toString()
+          );
+
+          if (printerLiveData && printerLiveData.status === 'idle' && !printerLiveData.current_job) {
+            // Printer is idle with no current job - job completed
+            job.status = 'completed';
+            job.progressPercentage = 100;
+          }
         }
       });
       
@@ -167,12 +236,12 @@ const PrintQueue = () => {
               id: `external_${live.printer_id}`,
               fileName: live.current_job.filename,
               status: 'printing',
-              progressPercentage: live.progress?.percentage || 0,
+              progressPercentage: live.progress?.percent || 0,
               printerId: parseInt(live.printer_id),
               color: 'Unknown|#808080',
               filamentType: 'Unknown',
               materialType: 'Unknown',
-              numberOfUnits: 1,
+              quantityPerPrint: 1,
               priority: 0,
               timeSubmitted: new Date().toISOString(),
               tenantId: '',
@@ -191,8 +260,6 @@ const PrintQueue = () => {
 
   const statusColumns = [
     { title: 'Queued', status: 'queued' },
-    { title: 'Processing', status: 'processing' },
-    { title: 'Uploaded', status: 'uploaded' },
     { title: 'Printing', status: 'printing' },
     { title: 'Completed', status: 'completed' },
     { title: 'Failed', status: 'failed' },
@@ -239,10 +306,12 @@ const PrintQueue = () => {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>File Name</TableHead>
-                  <TableHead>Status</TableHead>
+                  <TableHead>Product</TableHead>
+                  <TableHead>SKU</TableHead>
                   <TableHead className="hidden md:table-cell">Color</TableHead>
+                  <TableHead>Number of Units</TableHead>
                   <TableHead>Progress</TableHead>
+                  <TableHead>Status</TableHead>
                   <TableHead>
                     <span className="sr-only">Actions</span>
                   </TableHead>
@@ -251,21 +320,26 @@ const PrintQueue = () => {
               <TableBody>
                 {enhancedJobs.map((job) => (
                   <TableRow key={job.id}>
-                    <TableCell 
-                      className="font-medium truncate max-w-48 cursor-pointer hover:text-primary" 
+                    <TableCell
+                      className="font-medium truncate max-w-48 cursor-pointer hover:text-primary"
                       onClick={() => handleViewDetails(job)}
                     >
-                      {job.fileName}
+                      {job.productName || '-'}
                       {job.isExternalJob && (
                         <span className="ml-2 text-xs bg-blue-100 text-blue-800 px-1 rounded">Live</span>
                       )}
                     </TableCell>
-                    <TableCell>{getStatusBadge(job.status)}</TableCell>
+                    <TableCell>
+                      <span className="text-sm">{job.skuName || '-'}</span>
+                    </TableCell>
                     <TableCell className="hidden md:table-cell">
                       <div className="flex items-center gap-2">
                         <ColorSwatch color={job.color} size="sm" />
                         <span className="text-sm">{job.color.split('|')[0]}</span>
                       </div>
+                    </TableCell>
+                    <TableCell>
+                      <span className="text-sm">{job.quantityPerPrint || 1}</span>
                     </TableCell>
                     <TableCell>
                         <div className="flex items-center gap-2">
@@ -276,24 +350,42 @@ const PrintQueue = () => {
                                 ({job.liveData.progress.current_layer}/{job.liveData.progress.total_layers})
                               </span>
                             )}
+                            <PrintControlButtons
+                              printerId={getPrinterNumericId(job.printerId || '')}
+                              status={job.liveData?.status || job.status}
+                            />
                         </div>
                     </TableCell>
+                    <TableCell>{getStatusBadge(job.status)}</TableCell>
                     <TableCell>
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                          <Button aria-haspopup="true" size="icon" variant="ghost">
-                            <MoreHorizontal className="h-4 w-4" />
-                            <span className="sr-only">Toggle menu</span>
+                      <div className="flex items-center gap-2">
+                        {job.status.toLowerCase() === 'completed' && (
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            onClick={() => handleCompleteJob(job)}
+                            className="h-8 w-8 text-green-600 hover:text-green-700 hover:bg-green-50"
+                            title="Complete & Remove Job"
+                          >
+                            <Check className="h-4 w-4" />
                           </Button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end">
-                          <DropdownMenuLabel>Actions</DropdownMenuLabel>
-                          <DropdownMenuItem onClick={() => handleViewDetails(job)}>View Details</DropdownMenuItem>
-                          {!job.isExternalJob && (
-                            <DropdownMenuItem onClick={() => handleCancelJob(job)}>Cancel Job</DropdownMenuItem>
-                          )}
-                        </DropdownMenuContent>
-                      </DropdownMenu>
+                        )}
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button aria-haspopup="true" size="icon" variant="ghost">
+                              <MoreHorizontal className="h-4 w-4" />
+                              <span className="sr-only">Toggle menu</span>
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end">
+                            <DropdownMenuLabel>Actions</DropdownMenuLabel>
+                            <DropdownMenuItem onClick={() => handleViewDetails(job)}>View Details</DropdownMenuItem>
+                            {!job.isExternalJob && (
+                              <DropdownMenuItem onClick={() => handleCancelJob(job)}>Cancel Job</DropdownMenuItem>
+                            )}
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </div>
                     </TableCell>
                   </TableRow>
                 ))}
@@ -311,6 +403,8 @@ const PrintQueue = () => {
               status={column.status}
               onViewDetails={handleViewDetails}
               onCancelJob={handleCancelJob}
+              onCompleteJob={handleCompleteJob}
+              getPrinterNumericId={getPrinterNumericId}
             />
           ))}
         </div>
@@ -326,6 +420,12 @@ const PrintQueue = () => {
         job={selectedJob}
         isOpen={isCancelModalOpen}
         onClose={() => setIsCancelModalOpen(false)}
+      />
+
+      <CompleteJobModal
+        job={selectedJob}
+        isOpen={isCompleteModalOpen}
+        onClose={() => setIsCompleteModalOpen(false)}
       />
 
       <CreateJobModalEnhanced

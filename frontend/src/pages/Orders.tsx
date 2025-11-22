@@ -7,15 +7,18 @@ import { Button } from "@/components/ui/button";
 import { useOrders } from "@/hooks/useOrders";
 import { ShoppingCart, DollarSign, Package, Eye, Calendar } from "lucide-react";
 import OrderDetailsModal from "@/components/OrderDetailsModal";
+import ShopifyConnectModal from "@/components/ShopifyConnectModal";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Calendar as CalendarComponent } from "@/components/ui/calendar";
 import { format, subDays, isWithinInterval, parseISO } from "date-fns";
+import { formatCurrency, formatNumber } from "@/lib/utils";
 
 const OrdersPage = () => {
   const { orders, loading } = useOrders();
   const [selectedOrder, setSelectedOrder] = useState<any | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isShopifyModalOpen, setIsShopifyModalOpen] = useState(false);
   const [dateRange, setDateRange] = useState<'all' | '7days' | '30days'>('all');
   const [customDateRange, setCustomDateRange] = useState<{
     from: Date | undefined;
@@ -113,11 +116,11 @@ const OrdersPage = () => {
         <CardContent className="pt-6">
           <div className="mb-4 grid gap-4 md:grid-cols-2">
             <div className="text-center p-4 bg-muted rounded-lg">
-              <div className="text-2xl font-bold">${totalRevenue.toFixed(2)}</div>
+              <div className="text-2xl font-bold">{formatCurrency(totalRevenue)}</div>
               <div className="text-sm text-muted-foreground">Total Revenue</div>
             </div>
             <div className="text-center p-4 bg-muted rounded-lg">
-              <div className="text-2xl font-bold">{totalUnits}</div>
+              <div className="text-2xl font-bold">{formatNumber(totalUnits)}</div>
               <div className="text-sm text-muted-foreground">Total Units</div>
             </div>
           </div>
@@ -171,7 +174,7 @@ const OrdersPage = () => {
                       {order.status}
                     </Badge>
                   </TableCell>
-                  <TableCell className="font-medium">${parseFloat(order.totalRevenue?.toString() || '0').toFixed(2)}</TableCell>
+                  <TableCell className="font-medium">{formatCurrency(parseFloat(order.totalRevenue?.toString() || '0'))}</TableCell>
                   <TableCell>
                     <ul className="text-sm">
                       {order.items?.map(item => (
@@ -260,7 +263,7 @@ const OrdersPage = () => {
             <ShoppingCart className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{totalOpenOrders}</div>
+            <div className="text-2xl font-bold">{formatNumber(totalOpenOrders)}</div>
             <p className="text-xs text-muted-foreground">Across all sales channels</p>
           </CardContent>
         </Card>
@@ -271,7 +274,7 @@ const OrdersPage = () => {
             <DollarSign className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">${allOrdersStats.totalRevenue.toFixed(2)}</div>
+            <div className="text-2xl font-bold">{formatCurrency(allOrdersStats.totalRevenue)}</div>
             <p className="text-xs text-muted-foreground">For selected period</p>
           </CardContent>
         </Card>
@@ -282,7 +285,7 @@ const OrdersPage = () => {
             <Package className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{allOrdersStats.totalUnits}</div>
+            <div className="text-2xl font-bold">{formatNumber(allOrdersStats.totalUnits)}</div>
             <p className="text-xs text-muted-foreground">Total items shipped</p>
           </CardContent>
         </Card>
@@ -295,7 +298,17 @@ const OrdersPage = () => {
           <TabsTrigger value="Etsy">Etsy</TabsTrigger>
         </TabsList>
         <TabsContent value="All">{renderOrdersTable(ordersBySource('All'))}</TabsContent>
-        <TabsContent value="Shopify">{renderOrdersTable(ordersBySource('Shopify'))}</TabsContent>
+        <TabsContent value="Shopify">
+          <div className="mb-4 flex justify-end">
+            <Button
+              onClick={() => setIsShopifyModalOpen(true)}
+              className="bg-[#96bf48] hover:bg-[#7ea63a] text-white"
+            >
+              Connect Shopify
+            </Button>
+          </div>
+          {renderOrdersTable(ordersBySource('Shopify'))}
+        </TabsContent>
         <TabsContent value="Etsy">{renderOrdersTable(ordersBySource('Etsy'))}</TabsContent>
       </Tabs>
 
@@ -303,6 +316,11 @@ const OrdersPage = () => {
         order={selectedOrder}
         isOpen={isModalOpen}
         onClose={() => setIsModalOpen(false)}
+      />
+
+      <ShopifyConnectModal
+        isOpen={isShopifyModalOpen}
+        onClose={() => setIsShopifyModalOpen(false)}
       />
     </div>
   );

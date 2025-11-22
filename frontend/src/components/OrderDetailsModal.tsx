@@ -20,11 +20,40 @@ const OrderDetailsModal = ({
   } = useToast();
   if (!order) return null;
   const copyToClipboard = (text: string, label: string) => {
-    navigator.clipboard.writeText(text);
-    toast({
-      title: "Copied to clipboard",
-      description: `${label} copied successfully`
-    });
+    // Check if Clipboard API is available (HTTPS/localhost only)
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text);
+      toast({
+        title: "Copied to clipboard",
+        description: `${label} copied successfully`
+      });
+    } else {
+      // Fallback for HTTP contexts using execCommand
+      const textArea = document.createElement("textarea");
+      textArea.value = text;
+      textArea.style.position = "fixed";
+      textArea.style.left = "-999999px";
+      textArea.style.top = "-999999px";
+      document.body.appendChild(textArea);
+      textArea.focus();
+      textArea.select();
+
+      try {
+        document.execCommand('copy');
+        toast({
+          title: "Copied to clipboard",
+          description: `${label} copied successfully`
+        });
+      } catch (err) {
+        toast({
+          title: "Copy failed",
+          description: "Please copy manually",
+          variant: "destructive"
+        });
+      }
+
+      document.body.removeChild(textArea);
+    }
   };
   return <Dialog open={isOpen} onOpenChange={onClose}>
       <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto">

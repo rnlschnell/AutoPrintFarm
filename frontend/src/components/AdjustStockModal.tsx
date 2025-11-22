@@ -5,7 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useToast } from "@/hooks/use-toast";
 import { Package } from "lucide-react";
 
@@ -13,13 +13,22 @@ interface AdjustStockModalProps {
   product: any | null;
   isOpen: boolean;
   onClose: () => void;
-  onAdjust: (productId: string, newQuantity: number) => void;
+  onAdjust: (productId: string, newQuantity: number, assemblyType?: 'assembled' | 'needs_assembly') => void;
+  initialAssemblyType?: 'assembled' | 'needs_assembly';
 }
 
-const AdjustStockModal = ({ product, isOpen, onClose, onAdjust }: AdjustStockModalProps) => {
+const AdjustStockModal = ({ product, isOpen, onClose, onAdjust, initialAssemblyType }: AdjustStockModalProps) => {
   const { toast } = useToast();
   const [adjustmentType, setAdjustmentType] = useState<'add' | 'remove' | 'set'>('add');
   const [adjustmentAmount, setAdjustmentAmount] = useState('');
+  const [assemblyType, setAssemblyType] = useState<'assembled' | 'needs_assembly'>(initialAssemblyType || 'assembled');
+
+  // Update assembly type when initialAssemblyType changes or modal opens
+  useEffect(() => {
+    if (isOpen && initialAssemblyType) {
+      setAssemblyType(initialAssemblyType);
+    }
+  }, [isOpen, initialAssemblyType]);
   
 
   const handleAdjust = () => {
@@ -33,7 +42,8 @@ const AdjustStockModal = ({ product, isOpen, onClose, onAdjust }: AdjustStockMod
     }
 
     const amount = parseInt(adjustmentAmount);
-    let newQuantity = product.quantity;
+    const currentQuantity = assemblyType === 'assembled' ? product.quantityAssembled : product.quantityNeedsAssembly;
+    let newQuantity = currentQuantity;
 
     switch (adjustmentType) {
       case 'add':
@@ -47,13 +57,13 @@ const AdjustStockModal = ({ product, isOpen, onClose, onAdjust }: AdjustStockMod
         break;
     }
 
-    onAdjust(product.id, newQuantity);
+    onAdjust(product.id, newQuantity, assemblyType);
     setAdjustmentAmount('');
     onClose();
 
     toast({
       title: "Stock Adjusted",
-      description: `Stock for ${product.name} has been updated to ${newQuantity} units.`,
+      description: `${assemblyType === 'assembled' ? 'Assembled' : 'Needs Assembly'} stock for ${product.name} has been updated to ${newQuantity} units.`,
     });
   };
 
@@ -68,10 +78,24 @@ const AdjustStockModal = ({ product, isOpen, onClose, onAdjust }: AdjustStockMod
             Adjust Stock - {product.name}
           </DialogTitle>
           <DialogDescription>
-            Current stock: {product.quantity} units
+            Total stock: {product.quantity} units (Assembled: {product.quantityAssembled}, Needs Assembly: {product.quantityNeedsAssembly})
           </DialogDescription>
         </DialogHeader>
         <div className="grid gap-4 py-4">
+          <div className="grid grid-cols-4 items-center gap-4">
+            <Label htmlFor="assembly-type" className="text-right">
+              Type *
+            </Label>
+            <Select value={assemblyType} onValueChange={(value: 'assembled' | 'needs_assembly') => setAssemblyType(value)}>
+              <SelectTrigger className="col-span-3">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="assembled">Assembled</SelectItem>
+                <SelectItem value="needs_assembly">Needs Assembly</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
           <div className="grid grid-cols-4 items-center gap-4">
             <Label htmlFor="adjustment-type" className="text-right">
               Action *

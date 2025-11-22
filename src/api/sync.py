@@ -442,10 +442,10 @@ async def get_printer_connections():
 async def test_printer_connection(printer_id: int):
     """
     Test connection to a specific printer
-    
+
     Args:
-        printer_id: The Supabase printer_id to test
-        
+        printer_id: The printer_id to test
+
     Returns:
         Detailed test results including validation and connection status
     """

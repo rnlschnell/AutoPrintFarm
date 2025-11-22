@@ -853,98 +853,7 @@ export type Database = {
           },
         ]
       }
-      printers: {
-        Row: {
-          access_code: string | null
-          connection_error: string | null
-          connection_type: string | null
-          created_at: string | null
-          current_color: string | null
-          current_color_hex: string | null
-          current_filament_type: string | null
-          firmware_version: string | null
-          id: string
-          ip_address: string | null
-          is_active: boolean | null
-          is_connected: boolean | null
-          last_connection_attempt: string | null
-          last_maintenance_date: string | null
-          location: string | null
-          manufacturer: string | null
-          model: string
-          name: string
-          printer_id: number | null
-          serial_number: string | null
-          sort_order: number | null
-          status: string | null
-          tenant_id: string
-          total_print_time: number | null
-          updated_at: string | null
-        }
-        Insert: {
-          access_code?: string | null
-          connection_error?: string | null
-          connection_type?: string | null
-          created_at?: string | null
-          current_color?: string | null
-          current_color_hex?: string | null
-          current_filament_type?: string | null
-          firmware_version?: string | null
-          id?: string
-          ip_address?: string | null
-          is_active?: boolean | null
-          is_connected?: boolean | null
-          last_connection_attempt?: string | null
-          last_maintenance_date?: string | null
-          location?: string | null
-          manufacturer?: string | null
-          model: string
-          name: string
-          printer_id?: number | null
-          serial_number?: string | null
-          sort_order?: number | null
-          status?: string | null
-          tenant_id: string
-          total_print_time?: number | null
-          updated_at?: string | null
-        }
-        Update: {
-          access_code?: string | null
-          connection_error?: string | null
-          connection_type?: string | null
-          created_at?: string | null
-          current_color?: string | null
-          current_color_hex?: string | null
-          current_filament_type?: string | null
-          firmware_version?: string | null
-          id?: string
-          ip_address?: string | null
-          is_active?: boolean | null
-          is_connected?: boolean | null
-          last_connection_attempt?: string | null
-          last_maintenance_date?: string | null
-          location?: string | null
-          manufacturer?: string | null
-          model?: string
-          name?: string
-          printer_id?: number | null
-          serial_number?: string | null
-          sort_order?: number | null
-          status?: string | null
-          tenant_id?: string
-          total_print_time?: number | null
-          updated_at?: string | null
-        }
-        Relationships: [
-          {
-            foreignKeyName: "printers_tenant_id_fkey"
-            columns: ["tenant_id"]
-            isOneToOne: false
-            referencedRelation: "tenants"
-            referencedColumns: ["id"]
-          },
-        ]
-      }
+      // NOTE: printers table removed - printers are LOCAL-ONLY (not synced to Supabase)
       product_components: {
         Row: {
           component_name: string
@@ -1084,6 +993,51 @@ export type Database = {
           requires_assembly?: boolean | null
           tenant_id?: string
           updated_at?: string | null
+        }
+        Relationships: []
+      }
+      product_wikis: {
+        Row: {
+          id: string
+          tenant_id: string
+          title: string
+          description: string | null
+          estimated_time_minutes: number | null
+          difficulty: 'easy' | 'medium' | 'hard' | null
+          tools_required: Json | null
+          sections: Json
+          product_id: string | null
+          sku_id: string | null
+          created_at: string
+          updated_at: string
+        }
+        Insert: {
+          id?: string
+          tenant_id: string
+          title: string
+          description?: string | null
+          estimated_time_minutes?: number | null
+          difficulty?: 'easy' | 'medium' | 'hard' | null
+          tools_required?: Json | null
+          sections?: Json
+          product_id?: string | null
+          sku_id?: string | null
+          created_at?: string
+          updated_at?: string
+        }
+        Update: {
+          id?: string
+          tenant_id?: string
+          title?: string
+          description?: string | null
+          estimated_time_minutes?: number | null
+          difficulty?: 'easy' | 'medium' | 'hard' | null
+          tools_required?: Json | null
+          sections?: Json
+          product_id?: string | null
+          sku_id?: string | null
+          created_at?: string
+          updated_at?: string
         }
         Relationships: []
       }
@@ -1239,10 +1193,7 @@ export type Database = {
         Args: { company_name_input: string }
         Returns: string
       }
-      get_next_printer_id: {
-        Args: { p_tenant_id: string }
-        Returns: number
-      }
+      // NOTE: get_next_printer_id removed - printers are LOCAL-ONLY (not synced to Supabase)
       get_user_tenant_id: {
         Args: Record<PropertyKey, never>
         Returns: string
