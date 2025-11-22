@@ -1,0 +1,34 @@
+[Unit]
+Description=Bambu Program API Service
+Documentation=https://github.com/rnlschnell/AutoPrintFarm
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/PrintFarmSoftware
+Environment=PATH=/home/pi/PrintFarmSoftware/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# First boot delay - check if resize2fs_once has run
+ExecStartPre=/bin/bash -c 'if [ ! -f /tmp/bambu-first-boot-done ]; then echo "First boot detected, waiting for system to settle..."; sleep 30; touch /tmp/bambu-first-boot-done; fi'
+ExecStart=/home/pi/PrintFarmSoftware/venv/bin/python /home/pi/PrintFarmSoftware/src/main.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bambu-program
+
+# Security measures (relaxed for initial setup)
+NoNewPrivileges=true
+PrivateTmp=false
+ProtectSystem=false
+ProtectHome=false
+ReadWritePaths=/home/pi/PrintFarmSoftware
+
+# Resource limits
+LimitNOFILE=1024
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target
