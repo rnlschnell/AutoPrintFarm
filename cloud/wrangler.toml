@@ -74,7 +74,16 @@ queue = "notifications"
 binding = "SHOPIFY_SYNC"
 queue = "shopify-sync"
 
-# Queue consumers will be configured in later phases
+# ============================================================================
+# Queue Consumer Bindings
+# ============================================================================
+# File processing queue consumer (Phase 6)
+[[queues.consumers]]
+queue = "file-processing"
+max_batch_size = 10
+max_batch_timeout = 30
+
+# Future queue consumers (will be configured in later phases)
 # [[queues.consumers]]
 # queue = "print-events"
 # max_batch_size = 10
@@ -101,9 +110,14 @@ ENVIRONMENT = "development"
 API_VERSION = "v1"
 
 # Secrets (set via wrangler secret put):
-# - JWT_SECRET: Secret key for JWT token signing
+# - JWT_SECRET: Secret key for JWT token signing (legacy, use BETTER_AUTH_SECRET)
+# - BETTER_AUTH_SECRET: Secret key for Better Auth (REQUIRED)
 # - SHOPIFY_API_KEY: Shopify integration API key (optional)
 # - SHOPIFY_API_SECRET: Shopify integration secret (optional)
+
+# Better Auth Configuration
+# BETTER_AUTH_URL will default to the request origin if not set
+# TRUSTED_ORIGINS is a comma-separated list of allowed origins for CORS
 
 # ============================================================================
 # Development Environment

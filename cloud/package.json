@@ -10,11 +10,16 @@
     "cf-typegen": "wrangler types"
   },
   "dependencies": {
+    "better-auth": "^1.4.1",
+    "fflate": "^0.8.2",
     "hono": "^4.6.0",
+    "kysely": "^0.28.8",
+    "kysely-d1": "^0.4.0",
     "nanoid": "^5.0.9",
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@better-auth/cli": "^1.4.1",
     "@cloudflare/workers-types": "^4.20241127.0",
     "typescript": "^5.7.0",
     "wrangler": "^3.91.0"

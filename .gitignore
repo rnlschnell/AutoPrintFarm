@@ -35,8 +35,12 @@ venv.bak/
 .env.local
 .env.*.local
 
-# Node.js Frontend
+# Node.js
+node_modules/
 frontend/node_modules/
+cloud/node_modules/
+
+# Node.js Frontend
 frontend/.vite/
 frontend/dist/
 frontend/.env
@@ -86,3 +90,9 @@ test_*.py
 data/tenant.db.backup*
 data/backups/*.db
 data/old_empty_databases/
+
+# Cloudflare Wrangler
+.dev.vars
+cloud/.dev.vars
+cloud/.wrangler/
+.wrangler/

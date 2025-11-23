@@ -7,7 +7,20 @@
       "Bash(npx wrangler:*)",
       "Bash(git add:*)",
       "Bash(git reset:*)",
-      "Bash(cat:*)"
+      "Bash(cat:*)",
+      "Bash(nul)",
+      "WebSearch",
+      "Bash(timeout 15 npx wrangler dev:*)",
+      "Bash(curl:*)",
+      "Bash(powershell:*)",
+      "WebFetch(domain:www.better-auth.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:hono.dev)",
+      "Bash(npm install:*)",
+      "Bash(.gitignore)",
+      "Bash(npm run typecheck:*)",
+      "Bash(/tmp/signup.json)",
+      "Bash(node test-auth.mjs:*)"
     ],
     "deny": [],
     "ask": []

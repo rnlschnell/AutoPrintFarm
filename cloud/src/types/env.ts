@@ -69,6 +69,48 @@ export interface Env {
   JWT_SECRET?: string;
   SHOPIFY_API_KEY?: string;
   SHOPIFY_API_SECRET?: string;
+
+  // Better Auth Configuration
+  BETTER_AUTH_SECRET: string; // Required: `wrangler secret put BETTER_AUTH_SECRET`
+  BETTER_AUTH_URL?: string; // Base URL for auth (defaults to request origin)
+  TRUSTED_ORIGINS?: string; // Comma-separated list of trusted origins for CORS
+
+  // Encryption Key (for printer access codes, etc.)
+  ENCRYPTION_KEY: string; // Required: `wrangler secret put ENCRYPTION_KEY`
+}
+
+/**
+ * Request-scoped variables attached during middleware processing
+ */
+export interface RequestVariables {
+  /** Current authenticated user ID */
+  userId?: string;
+
+  /** Current authenticated user object */
+  user?: {
+    id: string;
+    email: string;
+    full_name: string;
+  };
+
+  /** Current tenant ID (from auth or header) */
+  tenantId?: string;
+
+  /** Current tenant object */
+  tenant?: {
+    id: string;
+    subdomain: string;
+    company_name: string;
+  };
+
+  /** Current user's role in the tenant */
+  userRole?: "owner" | "admin" | "operator" | "viewer";
+
+  /** Request ID for tracing */
+  requestId?: string;
+
+  /** Request start time for logging */
+  requestStartTime?: number;
 }
 
 /**
@@ -76,10 +118,5 @@ export interface Env {
  */
 export type HonoEnv = {
   Bindings: Env;
-  Variables: {
-    // Add request-scoped variables here as they're implemented
-    // tenantId?: string;
-    // userId?: string;
-    // userRole?: string;
-  };
+  Variables: RequestVariables;
 };
