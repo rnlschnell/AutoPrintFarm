@@ -1,8 +1,0 @@
-{
-  "type": "machine",
-  "machine_gcode": {
-    "before_layer_change_gcode": "",
-    "after_layer_change_gcode": ""
-  },
-  "use_relative_e_distances": false
-}

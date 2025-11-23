@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install)",
+      "Bash(npx tsc:*)",
+      "Bash(npx wrangler d1 create printfarm)",
+      "Bash(npx wrangler:*)",
+      "Bash(git add:*)",
+      "Bash(git reset:*)",
+      "Bash(cat:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

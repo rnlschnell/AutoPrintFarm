@@ -1,6 +1,9 @@
 # ESP32 Cloud Architecture Specification
 # Print Farm Management System
 
+> **Related Documentation**: This document focuses on ESP32 hub hardware and firmware.
+> See `PRINTFARM_CLOUD_ARCHITECTURE.md` for the complete system architecture, D1 schema, and feature documentation.
+
 ## Executive Summary
 
 This document specifies a cloud-native print farm management system using ESP32 microcontrollers as local hubs that bridge 3D printers to a centralized cloud platform. The architecture prioritizes:
@@ -162,25 +165,35 @@ The ESP32 firmware has a single purpose: **Bridge communication between printers
    - Heartbeat/ping-pong for connection health
    - Binary message support for efficiency
 
-5. **MQTT Manager**
-   - Connect to up to 5 Bambu printers simultaneously
-   - Handle Bambu's TLS requirements
-   - Parse printer status messages
-   - Send print commands to printers
+5. **MQTT Manager** (Bambu Lab Printers)
+   - Connect to up to 5 Bambu printers simultaneously via MQTT over TLS (port 8883)
+   - Handle Bambu's TLS requirements and authentication
+   - Subscribe to `device/{serial}/report` for status updates
+   - Publish to `device/{serial}/request` for commands
+   - Parse printer status messages (gcode_state, progress, layer, temperature, etc.)
 
-6. **Protocol Bridge**
-   - Translate cloud commands → MQTT messages
+6. **FTP Manager** (Bambu Lab File Transfers)
+   - FTPS connection to Bambu printers (port 990)
+   - Download 3MF files from cloud (R2 presigned URL)
+   - Upload files to printer's SD card
+   - Chunked transfer for large files (3MF can be 5-50MB)
+   - Progress reporting to cloud
+   - Resume/retry on connection interruption
+
+7. **Protocol Bridge**
+   - Translate cloud commands → MQTT/FTP operations
    - Translate MQTT status → cloud messages
    - Queue messages when connectivity is interrupted
    - Handle message ordering and deduplication
+   - Protocol abstraction for future printer support (Prusa HTTP, OctoPrint, Klipper)
 
-7. **OTA Updater**
+8. **OTA Updater**
    - Check for firmware updates on cloud connect
    - Download and verify firmware images
    - Dual-partition OTA for rollback safety
    - Report update status to cloud
 
-8. **Watchdog Manager**
+9. **Watchdog Manager**
    - Hardware watchdog for crash recovery
    - Software watchdog for task monitoring
    - Automatic restart on hung tasks
@@ -347,215 +360,57 @@ interface PrinterPassthrough {
 
 #### Database Schema (D1)
 
+> **Note**: The complete D1 database schema is documented in `PRINTFARM_CLOUD_ARCHITECTURE.md`.
+> This section provides a summary of the hub-relevant tables.
+
+**Key Design Decisions**:
+- Multi-tenancy via `tenant_id` column on all tables
+- All timestamps stored as INTEGER (Unix epoch milliseconds)
+- UUIDs stored as TEXT
+- Booleans stored as INTEGER (0/1)
+
+**Hub-Relevant Tables**:
+
+| Table | Purpose |
+|-------|---------|
+| `tenants` | Multi-tenant organizations |
+| `users` | User accounts |
+| `tenant_members` | User-tenant membership with roles (owner, admin, operator, viewer) |
+| `hubs` | ESP32 hub registration and status |
+| `printers` | Printer configuration, status, and maintenance tracking |
+| `print_files` | 3MF file metadata and R2 references |
+| `print_jobs` | Print job queue, progress, and history |
+| `cameras` | Camera configurations linked to printers/hubs |
+
+**Hub Table Schema** (for reference):
 ```sql
--- Organizations (multi-tenancy)
-CREATE TABLE organizations (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    slug TEXT UNIQUE NOT NULL,
-    subscription_tier TEXT DEFAULT 'free',
-    subscription_status TEXT DEFAULT 'active',
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
-);
-
--- Users
-CREATE TABLE users (
-    id TEXT PRIMARY KEY,
-    email TEXT UNIQUE NOT NULL,
-    password_hash TEXT,
-    name TEXT,
-    avatar_url TEXT,
-    email_verified INTEGER DEFAULT 0,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
-);
-
--- Organization membership
-CREATE TABLE organization_members (
-    organization_id TEXT NOT NULL,
-    user_id TEXT NOT NULL,
-    role TEXT NOT NULL,  -- 'owner', 'admin', 'operator', 'viewer'
-    created_at INTEGER NOT NULL,
-    PRIMARY KEY (organization_id, user_id),
-    FOREIGN KEY (organization_id) REFERENCES organizations(id),
-    FOREIGN KEY (user_id) REFERENCES users(id)
-);
-
--- Hubs
 CREATE TABLE hubs (
-    id TEXT PRIMARY KEY,  -- Factory-provisioned UUID
-    organization_id TEXT,
+    id TEXT PRIMARY KEY,           -- Factory-provisioned UUID
+    tenant_id TEXT,                -- NULL until claimed
     name TEXT,
     firmware_version TEXT,
     hardware_revision TEXT,
     last_seen_at INTEGER,
     is_online INTEGER DEFAULT 0,
-    ip_address TEXT,
+    local_ip_address TEXT,
+    wifi_signal_strength INTEGER,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
-    FOREIGN KEY (organization_id) REFERENCES organizations(id)
+    FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE SET NULL
 );
 
--- Printers
-CREATE TABLE printers (
-    id TEXT PRIMARY KEY,
-    hub_id TEXT NOT NULL,
-    serial_number TEXT NOT NULL,
-    name TEXT NOT NULL,
-    model TEXT,
-    ip_address TEXT,
-    access_code_encrypted TEXT,
-    status TEXT DEFAULT 'offline',
-    last_status_update INTEGER,
-    total_print_time_hours REAL DEFAULT 0,
-    total_prints INTEGER DEFAULT 0,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL,
-    FOREIGN KEY (hub_id) REFERENCES hubs(id),
-    UNIQUE (hub_id, serial_number)
-);
-
--- Products (items to manufacture)
-CREATE TABLE products (
-    id TEXT PRIMARY KEY,
-    organization_id TEXT NOT NULL,
-    sku TEXT NOT NULL,
-    name TEXT NOT NULL,
-    description TEXT,
-    image_url TEXT,
-    is_active INTEGER DEFAULT 1,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL,
-    FOREIGN KEY (organization_id) REFERENCES organizations(id),
-    UNIQUE (organization_id, sku)
-);
-
--- Product variants
-CREATE TABLE product_variants (
-    id TEXT PRIMARY KEY,
-    product_id TEXT NOT NULL,
-    name TEXT NOT NULL,
-    sku_suffix TEXT,
-    attributes TEXT,  -- JSON: {"color": "red", "size": "large"}
-    created_at INTEGER NOT NULL,
-    FOREIGN KEY (product_id) REFERENCES products(id)
-);
-
--- Print files (G-code)
-CREATE TABLE print_files (
-    id TEXT PRIMARY KEY,
-    organization_id TEXT NOT NULL,
-    product_variant_id TEXT,
-    name TEXT NOT NULL,
-    file_key TEXT NOT NULL,  -- R2 object key
-    file_size INTEGER,
-    print_time_estimate_minutes INTEGER,
-    filament_usage_grams REAL,
-    thumbnail_url TEXT,
-    plate_type TEXT,
-    nozzle_diameter REAL,
-    created_at INTEGER NOT NULL,
-    FOREIGN KEY (organization_id) REFERENCES organizations(id),
-    FOREIGN KEY (product_variant_id) REFERENCES product_variants(id)
-);
-
--- Print jobs
-CREATE TABLE print_jobs (
-    id TEXT PRIMARY KEY,
-    organization_id TEXT NOT NULL,
-    printer_id TEXT NOT NULL,
-    print_file_id TEXT NOT NULL,
-    order_id TEXT,
-    status TEXT NOT NULL,  -- 'queued', 'sending', 'printing', 'paused', 'completed', 'failed', 'cancelled'
-    started_at INTEGER,
-    completed_at INTEGER,
-    progress_percent INTEGER DEFAULT 0,
-    current_layer INTEGER,
-    total_layers INTEGER,
-    error_message TEXT,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL,
-    FOREIGN KEY (organization_id) REFERENCES organizations(id),
-    FOREIGN KEY (printer_id) REFERENCES printers(id),
-    FOREIGN KEY (print_file_id) REFERENCES print_files(id)
-);
-
--- Inventory
-CREATE TABLE inventory (
-    id TEXT PRIMARY KEY,
-    organization_id TEXT NOT NULL,
-    product_variant_id TEXT NOT NULL,
-    location TEXT,
-    quantity INTEGER DEFAULT 0,
-    reorder_threshold INTEGER,
-    updated_at INTEGER NOT NULL,
-    FOREIGN KEY (organization_id) REFERENCES organizations(id),
-    FOREIGN KEY (product_variant_id) REFERENCES product_variants(id),
-    UNIQUE (organization_id, product_variant_id, location)
-);
-
--- Orders
-CREATE TABLE orders (
-    id TEXT PRIMARY KEY,
-    organization_id TEXT NOT NULL,
-    external_id TEXT,  -- Shopify/WooCommerce order ID
-    source TEXT,       -- 'shopify', 'manual', 'api'
-    customer_name TEXT,
-    customer_email TEXT,
-    status TEXT DEFAULT 'pending',
-    priority INTEGER DEFAULT 0,
-    notes TEXT,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL,
-    FOREIGN KEY (organization_id) REFERENCES organizations(id)
-);
-
--- Order items
-CREATE TABLE order_items (
-    id TEXT PRIMARY KEY,
-    order_id TEXT NOT NULL,
-    product_variant_id TEXT NOT NULL,
-    quantity INTEGER NOT NULL,
-    quantity_fulfilled INTEGER DEFAULT 0,
-    FOREIGN KEY (order_id) REFERENCES orders(id),
-    FOREIGN KEY (product_variant_id) REFERENCES product_variants(id)
-);
-
--- Automation rules
-CREATE TABLE automation_rules (
-    id TEXT PRIMARY KEY,
-    organization_id TEXT NOT NULL,
-    name TEXT NOT NULL,
-    trigger_type TEXT NOT NULL,  -- 'print_complete', 'print_failed', 'printer_idle', 'order_received'
-    conditions TEXT,  -- JSON conditions
-    actions TEXT NOT NULL,  -- JSON actions
-    is_active INTEGER DEFAULT 1,
-    created_at INTEGER NOT NULL,
-    FOREIGN KEY (organization_id) REFERENCES organizations(id)
-);
-
--- Audit log
-CREATE TABLE audit_log (
-    id TEXT PRIMARY KEY,
-    organization_id TEXT NOT NULL,
-    user_id TEXT,
-    action TEXT NOT NULL,
-    entity_type TEXT,
-    entity_id TEXT,
-    details TEXT,  -- JSON
-    ip_address TEXT,
-    created_at INTEGER NOT NULL,
-    FOREIGN KEY (organization_id) REFERENCES organizations(id)
-);
-
--- Indexes
-CREATE INDEX idx_printers_hub ON printers(hub_id);
-CREATE INDEX idx_print_jobs_printer ON print_jobs(printer_id);
-CREATE INDEX idx_print_jobs_status ON print_jobs(status);
-CREATE INDEX idx_orders_org_status ON orders(organization_id, status);
-CREATE INDEX idx_audit_log_org ON audit_log(organization_id, created_at);
+CREATE INDEX idx_hubs_tenant ON hubs(tenant_id);
+CREATE INDEX idx_hubs_online ON hubs(is_online);
 ```
+
+See `PRINTFARM_CLOUD_ARCHITECTURE.md` for the complete 20+ table schema including:
+- Products & SKUs with inventory tracking
+- Finished goods and assembly tasks
+- Worklist task management
+- Orders with Shopify integration
+- Wiki/documentation system
+- Automation rules
+- Audit logging and failure tracking
 
 #### Durable Objects Architecture
 
@@ -631,10 +486,10 @@ export class HubConnection implements DurableObject {
     ).bind(status.status.state, Date.now(), status.printer_id).run();
 
     // Broadcast to connected dashboard users
-    const userDO = this.env.USER_CONNECTIONS.get(
-      this.env.USER_CONNECTIONS.idFromName(this.organizationId!)
+    const dashboardDO = this.env.DASHBOARD_BROADCASTS.get(
+      this.env.DASHBOARD_BROADCASTS.idFromName(this.tenantId!)
     );
-    await userDO.fetch(new Request("http://internal/broadcast", {
+    await dashboardDO.fetch(new Request("http://internal/broadcast", {
       method: "POST",
       body: JSON.stringify({
         type: "printer_status",
@@ -672,10 +527,10 @@ export class HubConnection implements DurableObject {
 }
 ```
 
-**UserSession Durable Object** (one per organization for dashboard broadcasts):
+**DashboardBroadcast Durable Object** (one per tenant for dashboard broadcasts):
 
 ```typescript
-export class UserSession implements DurableObject {
+export class DashboardBroadcast implements DurableObject {
   private state: DurableObjectState;
   private sessions: Map<string, WebSocket> = new Map();
 
@@ -683,7 +538,7 @@ export class UserSession implements DurableObject {
     const url = new URL(request.url);
 
     if (url.pathname === "/connect") {
-      return this.handleUserConnect(request);
+      return this.handleDashboardConnect(request);
     }
 
     if (url.pathname === "/broadcast") {
@@ -693,7 +548,7 @@ export class UserSession implements DurableObject {
     return new Response("Not found", { status: 404 });
   }
 
-  async handleUserConnect(request: Request): Promise<Response> {
+  async handleDashboardConnect(request: Request): Promise<Response> {
     const { 0: client, 1: server } = new WebSocketPair();
     const sessionId = crypto.randomUUID();
 

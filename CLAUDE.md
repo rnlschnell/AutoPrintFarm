@@ -4,262 +4,204 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-PrintFarmSoftware is a comprehensive 3D printer farm management system designed for Bambu Lab printers, running on Raspberry Pi hardware.
+**This is the development repository for the next-generation ESP32 + Cloud architecture.**
 
-### System Components
-- **Backend**: Python 3.11 FastAPI service providing REST API and WebSocket endpoints
-- **Frontend**: React 18.3 TypeScript application with Vite build system and shadcn/ui components
-- **Database**: Hybrid architecture with local SQLite for operations and Supabase for cloud backup
-- **Hardware**: Production deployment on Raspberry Pi at 192.168.4.45:8080
+AutoPrintFarm is the evolution of PrintFarmSoftware, migrating from a Raspberry Pi-based system to a cloud-native architecture using ESP32 hubs and Cloudflare services. The current Pi system (at 192.168.4.45) remains the production system - this repo is for developing the cloud migration.
 
-## Development Environment - SSH Key Authentication Required
+### Architecture Overview
+- **Cloud Backend**: Cloudflare Workers (API), Durable Objects (WebSocket/state), D1 (database), R2 (file storage)
+- **Edge Hardware**: ESP32-S3 hubs bridge local printers to cloud via WebSocket
+- **Frontend**: React 18 + TypeScript + Vite + shadcn/ui (deployed to Cloudflare Pages)
+- **Printers**: Bambu Lab printers communicate with ESP32 hubs via local MQTT + FTP
 
-**IMPORTANT: SSH key authentication must be set up for passwordless development workflow**
+### Key Documentation
+- `PRINTFARM_CLOUD_ARCHITECTURE.md` - **Primary reference** for cloud architecture, complete D1 schema, and all features
+- `PRINTFARM_CURRENT_ARCHITECTURE_AND_MIGRATION.md` - Current Pi system architecture and migration mapping
+- `ESP32_CLOUD_ARCHITECTURE_SPECIFICATION.md` - Detailed ESP32 firmware and hub specifications
 
-### One-Time SSH Key Setup
+## Development Workflow
 
-If not already configured, set up SSH key authentication:
+**This repo is the source of truth for cloud/ESP32 development.** Edit files directly in this repo.
 
-```bash
-# 1. Generate SSH key pair (if not exists)
-ssh-keygen -t ed25519 -C "your_email" -N "" -f ~/.ssh/id_ed25519
-
-# 2. Copy public key to Pi (will ask for password ONE last time)
-cat ~/.ssh/id_ed25519.pub | ssh pi@192.168.4.45 "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
-
-# 3. Test passwordless connection
-ssh pi@192.168.4.45 "echo 'SSH key authentication successful!'"
+### Project Structure (Target)
+```
+AutoPrintFarm/
+├── cloud/                    # Cloudflare Workers API
+│   ├── src/
+│   │   ├── index.ts         # Hono app entry point
+│   │   ├── routes/          # API routes (auth, printers, jobs, files, etc.)
+│   │   ├── durable-objects/ # HubConnection, DashboardBroadcast
+│   │   ├── middleware/      # Auth, tenant scoping
+│   │   ├── lib/             # D1, R2, crypto helpers
+│   │   ├── queues/          # Background job handlers
+│   │   └── types/           # TypeScript types
+│   ├── migrations/          # D1 schema migrations
+│   └── wrangler.toml        # Cloudflare configuration
+├── firmware/                 # ESP32 hub firmware
+│   ├── src/                 # C source files
+│   ├── include/             # Header files
+│   └── platformio.ini       # PlatformIO configuration
+├── frontend/                 # React frontend (existing, to be migrated)
+│   ├── src/
+│   │   ├── pages/           # Route components
+│   │   ├── components/      # UI components
+│   │   ├── hooks/           # Custom hooks
+│   │   ├── services/        # API clients
+│   │   └── contexts/        # React contexts
+│   └── package.json
+└── docs/                     # Additional documentation
 ```
 
-After setup, all SSH and SCP commands work without password prompts.
+### Common Development Commands
 
-## Development Workflow - Pi-First with Passwordless Deploy
-
-**IMPORTANT: Pi is the source of truth. Always copy files from Pi before editing to ensure you have the latest version**
-
-### Development Locations
+#### Cloud Workers (Cloudflare)
 ```bash
-# Pi location (SOURCE OF TRUTH)
-pi@192.168.4.45:/home/pi/PrintFarmSoftware
-
-# Local copy for editing
-C:\Users\nlsch\PrintFarmSoftware-local\
+cd cloud
+npm install
+npm run dev                  # Local development server (wrangler dev)
+npm run deploy               # Deploy to Cloudflare
+wrangler d1 migrations apply printfarm  # Apply database migrations
+wrangler d1 execute printfarm --local --file=migrations/0001_initial.sql  # Run migration locally
 ```
 
-### Simple 4-Step Workflow
-1. **COPY** - Copy file(s) from Pi to local (overwrite local version)
-2. **EDIT** - Make changes locally using proper tools with Windows paths
-3. **DEPLOY** - Copy changed files to Pi using scp with absolute paths
-4. **VERIFY** - Check Pi to confirm changes were deployed successfully
+#### ESP32 Firmware (PlatformIO)
+```bash
+cd firmware
+pio run                      # Build firmware
+pio run -t upload            # Flash to ESP32
+pio device monitor           # Serial monitor
+```
 
-## Common Development Commands
-
-### Frontend Development (Pi-native)
+#### Frontend
 ```bash
 cd frontend
-
-# Dependencies
-npm install                 # Install dependencies (if needed)
-
-# Development
-npm run dev                # Dev server on http://192.168.4.45:5173 (for testing)
-npm run build              # Production build to dist/
-npm run lint               # ESLint checking
-npm run preview            # Preview production build
-
-# Type checking (critical before commits)
-npx tsc --noEmit          # Verify TypeScript types
-```
-
-### Backend Development
-```bash
-# Run development server
-python src/main.py         # API docs at http://192.168.4.45:8080/docs
-
-# Run tests
-python -m pytest test_*.py -v
-python test_integration.py
-python test_live_websocket.py
-```
-
-### Service Management
-```bash
-# Service control (all passwordless with SSH keys)
-ssh pi@192.168.4.45 "sudo systemctl start bambu-program"
-ssh pi@192.168.4.45 "sudo systemctl stop bambu-program"
-ssh pi@192.168.4.45 "sudo systemctl restart bambu-program"
-ssh pi@192.168.4.45 "sudo systemctl status bambu-program"
-
-# View logs
-ssh pi@192.168.4.45 "sudo journalctl -u bambu-program -f"
-ssh pi@192.168.4.45 "sudo journalctl -u bambu-program --since '1 hour ago'"
-```
-
-## Pi-First Development Process
-
-### How to Make Changes
-
-1. **Copy File(s) from Pi to Local (ALWAYS FIRST)**
-   ```bash
-   # Copy a single file from Pi (overwrites local)
-   scp pi@192.168.4.45:/home/pi/PrintFarmSoftware/frontend/src/hooks/useProductsNew.ts "C:\Users\nlsch\PrintFarmSoftware-local\frontend\src\hooks\useProductsNew.ts"
-
-   # Copy entire directory from Pi (overwrites local)
-   scp -r pi@192.168.4.45:/home/pi/PrintFarmSoftware/frontend/src/ "C:\Users\nlsch\PrintFarmSoftware-local\frontend\src\"
-   ```
-
-2. **Edit Files Locally**
-   - Use Read/Edit/Write tools on files in `C:\Users\nlsch\PrintFarmSoftware-local\`
-   - Use Windows-style paths with proper escaping (absolute paths)
-   - All standard tools work perfectly with local files
-   - Fast, reliable editing experience
-
-3. **Deploy to Pi (Passwordless)**
-   ```bash
-   # Deploy a single file (use absolute paths)
-   scp "C:\Users\nlsch\PrintFarmSoftware-local\frontend\src\hooks\useProductsNew.ts" pi@192.168.4.45:/home/pi/PrintFarmSoftware/frontend/src/hooks/
-
-   # Deploy entire directory (use absolute paths)
-   scp -r "C:\Users\nlsch\PrintFarmSoftware-local\frontend\src\" pi@192.168.4.45:/home/pi/PrintFarmSoftware/frontend/src/
-   ```
-
-4. **Verify Deployment**
-   ```bash
-   # Verify file was updated on Pi
-   ssh pi@192.168.4.45 "cat /home/pi/PrintFarmSoftware/frontend/src/hooks/useProductsNew.ts | head -20"
-
-   # Or check modification time
-   ssh pi@192.168.4.45 "ls -lh /home/pi/PrintFarmSoftware/frontend/src/hooks/useProductsNew.ts"
-   ```
-
-5. **Build and Test on Pi (Passwordless)**
-   ```bash
-   # Frontend: Build after deployment
-   ssh pi@192.168.4.45 "cd /home/pi/PrintFarmSoftware/frontend && npm run build"
-
-   # Backend: Restart service after deployment
-   ssh pi@192.168.4.45 "sudo systemctl restart bambu-program"
-
-   # Test at http://192.168.4.45:8080
-   ```
-
-## Workflow Examples
-
-### Frontend Changes
-```bash
-# 1. Copy from Pi to local (get latest version)
-scp pi@192.168.4.45:/home/pi/PrintFarmSoftware/frontend/src/components/Header.tsx "C:\Users\nlsch\PrintFarmSoftware-local\frontend\src\components\Header.tsx"
-
-# 2. Edit locally using Read/Edit/Write tools
-# Make changes in C:\Users\nlsch\PrintFarmSoftware-local\frontend\src\components\Header.tsx
-
-# 3. Deploy to Pi (use absolute path)
-scp "C:\Users\nlsch\PrintFarmSoftware-local\frontend\src\components\Header.tsx" pi@192.168.4.45:/home/pi/PrintFarmSoftware/frontend/src/components/
-
-# 4. Verify deployment
-ssh pi@192.168.4.45 "cat /home/pi/PrintFarmSoftware/frontend/src/components/Header.tsx | head -20"
-
-# 5. Build on Pi
-ssh pi@192.168.4.45 "cd /home/pi/PrintFarmSoftware/frontend && npm run build"
-
-# 6. Test at http://192.168.4.45:8080
-# No service restart needed - FastAPI serves from dist/ automatically
-```
-
-### Backend Changes
-```bash
-# 1. Copy from Pi to local (get latest version)
-scp pi@192.168.4.45:/home/pi/PrintFarmSoftware/src/api/products.py "C:\Users\nlsch\PrintFarmSoftware-local\src\api\products.py"
-
-# 2. Edit locally using Read/Edit/Write tools
-# Make changes in C:\Users\nlsch\PrintFarmSoftware-local\src\api\products.py
-
-# 3. Deploy to Pi (use absolute path)
-scp "C:\Users\nlsch\PrintFarmSoftware-local\src\api\products.py" pi@192.168.4.45:/home/pi/PrintFarmSoftware/src/api/
-
-# 4. Verify deployment
-ssh pi@192.168.4.45 "cat /home/pi/PrintFarmSoftware/src/api/products.py | head -20"
-
-# 5. Restart service on Pi
-ssh pi@192.168.4.45 "sudo systemctl restart bambu-program"
-
-# 6. Check service status
-ssh pi@192.168.4.45 "sudo systemctl status bambu-program"
-
-# 7. Test at http://192.168.4.45:8080/docs
-```
-
-## Important Tips for Pi-First Development
-
-1. **SSH keys are required** - Set up once, never type passwords again
-2. **Pi is source of truth** - Always copy from Pi first to get latest version
-3. **Always verify deployment** - Check Pi files after deployment to confirm changes
-4. **Use absolute paths** - Windows paths must be absolute with proper escaping in quotes
-5. **Edit locally, deploy to Pi** - All editing happens in local copy after copying from Pi
-6. **Test immediately** - Check changes at http://192.168.4.45:8080
-7. **Frontend builds take ~30 seconds** - Be patient after deployment
-8. **Deploy specific files** - Only copy what you changed to minimize transfer time
-9. **Use proper tools** - Read/Edit/Write work perfectly with local files
-10. **Fast iteration** - No password prompts = smooth workflow
-
-## Quick Reference Commands
-
-```bash
-# Copy file from Pi to local (get latest version)
-scp pi@192.168.4.45:/home/pi/PrintFarmSoftware/path/to/file.py "C:\Users\nlsch\PrintFarmSoftware-local\path\to\file.py"
-
-# Read a file from Pi
-ssh pi@192.168.4.45 "cat /path/to/file"
-
-# List directory contents on Pi
-ssh pi@192.168.4.45 "ls -la /home/pi/PrintFarmSoftware/frontend/src/components/"
-
-# Check if a file exists on Pi
-ssh pi@192.168.4.45 "test -f /path/to/file && echo 'exists' || echo 'not found'"
-
-# Create a backup on Pi
-ssh pi@192.168.4.45 "cp /path/to/file /path/to/file.bak"
-
-# Restore from backup on Pi
-ssh pi@192.168.4.45 "mv /path/to/file.bak /path/to/file"
-
-# Complete workflow: Copy, deploy, verify, and build (frontend)
-scp pi@192.168.4.45:/home/pi/PrintFarmSoftware/frontend/src/components/Header.tsx "C:\Users\nlsch\PrintFarmSoftware-local\frontend\src\components\Header.tsx" && scp "C:\Users\nlsch\PrintFarmSoftware-local\frontend\src\components\Header.tsx" pi@192.168.4.45:/home/pi/PrintFarmSoftware/frontend/src/components/ && ssh pi@192.168.4.45 "cat /home/pi/PrintFarmSoftware/frontend/src/components/Header.tsx | head -5" && ssh pi@192.168.4.45 "cd /home/pi/PrintFarmSoftware/frontend && npm run build"
-
-# Complete workflow: Copy, deploy, verify, and restart (backend)
-scp pi@192.168.4.45:/home/pi/PrintFarmSoftware/src/api/products.py "C:\Users\nlsch\PrintFarmSoftware-local\src\api\products.py" && scp "C:\Users\nlsch\PrintFarmSoftware-local\src\api\products.py" pi@192.168.4.45:/home/pi/PrintFarmSoftware/src/api/ && ssh pi@192.168.4.45 "cat /home/pi/PrintFarmSoftware/src/api/products.py | head -5" && ssh pi@192.168.4.45 "sudo systemctl restart bambu-program"
+npm install
+npm run dev                  # Dev server
+npm run build                # Production build
+npm run lint                 # ESLint
+npx tsc --noEmit            # Type checking
 ```
 
 ## Critical Development Principles
 
-### 1. SSH Key Authentication First
-Before any development work, ensure SSH key authentication is configured. This eliminates all password prompts and enables smooth workflow.
+### 1. This Repo is for Cloud Architecture
+This is NOT the production Pi system. Changes here don't affect the running system at 192.168.4.45.
 
-### 2. Pi is Source of Truth
-**ALWAYS** copy files from Pi to local before editing. The Pi has the most recent, running code. Never assume your local copy is up to date.
+### 2. Reference the Architecture Docs
+Before making changes, read the relevant architecture docs:
+- **Schema changes**: See `PRINTFARM_CLOUD_ARCHITECTURE.md` for complete D1 schema
+- **API changes**: See API structure in `PRINTFARM_CLOUD_ARCHITECTURE.md`
+- **ESP32 changes**: See `ESP32_CLOUD_ARCHITECTURE_SPECIFICATION.md`
 
-### 3. Pi-First Development Workflow
-1. Copy file(s) from Pi to local (overwrites local version)
-2. Edit files locally using Read/Edit/Write tools with absolute Windows paths
-3. Deploy to Pi using scp with absolute paths
-4. **VERIFY deployment** by checking the file on Pi
-5. Build/restart and test
+### 3. Follow Existing Patterns
+- Use `tenant_id` for multi-tenancy (not `organization_id`)
+- API routes use `/api/v1/` prefix
+- Durable Objects: `HubConnection` (per hub), `DashboardBroadcast` (per tenant)
+- All timestamps stored as INTEGER (Unix epoch) in D1
 
-### 4. Always Verify Deployment
-After deploying, **ALWAYS** verify the changes were applied on Pi. Sometimes deployments fail silently. Use `cat | head` or `ls -lh` to confirm.
+### 4. Test Locally First
+- Use `wrangler dev` for Workers
+- Use `wrangler d1 execute --local` for D1 queries
+- Use PlatformIO for ESP32 firmware testing
 
-### 5. Use Absolute Paths with Proper Escaping
-Always use absolute paths for Windows and wrap in quotes for proper escaping:
-- `"C:\Users\nlsch\PrintFarmSoftware-local\path\to\file.py"`
+## Feature Overview
 
-### 6. Test on Target Hardware
-All testing happens on the Pi at http://192.168.4.45:8080, ensuring real printer connectivity and accurate environment.
+The cloud architecture supports all features from the current Pi system:
 
-### 7. Deploy Only What Changes
-Use scp to copy only the specific files you've modified to minimize transfer time.
+### Core Features
+- **Printers**: CRUD, status tracking, maintenance, connection management
+- **Print Jobs**: Queue management, progress tracking, job history
+- **Print Files**: 3MF upload, metadata extraction, thumbnails
+- **Products & SKUs**: Product catalog with color/material variants
+- **Inventory**: Stock levels, low-stock alerts, finished goods tracking
 
-### 8. Follow Existing Patterns
-Study neighboring files and existing implementations before adding new features. Maintain consistency with established patterns.
+### Workflow Features
+- **Worklist Tasks**: Task management (assembly, filament change, collection, maintenance, quality check)
+- **Assembly Tasks**: Post-print assembly tracking
+- **Orders**: Shopify integration, manual orders, fulfillment tracking
 
-### 9. Never Edit Directly on Pi
-Always edit locally and deploy. Direct editing on Pi breaks the Pi-First workflow and causes version conflicts.
+### Supporting Features
+- **Color Presets**: Filament color management
+- **Build Plate Types**: Plate type presets
+- **Wiki/Documentation**: Internal knowledge base
+- **Cameras**: Printer camera feeds (Bambu, IP, USB)
+- **Automation Rules**: Event-driven automation
+- **Analytics**: Reports and dashboards
+
+## Printer Communication
+
+The ESP32 hub supports multiple printer communication protocols:
+
+### Bambu Lab Printers (Primary)
+- **MQTT over TLS** (port 8883): Status updates and commands
+- **FTP over TLS** (port 990): File transfers
+- Topics: `device/{serial}/report` (subscribe), `device/{serial}/request` (publish)
+
+### Future Support
+- **Prusa**: HTTP REST API (PrusaLink)
+- **OctoPrint**: HTTP API
+- **Klipper**: Moonraker API
+
+## Database Schema
+
+The complete D1 schema is documented in `PRINTFARM_CLOUD_ARCHITECTURE.md`. Key tables:
+
+| Table | Purpose |
+|-------|---------|
+| `tenants` | Multi-tenant organizations |
+| `users` | User accounts |
+| `tenant_members` | User-tenant membership with roles |
+| `hubs` | ESP32 hub registration |
+| `printers` | Printer configuration and status |
+| `products` | Product catalog |
+| `product_skus` | Product variants (color/material) |
+| `print_files` | 3MF file metadata |
+| `print_jobs` | Print job queue and history |
+| `finished_goods` | Completed inventory |
+| `assembly_tasks` | Post-print assembly tasks |
+| `worklist_tasks` | General task management |
+| `orders` | Customer orders |
+| `order_items` | Order line items |
+| `wiki_articles` | Documentation articles |
+| `cameras` | Camera configurations |
+| `automation_rules` | Event-driven automation |
+| `color_presets` | Filament colors |
+| `build_plate_types` | Plate type presets |
+| `audit_log` | Action audit trail |
+| `printer_failures` | Failure tracking |
+| `sync_logs` | Debug/sync logging |
+
+## Authentication
+
+The system is designed to work with multiple auth providers:
+- **Supabase Auth**: Managed authentication with social logins
+- **Better Auth**: Self-hosted auth with full control
+- **Custom JWT**: Roll your own with D1 user storage
+
+Auth is abstracted behind a service interface. JWT tokens are used for API authentication with role-based access control (owner, admin, operator, viewer).
+
+## WebSocket Protocols
+
+### Hub ↔ Cloud (`/ws/hub/:id`)
+```json
+// Hub → Cloud
+{"type": "hub_hello", "hub_id": "...", "firmware": "1.0.0"}
+{"type": "printer_status", "printer_id": "...", "status": {...}}
+{"type": "command_ack", "command_id": "...", "success": true}
+
+// Cloud → Hub
+{"type": "configure_printer", "command_id": "...", "action": "add", "printer": {...}}
+{"type": "print_command", "command_id": "...", "printer_id": "...", "action": "start", "file_url": "..."}
+```
+
+### Dashboard WebSocket (`/ws/dashboard`)
+```json
+// Client → Server
+{"type": "auth", "token": "jwt_token"}
+{"type": "subscribe", "printers": ["id1", "id2"]}
+
+// Server → Client
+{"type": "printer_status", "printer_id": "...", "status": "printing", "progress": 45}
+{"type": "job_update", "job_id": "...", "status": "completed"}
+{"type": "hub_status", "hub_id": "...", "is_online": true}
+```

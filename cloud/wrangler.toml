@@ -1,0 +1,124 @@
+# PrintFarm Cloud Backend - Cloudflare Workers Configuration
+#
+# Before deploying, create the required resources with these commands:
+#
+# 1. Create D1 database:
+#    wrangler d1 create printfarm
+#    (Copy the database_id to the [[d1_databases]] section below)
+#
+# 2. Create R2 bucket:
+#    wrangler r2 bucket create printfarm-files
+#
+# 3. Create KV namespace:
+#    wrangler kv namespace create KV
+#    (Copy the id to the [[kv_namespaces]] section below)
+#
+# 4. Create Queues:
+#    wrangler queues create print-events
+#    wrangler queues create file-processing
+#    wrangler queues create notifications
+#    wrangler queues create shopify-sync
+
+name = "printfarm-api"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Account configuration (optional, wrangler will use logged-in account)
+# account_id = "your-account-id"
+
+# ============================================================================
+# D1 Database Binding
+# ============================================================================
+# Run: wrangler d1 create printfarm
+# Then update database_id with the returned ID
+[[d1_databases]]
+binding = "DB"
+database_name = "printfarm"
+database_id = "6dd1d503-b892-44f7-bf54-377d384cb122"
+
+# ============================================================================
+# R2 Bucket Binding
+# ============================================================================
+# Run: wrangler r2 bucket create printfarm-files
+[[r2_buckets]]
+binding = "R2"
+bucket_name = "printfarm-files"
+
+# ============================================================================
+# KV Namespace Binding
+# ============================================================================
+# Run: wrangler kv namespace create KV
+# Then update id with the returned namespace ID
+[[kv_namespaces]]
+binding = "KV"
+id = "b96a9e97bfa34295b0fe2d13fa4fdd95"
+
+# ============================================================================
+# Queue Producer Bindings
+# ============================================================================
+# Run: wrangler queues create <queue-name> for each queue
+[[queues.producers]]
+binding = "PRINT_EVENTS"
+queue = "print-events"
+
+[[queues.producers]]
+binding = "FILE_PROCESSING"
+queue = "file-processing"
+
+[[queues.producers]]
+binding = "NOTIFICATIONS"
+queue = "notifications"
+
+[[queues.producers]]
+binding = "SHOPIFY_SYNC"
+queue = "shopify-sync"
+
+# Queue consumers will be configured in later phases
+# [[queues.consumers]]
+# queue = "print-events"
+# max_batch_size = 10
+# max_batch_timeout = 30
+
+# ============================================================================
+# Durable Object Bindings
+# ============================================================================
+[durable_objects]
+bindings = [
+  { name = "HUB_CONNECTIONS", class_name = "HubConnection" },
+  { name = "DASHBOARD_BROADCASTS", class_name = "DashboardBroadcast" }
+]
+
+[[migrations]]
+tag = "v1"
+new_classes = ["HubConnection", "DashboardBroadcast"]
+
+# ============================================================================
+# Environment Variables
+# ============================================================================
+[vars]
+ENVIRONMENT = "development"
+API_VERSION = "v1"
+
+# Secrets (set via wrangler secret put):
+# - JWT_SECRET: Secret key for JWT token signing
+# - SHOPIFY_API_KEY: Shopify integration API key (optional)
+# - SHOPIFY_API_SECRET: Shopify integration secret (optional)
+
+# ============================================================================
+# Development Environment
+# ============================================================================
+[env.development]
+vars = { ENVIRONMENT = "development" }
+
+# ============================================================================
+# Production Environment
+# ============================================================================
+[env.production]
+vars = { ENVIRONMENT = "production" }
+
+# For production, you may want separate resources:
+# [[env.production.d1_databases]]
+# binding = "DB"
+# database_name = "printfarm-prod"
+# database_id = "REPLACE_WITH_PROD_D1_DATABASE_ID"
