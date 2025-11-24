@@ -15,6 +15,7 @@ import {
   signInRateLimitByIP,
   passwordResetRateLimit,
 } from "../middleware/rate-limit";
+import { hashPassword } from "../lib/password";
 
 export const auth = new Hono<HonoEnv>();
 
@@ -68,52 +69,6 @@ function generateSubdomainFromEmail(email: string): string {
   return subdomain.substring(0, 32);
 }
 
-/**
- * Hash password using PBKDF2 (same algorithm Better Auth uses)
- * Format: salt:hash (both base64 encoded)
- */
-async function hashPassword(password: string): Promise<string> {
-  const salt = crypto.getRandomValues(new Uint8Array(16));
-  const encoder = new TextEncoder();
-  const passwordBuffer = encoder.encode(password);
-
-  const key = await crypto.subtle.importKey(
-    "raw",
-    passwordBuffer,
-    "PBKDF2",
-    false,
-    ["deriveBits"]
-  );
-
-  const hash = await crypto.subtle.deriveBits(
-    {
-      name: "PBKDF2",
-      salt: salt,
-      iterations: 100000,
-      hash: "SHA-256",
-    },
-    key,
-    256
-  );
-
-  // Convert to base64 for storage
-  const saltBase64 = btoa(String.fromCharCode(...salt));
-  const hashBase64 = btoa(String.fromCharCode(...new Uint8Array(hash)));
-
-  return `${saltBase64}:${hashBase64}`;
-}
-
-/**
- * Generate a secure session token
- */
-function generateSessionToken(): string {
-  const array = new Uint8Array(32);
-  crypto.getRandomValues(array);
-  return Array.from(array, (byte) => byte.toString(16).padStart(2, "0")).join(
-    ""
-  );
-}
-
 // =============================================================================
 // ROUTES
 // =============================================================================
@@ -126,7 +81,9 @@ function generateSessionToken(): string {
  * 2. Account record (with hashed password)
  * 3. Tenant record
  * 4. Tenant membership record (as owner)
- * 5. Session record
+ *
+ * After atomic creation, uses Better Auth's sign-in API to create
+ * a properly formatted session that Better Auth can validate.
  *
  * This ensures a user ALWAYS has a tenant - no race conditions, no fallbacks.
  *
@@ -169,12 +126,7 @@ auth.post("/register", registerRateLimit, async (c) => {
   const accountId = generateId();
   const tenantId = generateId();
   const memberId = generateId();
-  const sessionId = generateId();
-  const sessionToken = generateSessionToken();
   const now = new Date().toISOString();
-
-  // Calculate session expiry (7 days from now)
-  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
 
   // Hash password
   const passwordHash = await hashPassword(body.password);
@@ -183,11 +135,7 @@ auth.post("/register", registerRateLimit, async (c) => {
   const subdomain = generateSubdomainFromEmail(body.email);
   const companyName = body.company_name || `${body.name}'s Organization`;
 
-  // Get request metadata for session
-  const ipAddress = c.req.header("CF-Connecting-IP") || c.req.header("X-Forwarded-For") || "unknown";
-  const userAgent = c.req.header("User-Agent") || "unknown";
-
-  // Execute all inserts atomically using D1 batch
+  // Execute all inserts atomically using D1 batch (without session - Better Auth will create it)
   // If ANY statement fails, the entire batch is rolled back
   try {
     await c.env.DB.batch([
@@ -214,12 +162,6 @@ auth.post("/register", registerRateLimit, async (c) => {
         `INSERT INTO tenant_members (id, tenant_id, user_id, role, is_active, accepted_at, created_at, updated_at)
          VALUES (?, ?, ?, 'owner', 1, ?, ?, ?)`
       ).bind(memberId, tenantId, userId, now, now, now),
-
-      // 5. Create session
-      c.env.DB.prepare(
-        `INSERT INTO sessions (id, user_id, token, expires_at, ip_address, user_agent, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-      ).bind(sessionId, userId, sessionToken, expiresAt, ipAddress, userAgent, now, now),
     ]);
   } catch (error) {
     console.error("[Auth] Registration batch failed:", error);
@@ -251,12 +193,30 @@ auth.post("/register", registerRateLimit, async (c) => {
     `[Auth] Registered user ${userId} with tenant ${tenantId} (atomic)`
   );
 
-  // Set session cookie
-  // Better Auth uses a specific cookie format - we'll match it
-  // Add Secure flag in production to prevent transmission over HTTP
-  const isProduction = c.env.ENVIRONMENT === 'production';
-  const secureFlag = isProduction ? '; Secure' : '';
-  const cookieValue = `better-auth.session_token=${sessionToken}; Path=/; HttpOnly; SameSite=Lax${secureFlag}; Max-Age=${7 * 24 * 60 * 60}`;
+  // Use Better Auth to create the session (ensures compatible token format)
+  const authInstance = createAuth(c.env);
+  const signInResponse = await authInstance.api.signInEmail({
+    body: {
+      email: body.email.toLowerCase(),
+      password: body.password,
+    },
+    asResponse: true,
+  });
+
+  // Get the session cookie from Better Auth's response
+  const setCookieHeader = signInResponse.headers.get("set-cookie");
+
+  // Parse the response body to get session info
+  const signInData = await signInResponse.json() as {
+    session?: { id: string; expiresAt: string };
+    user?: { id: string };
+  };
+
+  // Build response headers
+  const responseHeaders: Record<string, string> = {};
+  if (setCookieHeader) {
+    responseHeaders["Set-Cookie"] = setCookieHeader;
+  }
 
   // Return success with user and tenant info
   return c.json(
@@ -271,11 +231,10 @@ auth.post("/register", registerRateLimit, async (c) => {
           createdAt: now,
           updatedAt: now,
         },
-        session: {
-          id: sessionId,
+        session: signInData.session || {
+          id: "",
           userId: userId,
-          expiresAt: expiresAt,
-          // Token is set via HTTP-only cookie, not exposed in response body for security
+          expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
         },
         tenant: {
           id: tenantId,
@@ -286,9 +245,7 @@ auth.post("/register", registerRateLimit, async (c) => {
       },
     },
     201,
-    {
-      "Set-Cookie": cookieValue,
-    }
+    responseHeaders
   );
 });
 
@@ -314,11 +271,28 @@ auth.post("/sign-up/email", (c) => {
 /**
  * POST /api/v1/auth/sign-in/email - Login with email/password
  *
+ * Delegates to Better Auth which is configured to use our custom PBKDF2
+ * password hashing (see lib/auth.ts). This ensures password verification
+ * works correctly for users created via POST /api/v1/auth/register.
+ *
  * Rate limited: 10 per IP per minute to prevent brute force attacks
  */
 auth.post("/sign-in/email", signInRateLimitByIP, async (c) => {
+  const origin = c.req.header("origin");
+  console.log(`[Auth] Sign-in request from origin: ${origin}`);
+
   const authInstance = createAuth(c.env);
-  return authInstance.handler(c.req.raw);
+  const response = await authInstance.handler(c.req.raw);
+
+  // Log the response status for debugging
+  console.log(`[Auth] Sign-in response status: ${response.status}`);
+  if (response.status >= 400) {
+    const clonedResponse = response.clone();
+    const body = await clonedResponse.text();
+    console.log(`[Auth] Sign-in error response: ${body}`);
+  }
+
+  return response;
 });
 
 /**

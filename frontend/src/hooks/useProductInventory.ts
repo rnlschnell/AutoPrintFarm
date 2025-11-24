@@ -1,6 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useToast } from '@/hooks/use-toast';
 import { useTenant } from '@/hooks/useTenant';
+import { api } from '@/lib/api-client';
 
 export interface ProductInventoryItem {
   productId: string;
@@ -30,32 +31,25 @@ export interface ProductInventoryItem {
 export const useProductInventory = () => {
   const [productInventory, setProductInventory] = useState<ProductInventoryItem[]>([]);
   const [loading, setLoading] = useState(true);
-  const { tenant } = useTenant();
+  const { tenant, isInitialized } = useTenant();
   const { toast } = useToast();
 
-  const fetchProductInventory = async () => {
-    if (!tenant?.id) return;
+  const fetchProductInventory = useCallback(async () => {
+    if (!tenant?.id) {
+      setLoading(false);
+      return;
+    }
 
     try {
       setLoading(true);
 
-      // Fetch products from cloud API
-      const productsResponse = await fetch('/api/v1/products');
-      if (!productsResponse.ok) throw new Error('Failed to fetch products');
-      const productsData = await productsResponse.json();
-      const products = productsData.data || [];
-
-      // Fetch product SKUs from cloud API
-      const skusResponse = await fetch('/api/v1/skus');
-      if (!skusResponse.ok) throw new Error('Failed to fetch product SKUs');
-      const skusData = await skusResponse.json();
-      const skus = skusData.data || [];
-
-      // Fetch finished goods from cloud API
-      const finishedGoodsResponse = await fetch('/api/v1/inventory');
-      if (!finishedGoodsResponse.ok) throw new Error('Failed to fetch finished goods');
-      const finishedGoodsData = await finishedGoodsResponse.json();
-      const finishedGoods = finishedGoodsData.data || [];
+      // Fetch products, SKUs, and finished goods in parallel using the api client
+      // The api client automatically includes the X-Tenant-ID header
+      const [products, skus, finishedGoods] = await Promise.all([
+        api.get<any[]>('/api/v1/products'),
+        api.get<any[]>('/api/v1/skus'),
+        api.get<any[]>('/api/v1/inventory'),
+      ]);
 
       // Transform data to group SKUs under products
       const transformedData: ProductInventoryItem[] = (products || []).map((product: any) => {
@@ -116,39 +110,23 @@ export const useProductInventory = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [tenant?.id, toast]);
 
   const updateStock = async (finishedGoodId: string, newQuantity: number, assemblyType?: 'assembled' | 'needs_assembly') => {
     try {
       if (assemblyType) {
         // Use stock adjustment endpoint for assembly stock updates
         const adjustment = newQuantity; // This should be calculated as delta if needed
-        const response = await fetch(`/api/v1/inventory/${finishedGoodId}/adjust`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            adjustment: adjustment,
-            reason: 'manual',
-            notes: `Assembly stock update: ${assemblyType}`
-          }),
+        await api.post(`/api/v1/inventory/${finishedGoodId}/adjust`, {
+          adjustment: adjustment,
+          reason: 'manual',
+          notes: `Assembly stock update: ${assemblyType}`
         });
-
-        if (!response.ok) throw new Error('Failed to update assembly stock');
       } else {
         // Use PUT to update inventory
-        const response = await fetch(`/api/v1/inventory/${finishedGoodId}`, {
-          method: 'PUT',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            current_stock: newQuantity,
-          }),
+        await api.put(`/api/v1/inventory/${finishedGoodId}`, {
+          current_stock: newQuantity,
         });
-
-        if (!response.ok) throw new Error('Failed to update stock');
       }
 
       toast({
@@ -168,10 +146,13 @@ export const useProductInventory = () => {
   };
 
   useEffect(() => {
-    if (tenant?.id) {
-      fetchProductInventory();
+    // Wait for auth to be fully initialized before making API calls
+    // This prevents race conditions where tenant ID isn't set in the API client yet
+    if (!isInitialized) {
+      return;
     }
-  }, [tenant?.id]);
+    fetchProductInventory();
+  }, [fetchProductInventory, isInitialized]);
 
   const getFilteredInventory = (filter: 'all' | 'assembled' | 'needs_assembly') => {
     if (filter === 'all') return productInventory;

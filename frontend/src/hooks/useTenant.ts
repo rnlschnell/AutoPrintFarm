@@ -5,12 +5,14 @@ import { useAuth } from "@/contexts/AuthContext";
  * Provides backwards compatibility for components using the old useTenant pattern.
  */
 export const useTenant = () => {
-  const { tenantId, tenant, tenants, switchTenant } = useAuth();
+  const { tenantId, tenant, tenants, switchTenant, isInitialized } = useAuth();
 
   return {
     tenant,
     tenantId,
     tenants,
-    switchTenant
+    switchTenant,
+    /** True when auth and tenant context are fully initialized and ready for API calls */
+    isInitialized
   };
 };

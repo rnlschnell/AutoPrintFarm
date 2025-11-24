@@ -24,15 +24,20 @@ interface ColorPresetsContextType {
 
 const ColorPresetsContext = createContext<ColorPresetsContextType | undefined>(undefined);
 
-// Cache for color presets
-let cachedPresets: ColorPreset[] = [];
-let cacheTimestamp = 0;
+// Cache for color presets - keyed by tenant ID to prevent cross-tenant data leakage
+const presetCache: Map<string, { presets: ColorPreset[]; timestamp: number }> = new Map();
 const CACHE_TTL = 60000; // 60 seconds
 
+/** Clear the color presets cache - call on signOut/switchTenant */
+export const clearColorPresetsCache = (): void => {
+  presetCache.clear();
+  console.log('🧹 ColorPresets cache cleared');
+};
+
 export const ColorPresetsProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
-  const { tenantId } = useAuth();
+  const { tenantId, isInitialized } = useAuth();
   const { toast } = useToast();
-  const [colorPresets, setColorPresets] = useState<ColorPreset[]>(cachedPresets);
+  const [colorPresets, setColorPresets] = useState<ColorPreset[]>([]);
   const [loading, setLoading] = useState(true);
   const fetchInProgress = useRef(false);
 
@@ -42,10 +47,11 @@ export const ColorPresetsProvider: React.FC<{ children: ReactNode }> = ({ childr
       return;
     }
 
-    // Check cache
+    // Check tenant-specific cache
     const now = Date.now();
-    if (!force && cachedPresets.length > 0 && (now - cacheTimestamp) < CACHE_TTL) {
-      setColorPresets(cachedPresets);
+    const cached = presetCache.get(tenantId);
+    if (!force && cached && cached.presets.length > 0 && (now - cached.timestamp) < CACHE_TTL) {
+      setColorPresets(cached.presets);
       setLoading(false);
       return;
     }
@@ -75,9 +81,8 @@ export const ColorPresetsProvider: React.FC<{ children: ReactNode }> = ({ childr
         }))
         .sort((a, b) => a.color_name.localeCompare(b.color_name));
 
-      // Update cache
-      cachedPresets = presets;
-      cacheTimestamp = now;
+      // Update tenant-specific cache
+      presetCache.set(tenantId, { presets, timestamp: now });
 
       setColorPresets(presets);
     } catch (error) {
@@ -96,10 +101,23 @@ export const ColorPresetsProvider: React.FC<{ children: ReactNode }> = ({ childr
   }, [tenantId, toast]);
 
   useEffect(() => {
-    if (tenantId) {
-      fetchColorPresets();
+    // Wait for auth to be fully initialized before making API calls
+    // This prevents race conditions where tenant ID isn't set in the API client yet
+    if (!isInitialized) {
+      return;
     }
-  }, [tenantId, fetchColorPresets]);
+
+    if (tenantId) {
+      // Clear presets immediately when tenant changes to avoid showing stale data
+      setColorPresets([]);
+      setLoading(true);
+      fetchColorPresets();
+    } else {
+      // No tenant - clear everything
+      setColorPresets([]);
+      setLoading(false);
+    }
+  }, [tenantId, isInitialized, fetchColorPresets]);
 
   const getColorHex = useCallback((colorName: string, filamentType?: string): string => {
     // First try to find exact match with filament type

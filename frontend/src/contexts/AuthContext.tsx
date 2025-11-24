@@ -2,6 +2,8 @@ import React, { createContext, useContext, useEffect, useState, useCallback } fr
 import { authClient, type AuthSession, type RegisterResponse } from '@/lib/auth-client';
 import { api, setCurrentTenantId } from '@/lib/api-client';
 import type { User, Tenant, TenantMember } from '@/types/api';
+import { clearColorPresetsCache } from '@/contexts/ColorPresetsContext';
+import { clearBuildPlateTypesCache } from '@/contexts/BuildPlateTypesContext';
 
 // =============================================================================
 // TYPES
@@ -23,6 +25,8 @@ interface AuthContextType {
   tenant: Tenant | null;
   tenants: Tenant[];
   loading: boolean;
+  /** True when auth and tenant context are fully initialized and ready for API calls */
+  isInitialized: boolean;
   /** Critical auth error that requires user action (e.g., tenant creation failed) */
   authError: string | null;
   /** Clear the auth error */
@@ -60,6 +64,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   const [tenant, setTenant] = useState<Tenant | null>(null);
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [loading, setLoading] = useState(true);
+  const [isInitialized, setIsInitialized] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
 
   /**
@@ -163,10 +168,13 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       }
 
       if (selectedTenantId) {
-        // Normal case: user has a tenant
-        setTenantId(selectedTenantId);
+        // CRITICAL: Set tenant ID in API client FIRST, before any state updates
+        // This ensures the tenant ID is available for any API calls triggered by re-renders
         setCurrentTenantId(selectedTenantId);
         localStorage.setItem('printfarm_tenant_id', selectedTenantId);
+
+        // Now set React state
+        setTenantId(selectedTenantId);
 
         // Fetch tenant details
         const tenantDetails = await fetchTenant(selectedTenantId);
@@ -185,6 +193,9 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
           role: membership?.role || null,
           tenant_id: selectedTenantId,
         });
+
+        // Mark as fully initialized - tenant context is ready for API calls
+        setIsInitialized(true);
       } else {
         // Edge case: User has no tenants
         // This should NOT happen for users registered via /register
@@ -192,11 +203,14 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
         const ensuredTenant = await ensureTenant();
 
         if (ensuredTenant) {
+          // CRITICAL: Set tenant ID in API client FIRST, before any state updates
+          setCurrentTenantId(ensuredTenant.id);
+          localStorage.setItem('printfarm_tenant_id', ensuredTenant.id);
+
+          // Now set React state
           setTenantId(ensuredTenant.id);
           setTenant(ensuredTenant);
           setTenants([ensuredTenant]);
-          setCurrentTenantId(ensuredTenant.id);
-          localStorage.setItem('printfarm_tenant_id', ensuredTenant.id);
 
           setProfile({
             id: authSession.user.id,
@@ -205,6 +219,9 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
             role: 'owner', // User who creates tenant is always owner
             tenant_id: ensuredTenant.id,
           });
+
+          // Mark as fully initialized
+          setIsInitialized(true);
         } else {
           // Critical error: Cannot create tenant for user
           // This is a fatal state - user cannot use the app
@@ -218,6 +235,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
           setTenant(null);
           setTenants([]);
           setProfile(null);
+          setIsInitialized(false);
           setCurrentTenantId(null);
           localStorage.removeItem('printfarm_tenant_id');
 
@@ -243,6 +261,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       setTenant(null);
       setTenants([]);
       setProfile(null);
+      setIsInitialized(false);
       setCurrentTenantId(null);
     }
   }, [fetchTenants, fetchTenant, fetchMembership, ensureTenant]);
@@ -318,6 +337,11 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
         // Set everything directly - no need to fetch anything
         const { user: regUser, session: regSession, tenant: regTenant } = result.data;
 
+        // CRITICAL: Set tenant ID in API client FIRST, before ANY React state updates
+        // This ensures the tenant ID is available for any API calls triggered by child component re-renders
+        setCurrentTenantId(regTenant.id);
+        localStorage.setItem('printfarm_tenant_id', regTenant.id);
+
         // Transform to our User type
         const transformedUser: User = {
           id: regUser.id,
@@ -329,14 +353,6 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
           updated_at: regUser.updatedAt,
         };
 
-        setUser(transformedUser);
-        setSession({
-          id: regSession.id,
-          userId: regSession.userId,
-          expiresAt: regSession.expiresAt,
-          user: transformedUser,
-        });
-
         // Set tenant directly from response
         const tenantData: Tenant = {
           id: regTenant.id,
@@ -346,11 +362,17 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
           role: regTenant.role,
         };
 
+        // Now set all React state together
+        setUser(transformedUser);
+        setSession({
+          id: regSession.id,
+          userId: regSession.userId,
+          expiresAt: regSession.expiresAt,
+          user: transformedUser,
+        });
         setTenantId(regTenant.id);
         setTenant(tenantData);
         setTenants([tenantData]);
-        setCurrentTenantId(regTenant.id);
-        localStorage.setItem('printfarm_tenant_id', regTenant.id);
 
         // Set profile
         setProfile({
@@ -360,6 +382,9 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
           role: regTenant.role,
           tenant_id: regTenant.id,
         });
+
+        // Mark as fully initialized - tenant context is ready for API calls
+        setIsInitialized(true);
       }
 
       return { error: null };
@@ -377,6 +402,10 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     } catch (error) {
       console.error('Error signing out:', error);
     } finally {
+      // Clear all caches to prevent cross-tenant data leakage
+      clearColorPresetsCache();
+      clearBuildPlateTypesCache();
+
       // Clear state regardless of API result
       setUser(null);
       setSession(null);
@@ -384,6 +413,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       setTenant(null);
       setTenants([]);
       setProfile(null);
+      setIsInitialized(false);
       setCurrentTenantId(null);
       localStorage.removeItem('printfarm_tenant_id');
     }
@@ -399,10 +429,17 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
       throw new Error('Invalid tenant');
     }
 
-    setTenantId(newTenantId);
-    setTenant(targetTenant);
+    // Clear all caches to prevent cross-tenant data leakage
+    clearColorPresetsCache();
+    clearBuildPlateTypesCache();
+
+    // CRITICAL: Set tenant ID in API client FIRST, before any state updates
     setCurrentTenantId(newTenantId);
     localStorage.setItem('printfarm_tenant_id', newTenantId);
+
+    // Now set React state
+    setTenantId(newTenantId);
+    setTenant(targetTenant);
 
     // Update profile with new tenant and role
     if (user) {
@@ -443,6 +480,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     tenant,
     tenants,
     loading,
+    isInitialized,
     authError,
     clearAuthError,
     signIn,

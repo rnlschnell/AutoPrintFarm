@@ -6,7 +6,7 @@
  * All routes are tenant-scoped.
  */
 
-import { Hono } from "hono";
+import { Hono, Context } from "hono";
 import { z } from "zod";
 import type { HonoEnv } from "../types/env";
 import { requireAuth } from "../middleware/auth";
@@ -60,12 +60,15 @@ const updateWorklistTaskSchema = z.object({
   description: z.string().max(2000).nullable().optional(),
   task_type: taskTypeSchema.optional(),
   priority: taskPrioritySchema.optional(),
+  status: taskStatusSchema.optional(),
   assembly_task_id: z.string().nullable().optional(),
   printer_id: z.string().nullable().optional(),
   assigned_to: z.string().nullable().optional(),
   order_number: z.string().max(100).nullable().optional(),
   estimated_time_minutes: z.number().int().min(0).nullable().optional(),
   actual_time_minutes: z.number().int().min(0).nullable().optional(),
+  started_at: z.string().nullable().optional(),
+  completed_at: z.string().nullable().optional(),
   due_date: z.string().nullable().optional(),
   metadata: z.record(z.unknown()).nullable().optional(),
 });
@@ -390,156 +393,195 @@ worklist.post(
 // =============================================================================
 
 /**
- * PUT /api/v1/worklist/:id
+ * PUT/PATCH /api/v1/worklist/:id
  * Update a worklist task
  */
+const updateTaskHandler = async (c: Context<HonoEnv>) => {
+  const tenantId = c.get("tenantId")!;
+  const taskId = c.req.param("id");
+
+  // Check task exists
+  const existing = await c.env.DB.prepare(
+    "SELECT id, status, started_at FROM worklist_tasks WHERE id = ? AND tenant_id = ?"
+  )
+    .bind(taskId, tenantId)
+    .first<{ id: string; status: string; started_at: string | null }>();
+
+  if (!existing) {
+    throw new ApiError("Task not found", 404, "TASK_NOT_FOUND");
+  }
+
+  // Parse and validate request body
+  let body: z.infer<typeof updateWorklistTaskSchema>;
+  try {
+    const rawBody = await c.req.json();
+    body = updateWorklistTaskSchema.parse(rawBody);
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      throw error;
+    }
+    throw new ApiError("Invalid request body", 400, "INVALID_REQUEST");
+  }
+
+  // Validate assembly_task_id if provided
+  if (body.assembly_task_id) {
+    const assemblyTask = await c.env.DB.prepare(
+      "SELECT id FROM assembly_tasks WHERE id = ? AND tenant_id = ?"
+    )
+      .bind(body.assembly_task_id, tenantId)
+      .first();
+
+    if (!assemblyTask) {
+      throw new ApiError(
+        "Assembly task not found",
+        404,
+        "ASSEMBLY_TASK_NOT_FOUND"
+      );
+    }
+  }
+
+  // Validate printer_id if provided
+  if (body.printer_id) {
+    const printer = await c.env.DB.prepare(
+      "SELECT id FROM printers WHERE id = ? AND tenant_id = ?"
+    )
+      .bind(body.printer_id, tenantId)
+      .first();
+
+    if (!printer) {
+      throw new ApiError("Printer not found", 404, "PRINTER_NOT_FOUND");
+    }
+  }
+
+  // Validate assigned_to if provided
+  if (body.assigned_to) {
+    const member = await c.env.DB.prepare(
+      "SELECT id FROM tenant_members WHERE user_id = ? AND tenant_id = ? AND is_active = 1"
+    )
+      .bind(body.assigned_to, tenantId)
+      .first();
+
+    if (!member) {
+      throw new ApiError(
+        "User is not a member of this tenant",
+        404,
+        "USER_NOT_FOUND"
+      );
+    }
+  }
+
+  const now = new Date().toISOString();
+
+  // Build dynamic update
+  const updates: string[] = [];
+  const values: (string | number | null)[] = [];
+
+  const fields: Array<{
+    key: keyof typeof body;
+    column: string;
+    transform?: (v: unknown) => unknown;
+  }> = [
+    { key: "title", column: "title" },
+    { key: "subtitle", column: "subtitle" },
+    { key: "description", column: "description" },
+    { key: "task_type", column: "task_type" },
+    { key: "priority", column: "priority" },
+    { key: "status", column: "status" },
+    { key: "assembly_task_id", column: "assembly_task_id" },
+    { key: "printer_id", column: "printer_id" },
+    { key: "assigned_to", column: "assigned_to" },
+    { key: "order_number", column: "order_number" },
+    { key: "estimated_time_minutes", column: "estimated_time_minutes" },
+    { key: "actual_time_minutes", column: "actual_time_minutes" },
+    { key: "started_at", column: "started_at" },
+    { key: "completed_at", column: "completed_at" },
+    { key: "due_date", column: "due_date" },
+    {
+      key: "metadata",
+      column: "metadata",
+      transform: (v) => (v ? JSON.stringify(v) : null),
+    },
+  ];
+
+  for (const field of fields) {
+    if (body[field.key] !== undefined) {
+      updates.push(`${field.column} = ?`);
+      const value = body[field.key];
+      values.push(
+        field.transform
+          ? (field.transform(value) as string | number | null)
+          : (value as string | number | null)
+      );
+    }
+  }
+
+  // Handle automatic timestamp updates for status changes
+  if (body.status === "in_progress" && !existing.started_at && !body.started_at) {
+    updates.push("started_at = ?");
+    values.push(now);
+  }
+
+  if ((body.status === "completed" || body.status === "cancelled") && !body.completed_at) {
+    updates.push("completed_at = ?");
+    values.push(now);
+
+    // Calculate actual_time_minutes if started_at exists and not already set
+    const startedAt = body.started_at || existing.started_at;
+    if (startedAt && !body.actual_time_minutes) {
+      const startedAtDate = new Date(startedAt);
+      const completedAtDate = new Date(now);
+      const actualMinutes = Math.round(
+        (completedAtDate.getTime() - startedAtDate.getTime()) / 60000
+      );
+      updates.push("actual_time_minutes = ?");
+      values.push(actualMinutes);
+    }
+  }
+
+  if (updates.length === 0) {
+    throw new ApiError("No updates provided", 400, "NO_UPDATES");
+  }
+
+  updates.push("updated_at = ?");
+  values.push(now);
+
+  values.push(taskId);
+  values.push(tenantId);
+
+  await c.env.DB.prepare(
+    `UPDATE worklist_tasks SET ${updates.join(", ")} WHERE id = ? AND tenant_id = ?`
+  )
+    .bind(...values)
+    .run();
+
+  // Fetch updated task
+  const task = await c.env.DB.prepare(
+    "SELECT * FROM worklist_tasks WHERE id = ?"
+  )
+    .bind(taskId)
+    .first<WorklistTask>();
+
+  return c.json({
+    success: true,
+    data: task,
+  });
+};
+
+// Register PUT and PATCH routes for update
 worklist.put(
   "/:id",
   requireAuth(),
   requireTenant(),
   requireRoles(["owner", "admin", "operator"]),
-  async (c) => {
-    const tenantId = c.get("tenantId")!;
-    const taskId = c.req.param("id");
+  updateTaskHandler
+);
 
-    // Check task exists
-    const existing = await c.env.DB.prepare(
-      "SELECT id, status FROM worklist_tasks WHERE id = ? AND tenant_id = ?"
-    )
-      .bind(taskId, tenantId)
-      .first<{ id: string; status: string }>();
-
-    if (!existing) {
-      throw new ApiError("Task not found", 404, "TASK_NOT_FOUND");
-    }
-
-    // Parse and validate request body
-    let body: z.infer<typeof updateWorklistTaskSchema>;
-    try {
-      const rawBody = await c.req.json();
-      body = updateWorklistTaskSchema.parse(rawBody);
-    } catch (error) {
-      if (error instanceof z.ZodError) {
-        throw error;
-      }
-      throw new ApiError("Invalid request body", 400, "INVALID_REQUEST");
-    }
-
-    // Validate assembly_task_id if provided
-    if (body.assembly_task_id) {
-      const assemblyTask = await c.env.DB.prepare(
-        "SELECT id FROM assembly_tasks WHERE id = ? AND tenant_id = ?"
-      )
-        .bind(body.assembly_task_id, tenantId)
-        .first();
-
-      if (!assemblyTask) {
-        throw new ApiError(
-          "Assembly task not found",
-          404,
-          "ASSEMBLY_TASK_NOT_FOUND"
-        );
-      }
-    }
-
-    // Validate printer_id if provided
-    if (body.printer_id) {
-      const printer = await c.env.DB.prepare(
-        "SELECT id FROM printers WHERE id = ? AND tenant_id = ?"
-      )
-        .bind(body.printer_id, tenantId)
-        .first();
-
-      if (!printer) {
-        throw new ApiError("Printer not found", 404, "PRINTER_NOT_FOUND");
-      }
-    }
-
-    // Validate assigned_to if provided
-    if (body.assigned_to) {
-      const member = await c.env.DB.prepare(
-        "SELECT id FROM tenant_members WHERE user_id = ? AND tenant_id = ? AND is_active = 1"
-      )
-        .bind(body.assigned_to, tenantId)
-        .first();
-
-      if (!member) {
-        throw new ApiError(
-          "User is not a member of this tenant",
-          404,
-          "USER_NOT_FOUND"
-        );
-      }
-    }
-
-    // Build dynamic update
-    const updates: string[] = [];
-    const values: (string | number | null)[] = [];
-
-    const fields: Array<{
-      key: keyof typeof body;
-      column: string;
-      transform?: (v: unknown) => unknown;
-    }> = [
-      { key: "title", column: "title" },
-      { key: "subtitle", column: "subtitle" },
-      { key: "description", column: "description" },
-      { key: "task_type", column: "task_type" },
-      { key: "priority", column: "priority" },
-      { key: "assembly_task_id", column: "assembly_task_id" },
-      { key: "printer_id", column: "printer_id" },
-      { key: "assigned_to", column: "assigned_to" },
-      { key: "order_number", column: "order_number" },
-      { key: "estimated_time_minutes", column: "estimated_time_minutes" },
-      { key: "actual_time_minutes", column: "actual_time_minutes" },
-      { key: "due_date", column: "due_date" },
-      {
-        key: "metadata",
-        column: "metadata",
-        transform: (v) => (v ? JSON.stringify(v) : null),
-      },
-    ];
-
-    for (const field of fields) {
-      if (body[field.key] !== undefined) {
-        updates.push(`${field.column} = ?`);
-        const value = body[field.key];
-        values.push(
-          field.transform
-            ? (field.transform(value) as string | number | null)
-            : (value as string | number | null)
-        );
-      }
-    }
-
-    if (updates.length === 0) {
-      throw new ApiError("No updates provided", 400, "NO_UPDATES");
-    }
-
-    updates.push("updated_at = ?");
-    values.push(new Date().toISOString());
-
-    values.push(taskId);
-    values.push(tenantId);
-
-    await c.env.DB.prepare(
-      `UPDATE worklist_tasks SET ${updates.join(", ")} WHERE id = ? AND tenant_id = ?`
-    )
-      .bind(...values)
-      .run();
-
-    // Fetch updated task
-    const task = await c.env.DB.prepare(
-      "SELECT * FROM worklist_tasks WHERE id = ?"
-    )
-      .bind(taskId)
-      .first<WorklistTask>();
-
-    return c.json({
-      success: true,
-      data: task,
-    });
-  }
+worklist.patch(
+  "/:id",
+  requireAuth(),
+  requireTenant(),
+  requireRoles(["owner", "admin", "operator"]),
+  updateTaskHandler
 );
 
 // =============================================================================

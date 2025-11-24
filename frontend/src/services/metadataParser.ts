@@ -53,7 +53,8 @@ export async function parseFileMetadata(file: File): Promise<ParseMetadataRespon
   formData.append('file', file);
 
   try {
-    const response = await fetch('/api/file-operations/parse-metadata', {
+    // Use the cloud backend endpoint for parsing 3MF metadata
+    const response = await fetch('/api/v1/files/parse-metadata', {
       method: 'POST',
       body: formData,
     });

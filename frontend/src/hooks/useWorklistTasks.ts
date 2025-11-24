@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useToast } from '@/hooks/use-toast';
-
+import { api } from '@/lib/api-client';
 import { useTenant } from '@/hooks/useTenant';
 import { useNavigate } from 'react-router-dom';
 
@@ -34,17 +34,18 @@ export const useWorklistTasks = () => {
   const { tenant } = useTenant();
   const navigate = useNavigate();
 
-  const fetchTasks = async () => {
+  const fetchTasks = useCallback(async () => {
+    // Don't fetch if tenant is not available yet
+    if (!tenant?.id) {
+      setLoading(false);
+      return;
+    }
+
     try {
       setLoading(true);
-      const response = await fetch('/api/v1/worklist');
-
-      if (!response.ok) {
-        throw new Error(`Failed to fetch worklist tasks: ${response.statusText}`);
-      }
-
-      const data = await response.json();
-      setTasks(data || []);
+      // Use api client which automatically includes X-Tenant-ID header
+      const data = await api.get<WorklistTask[]>('/api/v1/worklist');
+      setTasks(Array.isArray(data) ? data : []);
     } catch (error) {
       console.error('Error fetching worklist tasks:', error);
       toast({
@@ -55,7 +56,7 @@ export const useWorklistTasks = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [tenant?.id, toast]);
 
   const updateTaskStatus = async (id: string, status: WorklistTask['status']) => {
     try {
@@ -87,20 +88,9 @@ export const useWorklistTasks = () => {
 
       // IMPORTANT: For maintenance tasks being completed, call the maintenance/complete endpoint
       if (status === 'completed' && currentTask?.task_type === 'maintenance' && currentTask?.printer_id) {
-        const maintenanceResponse = await fetch(`/api/v1/printers/${currentTask.printer_id}/maintenance/complete`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            task_id: id,
-          }),
+        await api.post(`/api/v1/printers/${currentTask.printer_id}/maintenance/complete`, {
+          task_id: id,
         });
-
-        if (!maintenanceResponse.ok) {
-          const errorData = await maintenanceResponse.json();
-          throw new Error(errorData.detail || `Failed to complete maintenance: ${maintenanceResponse.statusText}`);
-        }
 
         // The backend handles updating both the task and the printer, so we're done
         toast({
@@ -112,17 +102,7 @@ export const useWorklistTasks = () => {
         return; // Early return, backend already handled everything
       }
 
-      const response = await fetch(`/api/v1/worklist/${id}`, {
-        method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(updateData),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to update task status: ${response.statusText}`);
-      }
+      await api.patch(`/api/v1/worklist/${id}`, updateData);
 
       // Sync to assembly task for other statuses (not completed, already handled above)
       if (status !== 'completed' && currentTask?.assembly_task_id && currentTask.task_type === 'assembly') {
@@ -162,34 +142,22 @@ export const useWorklistTasks = () => {
       return { hasShortage: false, shortages: [], components: [], assemblyTask: null };
     }
 
-    // Get assembly task details from backend API (SQLite)
-    const assemblyTaskResponse = await fetch(`/api/v1/assembly/${assemblyTaskId}`);
-    if (!assemblyTaskResponse.ok) {
-      throw new Error(`Failed to get assembly task: ${assemblyTaskResponse.statusText}`);
-    }
-    const assemblyTask = await assemblyTaskResponse.json();
+    // Get assembly task details from backend API
+    const assemblyTask = await api.get<any>(`/api/v1/assembly/${assemblyTaskId}`);
 
     if (!assemblyTask?.finished_good_id) {
       return { hasShortage: false, shortages: [], components: [], assemblyTask };
     }
 
-    // Get finished good to find product_sku_id from backend API (SQLite)
-    const finishedGoodResponse = await fetch(`/api/v1/inventory/${assemblyTask.finished_good_id}`);
-    if (!finishedGoodResponse.ok) {
-      throw new Error(`Failed to get finished good: ${finishedGoodResponse.statusText}`);
-    }
-    const finishedGood = await finishedGoodResponse.json();
+    // Get finished good to find product_sku_id from backend API
+    const finishedGood = await api.get<any>(`/api/v1/inventory/${assemblyTask.finished_good_id}`);
 
     if (!finishedGood?.product_sku_id) {
       return { hasShortage: false, shortages: [], components: [], assemblyTask };
     }
 
-    // Get product SKU to find product_id from backend API (SQLite)
-    const productSkuResponse = await fetch(`/api/v1/skus/${finishedGood.product_sku_id}`);
-    if (!productSkuResponse.ok) {
-      throw new Error(`Failed to get product SKU: ${productSkuResponse.statusText}`);
-    }
-    const productSku = await productSkuResponse.json();
+    // Get product SKU to find product_id from backend API
+    const productSku = await api.get<any>(`/api/v1/skus/${finishedGood.product_sku_id}`);
 
     if (!productSku?.product_id) {
       return { hasShortage: false, shortages: [], components: [], assemblyTask };
@@ -236,17 +204,7 @@ export const useWorklistTasks = () => {
       }
 
       // Call the assembly tasks API to update the status
-      const response = await fetch(`/api/v1/assembly/${assemblyTaskId}`, {
-        method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(updateData),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to update assembly task: ${response.statusText}`);
-      }
+      await api.patch(`/api/v1/assembly/${assemblyTaskId}`, updateData);
 
       console.log(`Synced worklist status '${status}' to assembly task ${assemblyTaskId}`);
     } catch (error) {
@@ -280,17 +238,7 @@ export const useWorklistTasks = () => {
         await syncToAssemblyTask(currentTask.assembly_task_id, 'completed', true);
       }
 
-      const response = await fetch(`/api/v1/worklist/${id}`, {
-        method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(updateData),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to update task status: ${response.statusText}`);
-      }
+      await api.patch(`/api/v1/worklist/${id}`, updateData);
 
       toast({
         title: "Success",
@@ -314,38 +262,25 @@ export const useWorklistTasks = () => {
 
       // For assembly tasks, create the assembly task first
       if (taskData.task_type === 'assembly' && taskData.metadata) {
-        const { productId, productName, skuId, sku, quantity } = taskData.metadata;
+        const { productName, skuId, sku, quantity } = taskData.metadata;
 
         // Fetch the finished good record by SKU ID to get the actual finished_good_id
-        const finishedGoodResponse = await fetch(`/api/v1/inventory/by-sku/${skuId}`);
+        const finishedGood = await api.get<any>(`/api/v1/inventory/by-sku/${skuId}`);
 
-        if (!finishedGoodResponse.ok) {
+        if (!finishedGood) {
           throw new Error(`No finished good found for this SKU. Please ensure the product has finished goods inventory.`);
         }
 
-        const finishedGood = await finishedGoodResponse.json();
-
         // Create assembly task via assembly-tasks API using the finished good ID
-        const assemblyResponse = await fetch('/api/v1/assembly/', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            finished_good_id: finishedGood.id, // Use actual finished goods ID, not SKU ID
-            product_name: productName,
-            sku: sku,
-            quantity: quantity,
-            assigned_to: taskData.assigned_to,
-            notes: taskData.description
-          }),
+        const assemblyTask = await api.post<any>('/api/v1/assembly/', {
+          finished_good_id: finishedGood.id, // Use actual finished goods ID, not SKU ID
+          product_name: productName,
+          sku: sku,
+          quantity: quantity,
+          assigned_to: taskData.assigned_to,
+          notes: taskData.description
         });
 
-        if (!assemblyResponse.ok) {
-          throw new Error(`Failed to create assembly task: ${assemblyResponse.statusText}`);
-        }
-
-        const assemblyTask = await assemblyResponse.json();
         assemblyTaskId = assemblyTask.id;
       }
 
@@ -364,17 +299,7 @@ export const useWorklistTasks = () => {
       // Remove metadata from worklist payload (it's only used for assembly task creation)
       delete worklistPayload.metadata;
 
-      const response = await fetch('/api/v1/worklist', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(worklistPayload),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to create worklist task: ${response.statusText}`);
-      }
+      await api.post('/api/v1/worklist', worklistPayload);
 
       toast({
         title: "Success",
@@ -396,17 +321,7 @@ export const useWorklistTasks = () => {
 
   const assignTask = async (id: string, assignedTo: string) => {
     try {
-      const response = await fetch(`/api/v1/worklist/${id}`, {
-        method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ assigned_to: assignedTo }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to assign task: ${response.statusText}`);
-      }
+      await api.patch(`/api/v1/worklist/${id}`, { assigned_to: assignedTo });
 
       toast({
         title: "Success",
@@ -426,13 +341,7 @@ export const useWorklistTasks = () => {
 
   const deleteTask = async (id: string) => {
     try {
-      const response = await fetch(`/api/v1/worklist/${id}`, {
-        method: 'DELETE',
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to delete task: ${response.statusText}`);
-      }
+      await api.delete(`/api/v1/worklist/${id}`);
 
       toast({
         title: "Success",
@@ -460,7 +369,7 @@ export const useWorklistTasks = () => {
 
   useEffect(() => {
     fetchTasks();
-  }, []);
+  }, [fetchTasks]);
 
   return {
     tasks,

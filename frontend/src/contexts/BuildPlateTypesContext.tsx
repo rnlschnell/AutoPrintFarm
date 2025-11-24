@@ -25,7 +25,9 @@ class BuildPlateTypesManager {
   private static instance: BuildPlateTypesManager;
   private fetchInProgress = false;
   private lastFetchTime = 0;
-  private cache: { data: BuildPlateType[], timestamp: number } | null = null;
+  // Cache keyed by tenant ID to prevent cross-tenant data leakage
+  private cacheByTenant: Map<string, { data: BuildPlateType[], timestamp: number }> = new Map();
+  private currentTenantId: string | null = null;
   private subscribers: Set<() => void> = new Set();
   private currentData: BuildPlateType[] = [];
   private isLoading = false;
@@ -122,10 +124,12 @@ class BuildPlateTypesManager {
       return;
     }
 
-    // Check global cache (60 second cache to prevent rapid refetches)
-    if (!force && this.cache && (now - this.cache.timestamp) < 60000) {
-      console.log('✅ Using global cached build plate types');
-      this.currentData = [...this.cache.data]; // Copy to prevent mutations
+    // Check tenant-specific cache (60 second cache to prevent rapid refetches)
+    const tenantCache = this.cacheByTenant.get(tenantId);
+    if (!force && tenantCache && (now - tenantCache.timestamp) < 60000) {
+      console.log('✅ Using cached build plate types for tenant:', tenantId);
+      this.currentTenantId = tenantId;
+      this.currentData = [...tenantCache.data]; // Copy to prevent mutations
       this.isLoading = false;
       this.notifySubscribers();
       return;
@@ -192,13 +196,14 @@ class BuildPlateTypesManager {
         .filter((buildPlate: BuildPlateType) => buildPlate?.is_active && buildPlate?.id && buildPlate?.name)
         .sort((a: BuildPlateType, b: BuildPlateType) => a.name.localeCompare(b.name));
 
-      // Success - reset error count and update cache
+      // Success - reset error count and update tenant-specific cache
       this.errorCount = 0;
       this.circuitBreakerOpen = false;
       this.backoffDelay = 1000; // Reset backoff on success
-      this.cache = { data: activeBuildPlates, timestamp: now };
+      this.cacheByTenant.set(tenantId, { data: activeBuildPlates, timestamp: now });
+      this.currentTenantId = tenantId;
       this.currentData = activeBuildPlates;
-      console.log(`✅ Global build plate types fetch complete: ${activeBuildPlates.length} types`);
+      console.log(`✅ Build plate types fetch complete for tenant ${tenantId}: ${activeBuildPlates.length} types`);
 
     } catch (error) {
       this.errorCount++;
@@ -221,17 +226,25 @@ class BuildPlateTypesManager {
     }
   }
 
-  // Add method to clear cache for testing
+  // Clear all caches - called on signOut/switchTenant to prevent cross-tenant data leakage
   clearCache(): void {
-    this.cache = null;
+    this.cacheByTenant.clear();
+    this.currentTenantId = null;
+    this.currentData = [];
     this.activeRequests.clear();
     this.strictModeGuard.clear();
+    this.notifySubscribers();
     console.log('🧹 BuildPlateTypes cache cleared');
   }
 }
 
+/** Clear the build plate types cache - call on signOut/switchTenant */
+export const clearBuildPlateTypesCache = (): void => {
+  BuildPlateTypesManager.getInstance().clearCache();
+};
+
 export const BuildPlateTypesProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
-  const { tenant } = useTenant();
+  const { tenant, isInitialized } = useTenant();
   const { toast } = useToast();
 
   // Use useRef to maintain stable reference to manager and prevent stale closures
@@ -259,10 +272,15 @@ export const BuildPlateTypesProvider: React.FC<{ children: ReactNode }> = ({ chi
   }, []);
 
   useEffect(() => {
+    // Wait for auth to be fully initialized before making API calls
+    // This prevents race conditions where tenant ID isn't set in the API client yet
+    if (!isInitialized) {
+      return;
+    }
     if (tenant?.id) {
       fetchData(tenant.id);
     }
-  }, [tenant?.id, fetchData]);
+  }, [tenant?.id, isInitialized, fetchData]);
 
   const createBuildPlateType = useCallback(async (name: string, description?: string) => {
     if (!tenant?.id) {

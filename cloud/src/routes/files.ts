@@ -26,6 +26,7 @@ import {
   fileExists,
 } from "../lib/r2";
 import type { PrintFile, PrintFileVersion } from "../types";
+import { parse3MF, validate3MF, getFileExtension } from "../lib/threemf";
 
 export const files = new Hono<HonoEnv>();
 
@@ -67,6 +68,101 @@ const createVersionSchema = z.object({
   r2_key: z.string().min(1),
   notes: z.string().max(500).optional(),
   set_as_current: z.boolean().default(true),
+});
+
+// =============================================================================
+// PARSE METADATA (Client-side 3MF parsing for auto-detection)
+// =============================================================================
+
+/**
+ * POST /api/v1/files/parse-metadata
+ * Parse metadata from a 3MF file without storing it permanently.
+ * Used during product file upload to extract printer model information for auto-detection.
+ *
+ * The file is parsed in memory and the metadata is returned immediately.
+ * Only supports 3MF files as they contain printer model metadata.
+ *
+ * NOTE: This endpoint does NOT require authentication so it can be used
+ * during product creation before files are formally uploaded.
+ */
+files.post("/parse-metadata", async (c) => {
+  try {
+    // Parse multipart form data
+    const formData = await c.req.formData();
+    const file = formData.get("file");
+
+    // In Cloudflare Workers, files from formData are Blob-like objects with a name property
+    if (!file || typeof file === "string") {
+      throw new ApiError("No file provided", 400, "NO_FILE");
+    }
+
+    // Cast to get proper typing - formData files in Workers are File-like
+    const fileBlob = file as unknown as { name: string; arrayBuffer(): Promise<ArrayBuffer> };
+
+    // Validate file type - only 3MF files contain metadata we can parse
+    const fileExtension = getFileExtension(fileBlob.name);
+    if (fileExtension !== "3mf") {
+      throw new ApiError(
+        "Only 3MF files can be parsed for metadata. Other file types (STL, GCODE, etc.) must be manually assigned to a printer model.",
+        400,
+        "INVALID_FILE_TYPE"
+      );
+    }
+
+    // Read file data
+    const arrayBuffer = await fileBlob.arrayBuffer();
+
+    // Validate it's a valid 3MF (ZIP) file
+    if (!validate3MF(arrayBuffer)) {
+      throw new ApiError(
+        "Invalid 3MF file. The file appears to be corrupted or not a valid 3MF.",
+        400,
+        "INVALID_3MF"
+      );
+    }
+
+    // Parse the 3MF file
+    const { metadata } = await parse3MF(arrayBuffer);
+
+    // Check if we got a printer model
+    if (!metadata.printerModelId) {
+      throw new ApiError(
+        "Could not determine printer model from file. The file may not contain valid printer metadata.",
+        400,
+        "NO_PRINTER_MODEL"
+      );
+    }
+
+    console.log(`Parsed metadata from ${fileBlob.name}: printer_model_id=${metadata.printerModelId}`);
+
+    return c.json({
+      success: true,
+      filename: fileBlob.name,
+      printer_model_id: metadata.printerModelId,
+      metadata: {
+        print_time_seconds: metadata.printTimeSeconds,
+        filament_weight_grams: metadata.filamentWeightGrams,
+        filament_length_meters: metadata.filamentLengthMeters,
+        filament_type: metadata.filamentType,
+        printer_model_id: metadata.printerModelId,
+        nozzle_diameter: metadata.nozzleDiameter,
+        layer_count: metadata.layerCount,
+        curr_bed_type: metadata.currBedType,
+        default_print_profile: metadata.defaultPrintProfile,
+        object_count: metadata.objectCount,
+      },
+    });
+  } catch (error) {
+    if (error instanceof ApiError) {
+      throw error;
+    }
+    console.error("Failed to parse 3MF metadata:", error);
+    throw new ApiError(
+      `Failed to parse file metadata: ${error instanceof Error ? error.message : "Unknown error"}`,
+      500,
+      "PARSE_ERROR"
+    );
+  }
 });
 
 // =============================================================================

@@ -176,9 +176,9 @@ colors.post(
 
     // Fetch the created color preset
     const color = await c.env.DB.prepare(
-      "SELECT * FROM color_presets WHERE id = ?"
+      "SELECT * FROM color_presets WHERE id = ? AND tenant_id = ?"
     )
-      .bind(colorId)
+      .bind(colorId, tenantId)
       .first<ColorPreset>();
 
     return c.json(
@@ -290,9 +290,9 @@ colors.put(
 
     // Fetch updated color preset
     const color = await c.env.DB.prepare(
-      "SELECT * FROM color_presets WHERE id = ?"
+      "SELECT * FROM color_presets WHERE id = ? AND tenant_id = ?"
     )
-      .bind(colorId)
+      .bind(colorId, tenantId)
       .first<ColorPreset>();
 
     return c.json({
@@ -441,9 +441,9 @@ colors.post(
         .run();
 
       const color = await c.env.DB.prepare(
-        "SELECT * FROM color_presets WHERE id = ?"
+        "SELECT * FROM color_presets WHERE id = ? AND tenant_id = ?"
       )
-        .bind(colorId)
+        .bind(colorId, tenantId)
         .first<ColorPreset>();
 
       if (color) {
