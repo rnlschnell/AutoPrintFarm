@@ -86,13 +86,17 @@ const createVersionSchema = z.object({
  * during product creation before files are formally uploaded.
  */
 files.post("/parse-metadata", async (c) => {
+  console.log("[parse-metadata] Request received");
   try {
     // Parse multipart form data
     const formData = await c.req.formData();
     const file = formData.get("file");
 
+    console.log("[parse-metadata] File from formData:", file ? "present" : "missing");
+
     // In Cloudflare Workers, files from formData are Blob-like objects with a name property
     if (!file || typeof file === "string") {
+      console.log("[parse-metadata] No file provided or file is string");
       throw new ApiError("No file provided", 400, "NO_FILE");
     }
 
@@ -126,6 +130,7 @@ files.post("/parse-metadata", async (c) => {
 
     // Check if we got a printer model
     if (!metadata.printerModelId) {
+      console.log("[parse-metadata] No printer model ID found in metadata:", JSON.stringify(metadata));
       throw new ApiError(
         "Could not determine printer model from file. The file may not contain valid printer metadata.",
         400,
@@ -133,7 +138,7 @@ files.post("/parse-metadata", async (c) => {
       );
     }
 
-    console.log(`Parsed metadata from ${fileBlob.name}: printer_model_id=${metadata.printerModelId}`);
+    console.log(`[parse-metadata] Successfully parsed metadata from ${fileBlob.name}: printer_model_id=${metadata.printerModelId}`);
 
     return c.json({
       success: true,

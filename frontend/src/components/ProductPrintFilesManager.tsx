@@ -107,16 +107,12 @@ export const ProductPrintFilesManager = ({
 
       // Create temporary file with detected model
       const fileName = file.name;
-      const tempFileData = tempFileManager.addTempPrintFileWithModel(
-        file,
-        fileName,
-        "Product print file",
-        modelCode
-      );
+      const tempFileId = crypto.randomUUID();
+      tempFileManager.add(tempFileId, file);
 
       // Add to files list
       const newFile: PrintFileEntry = {
-        id: tempFileData.id,
+        id: tempFileId,
         printerModelCode: modelCode,
         fileName: fileName,
         isTemp: true
@@ -145,7 +141,7 @@ export const ProductPrintFilesManager = ({
 
     if (fileToRemove?.isTemp) {
       // Remove temp file from manager
-      tempFileManager.removeTempPrintFile(fileId);
+      tempFileManager.remove(fileId);
     }
 
     // Remove from list

@@ -98,6 +98,81 @@ class TempFileManager {
       }
     }
   }
+
+  /**
+   * Process temporary print files by uploading them to the server
+   * Returns a map of temp file IDs to uploaded file IDs
+   */
+  async processTempPrintFiles(tenantId: string): Promise<Map<string, string>> {
+    const results = new Map<string, string>();
+
+    for (const [tempId, tempFile] of this.files.entries()) {
+      try {
+        // Step 1: Get upload URL
+        const uploadUrlResponse = await fetch('/api/v1/files/upload-url', {
+          method: 'POST',
+          credentials: 'include', // Important: send cookies for auth
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Tenant-ID': tenantId,
+          },
+          body: JSON.stringify({
+            filename: tempFile.file.name,
+            content_type: tempFile.file.type || 'application/octet-stream',
+          }),
+        });
+
+        if (!uploadUrlResponse.ok) {
+          throw new Error(`Failed to get upload URL: ${uploadUrlResponse.statusText}`);
+        }
+
+        const uploadUrlData = await uploadUrlResponse.json();
+
+        // Step 2: Upload file
+        const uploadResponse = await fetch(uploadUrlData.data.upload_url, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': uploadUrlData.data.content_type,
+          },
+          body: tempFile.file,
+        });
+
+        if (!uploadResponse.ok) {
+          throw new Error(`Failed to upload file: ${uploadResponse.statusText}`);
+        }
+
+        // Step 3: Create file record
+        const createFileResponse = await fetch('/api/v1/files', {
+          method: 'POST',
+          credentials: 'include', // Important: send cookies for auth
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Tenant-ID': tenantId,
+          },
+          body: JSON.stringify({
+            name: tempFile.file.name,
+            r2_key: uploadUrlData.data.r2_key,
+            file_size_bytes: tempFile.file.size,
+          }),
+        });
+
+        if (!createFileResponse.ok) {
+          throw new Error(`Failed to create file record: ${createFileResponse.statusText}`);
+        }
+
+        const createFileData = await createFileResponse.json();
+        results.set(tempId, createFileData.data.id);
+
+        // Clean up temp file after successful upload
+        this.remove(tempId);
+      } catch (error) {
+        console.error(`Failed to upload temp file ${tempId}:`, error);
+        throw error;
+      }
+    }
+
+    return results;
+  }
 }
 
 // Export a singleton instance

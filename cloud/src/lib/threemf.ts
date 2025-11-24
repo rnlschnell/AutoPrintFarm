@@ -69,12 +69,13 @@ export async function parse3MF(fileData: ArrayBuffer): Promise<ThreeMFParseResul
   const data = new Uint8Array(fileData);
 
   // Unzip the 3MF file
-  const unzipped = await new Promise<fflate.Unzipped>((resolve, reject) => {
-    fflate.unzip(data, (err, result) => {
-      if (err) reject(new Error(`Failed to unzip 3MF file: ${err.message}`));
-      else resolve(result);
-    });
-  });
+  // Use unzipSync instead of unzip because Cloudflare Workers doesn't support Web Workers
+  let unzipped: fflate.Unzipped;
+  try {
+    unzipped = fflate.unzipSync(data);
+  } catch (err) {
+    throw new Error(`Failed to unzip 3MF file: ${err instanceof Error ? err.message : 'Unknown error'}`);
+  }
 
   // Initialize metadata with defaults
   const metadata: ThreeMFMetadata = {
@@ -138,42 +139,115 @@ export async function parse3MF(fileData: ArrayBuffer): Promise<ThreeMFParseResul
  * Handles cases where project_settings.config contains full names like "Bambu Lab A1 mini"
  */
 const PRINTER_NAME_TO_ID: Record<string, string> = {
+  // X1 Series
   'Bambu Lab X1-Carbon': 'X1C',
   'Bambu Lab X1 Carbon': 'X1C',
+  'Bambu Lab X1-Carbon (0.4 nozzle)': 'X1C',
+  'Bambu Lab X1 Carbon (0.4 nozzle)': 'X1C',
+  'Bambu Lab X1C': 'X1C',
+  'X1C': 'X1C',
+  'X1-Carbon': 'X1C',
+  'X1 Carbon': 'X1C',
   'Bambu Lab X1': 'X1',
+  'X1': 'X1',
   'Bambu Lab X1E': 'X1E',
+  'X1E': 'X1E',
+  // P1 Series
   'Bambu Lab P1P': 'P1P',
+  'Bambu Lab P1P (0.4 nozzle)': 'P1P',
+  'P1P': 'P1P',
   'Bambu Lab P1S': 'P1S',
+  'Bambu Lab P1S (0.4 nozzle)': 'P1S',
+  'P1S': 'P1S',
+  // A1 Series - Note: A1 mini = N1, A1 = N2S in Bambu's internal naming
   'Bambu Lab A1 mini': 'N1',
   'Bambu Lab A1 Mini': 'N1',
+  'Bambu Lab A1 mini (0.4 nozzle)': 'N1',
+  'Bambu Lab A1 Mini (0.4 nozzle)': 'N1',
+  'A1 mini': 'N1',
+  'A1 Mini': 'N1',
+  'A1mini': 'N1',
+  'N1': 'N1',
   'Bambu Lab A1': 'N2S',
+  'Bambu Lab A1 (0.4 nozzle)': 'N2S',
+  'A1': 'N2S',
+  'N2S': 'N2S',
 };
 
 /**
  * Map a printer name to its short ID
+ * Handles various formats from Bambu Studio, OrcaSlicer, and other slicers:
+ * - Full names: "Bambu Lab A1 mini", "Bambu Lab X1-Carbon"
+ * - Short IDs: "N1", "X1C", "P1S"
+ * - Profile names: "Bambu Lab A1 0.4 nozzle", "Bambu Lab P1S (0.4 nozzle)"
+ * - printer_settings_id format: "Bambu Lab A1 mini 0.4 nozzle"
  */
 function mapPrinterNameToId(printerName: string | null | undefined): string | null {
   if (!printerName) return null;
 
-  // First check direct mapping
-  const mapped = PRINTER_NAME_TO_ID[printerName];
+  // Normalize: trim whitespace
+  const name = printerName.trim();
+  if (!name) return null;
+
+  // First check direct mapping (case-sensitive for exact matches)
+  const mapped = PRINTER_NAME_TO_ID[name];
   if (mapped) return mapped;
 
-  // If it's already a short ID, return it
-  const shortIds = ['X1C', 'X1', 'X1E', 'P1P', 'P1S', 'N1', 'N2S'];
-  if (shortIds.includes(printerName.toUpperCase())) {
-    return printerName.toUpperCase();
+  // Check case-insensitive direct mapping
+  const lowerName = name.toLowerCase();
+  for (const [key, value] of Object.entries(PRINTER_NAME_TO_ID)) {
+    if (key.toLowerCase() === lowerName) {
+      return value;
+    }
   }
 
-  // Try partial match
-  const lowerName = printerName.toLowerCase();
-  if (lowerName.includes('x1-carbon') || lowerName.includes('x1 carbon')) return 'X1C';
-  if (lowerName.includes('x1e')) return 'X1E';
-  if (lowerName.includes('x1')) return 'X1';
-  if (lowerName.includes('p1p')) return 'P1P';
-  if (lowerName.includes('p1s')) return 'P1S';
-  if (lowerName.includes('a1 mini') || lowerName.includes('a1mini')) return 'N1';
-  if (lowerName.includes('a1')) return 'N2S';
+  // If it's already a short ID (case-insensitive), return normalized
+  const upperName = name.toUpperCase();
+  const shortIds = ['X1C', 'X1', 'X1E', 'P1P', 'P1S', 'N1', 'N2S'];
+  if (shortIds.includes(upperName)) {
+    return upperName;
+  }
+
+  // Try partial matching for various formats
+  // Order matters: more specific patterns first
+
+  // X1 Series (check X1C/X1E before generic X1)
+  if (lowerName.includes('x1-carbon') || lowerName.includes('x1 carbon') || lowerName.includes('x1c')) {
+    return 'X1C';
+  }
+  if (lowerName.includes('x1e')) {
+    return 'X1E';
+  }
+  // Generic X1 - but not if it's part of another model name
+  if (/\bx1\b/.test(lowerName) && !lowerName.includes('x1c') && !lowerName.includes('x1e') && !lowerName.includes('x1-') && !lowerName.includes('x1 c')) {
+    return 'X1';
+  }
+
+  // P1 Series
+  if (lowerName.includes('p1p')) {
+    return 'P1P';
+  }
+  if (lowerName.includes('p1s')) {
+    return 'P1S';
+  }
+
+  // A1 Series - check A1 mini before generic A1
+  // Handles: "a1 mini", "a1mini", "a1 mini 0.4 nozzle", etc.
+  if (lowerName.includes('a1 mini') || lowerName.includes('a1mini') || lowerName.includes('a1-mini')) {
+    return 'N1';
+  }
+  // Generic A1 - matches "a1", "a1 0.4 nozzle", etc. but not "a1 mini"
+  if (/\ba1\b/.test(lowerName) && !lowerName.includes('mini')) {
+    return 'N2S';
+  }
+
+  // Last resort: check if it contains N1 or N2S directly (Bambu internal names)
+  if (/\bn1\b/i.test(name)) {
+    return 'N1';
+  }
+  if (/\bn2s\b/i.test(name)) {
+    return 'N2S';
+  }
 
   return null;
 }
@@ -351,6 +425,7 @@ function extractSliceInfo(config: Record<string, string>, metadata: ThreeMFMetad
 
   // Printer model - from <metadata key="printer_model_id" value="..."/>
   if (config.printer_model_id && !metadata.printerModelId) {
+    console.log(`[3MF] Found printer_model_id in slice_info: "${config.printer_model_id}"`);
     metadata.printerModelId = config.printer_model_id;
   }
 
@@ -413,7 +488,9 @@ function extractProjectConfig(config: Record<string, string>, metadata: ThreeMFM
   // Map printer_model (e.g., "Bambu Lab A1 mini") to short ID (e.g., "N1")
   // This overrides any printer_model_id from slice_info.config
   if (config.printer_model) {
+    console.log(`[3MF] Found printer_model in project_settings: "${config.printer_model}"`);
     const mappedId = mapPrinterNameToId(config.printer_model);
+    console.log(`[3MF] Mapped to: "${mappedId}"`);
     if (mappedId) {
       metadata.printerModelId = mappedId;
     }
@@ -421,7 +498,9 @@ function extractProjectConfig(config: Record<string, string>, metadata: ThreeMFM
 
   // Fallback to printer_settings_id if printer_model not found
   if (!metadata.printerModelId && config.printer_settings_id) {
+    console.log(`[3MF] Fallback: trying printer_settings_id="${config.printer_settings_id}"`);
     const mappedId = mapPrinterNameToId(config.printer_settings_id);
+    console.log(`[3MF] Fallback mapped to: "${mappedId}"`);
     metadata.printerModelId = mappedId || config.printer_settings_id;
   }
 
