@@ -2,21 +2,17 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Progress } from "@/components/ui/progress";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
-import { useServerInfo } from "@/hooks/useServerInfo";
 import FilamentColorTypeModal from "@/components/FilamentColorTypeModal";
 import UserManagement from "@/components/auth/UserManagement";
 import LogsManagement from "@/components/LogsManagement";
 import BackupManagement from "@/components/BackupManagement";
-import { Activity, HardDrive, Cpu } from "lucide-react";
 
 const Settings = () => {
   const { toast } = useToast();
   const { profile } = useAuth();
   const [isColorModalOpen, setIsColorModalOpen] = useState(false);
-  const { serverInfo, loading: serverLoading } = useServerInfo();
 
   const handleSave = () => {
     toast({
@@ -24,13 +20,6 @@ const Settings = () => {
       description: "Your settings have been successfully updated.",
     });
   };
-
-  const getStatusColor = (percent: number) => {
-    if (percent < 70) return "bg-green-500";
-    if (percent < 85) return "bg-yellow-500";
-    return "bg-red-500";
-  };
-
 
   return (
     <div className="flex flex-col gap-8">
@@ -69,74 +58,6 @@ const Settings = () => {
                   >
                     Manage Colors & Types
                   </Button>
-                </div>
-              </div>
-
-              {/* Server Info */}
-              <div className="space-y-4">
-                <div className="space-y-2">
-                  <Label>Server Info</Label>
-                  <div className="text-sm text-muted-foreground mb-3">Live server resource usage and performance metrics.</div>
-
-                  {serverLoading ? (
-                    <div className="text-sm text-muted-foreground">Loading server info...</div>
-                  ) : serverInfo ? (
-                    <div className="space-y-4">
-                      {/* CPU Usage */}
-                      <div className="space-y-2">
-                        <div className="flex items-center justify-between text-sm">
-                          <div className="flex items-center gap-2">
-                            <Cpu className="h-4 w-4" />
-                            <span>CPU Usage</span>
-                          </div>
-                          <span className="font-medium">{serverInfo.cpu_percent.toFixed(1)}%</span>
-                        </div>
-                        <Progress
-                          value={serverInfo.cpu_percent}
-                          className="h-2"
-                          indicatorClassName={getStatusColor(serverInfo.cpu_percent)}
-                        />
-                      </div>
-
-                      {/* Memory Usage */}
-                      <div className="space-y-2">
-                        <div className="flex items-center justify-between text-sm">
-                          <div className="flex items-center gap-2">
-                            <Activity className="h-4 w-4" />
-                            <span>Memory Usage</span>
-                          </div>
-                          <span className="font-medium">
-                            {serverInfo.memory_percent.toFixed(1)}% ({serverInfo.memory_available_mb.toFixed(0)} MB free)
-                          </span>
-                        </div>
-                        <Progress
-                          value={serverInfo.memory_percent}
-                          className="h-2"
-                          indicatorClassName={getStatusColor(serverInfo.memory_percent)}
-                        />
-                      </div>
-
-                      {/* Disk Usage */}
-                      <div className="space-y-2">
-                        <div className="flex items-center justify-between text-sm">
-                          <div className="flex items-center gap-2">
-                            <HardDrive className="h-4 w-4" />
-                            <span>Disk Usage</span>
-                          </div>
-                          <span className="font-medium">
-                            {serverInfo.disk_percent.toFixed(1)}% ({serverInfo.disk_free_gb.toFixed(1)} GB free)
-                          </span>
-                        </div>
-                        <Progress
-                          value={serverInfo.disk_percent}
-                          className="h-2"
-                          indicatorClassName={getStatusColor(serverInfo.disk_percent)}
-                        />
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="text-sm text-red-500">Failed to load server info</div>
-                  )}
                 </div>
               </div>
             </div>

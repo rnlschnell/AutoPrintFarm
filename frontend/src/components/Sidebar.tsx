@@ -1,6 +1,6 @@
 
 import { NavLink } from 'react-router-dom';
-import { LayoutDashboard, Printer, List, Package, Bot, X, Settings, File, Layers, ShoppingCart, BarChart, Users, Store, ClipboardList } from 'lucide-react';
+import { LayoutDashboard, Printer, List, Package, Bot, X, Settings, File, Layers, ShoppingCart, BarChart, ClipboardList } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/contexts/AuthContext';
@@ -23,8 +23,6 @@ const Sidebar = ({ sidebarOpen, setSidebarOpen }: SidebarProps) => {
     { href: '/inventory', label: 'Finished Goods', icon: Package },
     { href: '/orders', label: 'Orders', icon: ShoppingCart },
     { href: '/analytics', label: 'Analytics', icon: BarChart },
-    { href: '/store', label: 'Store', icon: Store },
-    
     { href: '/settings', label: 'Settings', icon: Settings },
   ];
   return (

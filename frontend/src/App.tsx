@@ -13,12 +13,10 @@ import PrintQueue from "./pages/PrintQueue";
 import MaterialInventory from "./pages/MaterialInventory";
 import Inventory from "./pages/Inventory";
 import Settings from "./pages/Settings";
-import Store from "./pages/Store";
 import { ThemeProvider } from "./components/ThemeProvider";
 import Products from "./pages/Products";
 import Orders from "./pages/Orders";
 import Analytics from "./pages/Analytics";
-import ProductDetail from "./pages/ProductDetail";
 import WikiManagement from "./pages/WikiManagement";
 import WikiEditor from "./pages/WikiEditor";
 import WikiView from "./pages/WikiView";
@@ -64,8 +62,6 @@ const App = () => {
                 <Route path="inventory" element={<Inventory />} />
                 <Route path="orders" element={<Orders />} />
                 <Route path="analytics" element={<Analytics />} />
-                <Route path="store" element={<Store />} />
-                <Route path="store/product/:id" element={<ProductDetail />} />
                 <Route path="wiki-management" element={<WikiManagement />} />
                 <Route path="wiki-management/new" element={<WikiEditor />} />
                 <Route path="wiki-management/:wikiId" element={<WikiEditor />} />
