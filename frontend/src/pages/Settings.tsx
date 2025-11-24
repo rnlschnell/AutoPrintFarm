@@ -10,7 +10,6 @@ import FilamentColorTypeModal from "@/components/FilamentColorTypeModal";
 import UserManagement from "@/components/auth/UserManagement";
 import LogsManagement from "@/components/LogsManagement";
 import BackupManagement from "@/components/BackupManagement";
-import TunnelStatus from "@/components/TunnelStatus";
 import { Activity, HardDrive, Cpu } from "lucide-react";
 
 const Settings = () => {
@@ -53,9 +52,6 @@ const Settings = () => {
         </TabsList>
 
         <TabsContent value="general" className="space-y-8">
-          {/* Remote Access Status */}
-          <TunnelStatus />
-
           <div className="rounded-lg border p-6">
             <h2 className="text-xl font-semibold mb-4">General Settings</h2>
             <p className="text-muted-foreground mb-6">Configure general preferences for your print farm.</p>

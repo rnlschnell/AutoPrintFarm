@@ -1,33 +1,42 @@
-import React, { createContext, useContext, useEffect, useState } from 'react';
-import { User, Session } from '@supabase/supabase-js';
-import { supabase } from '@/integrations/supabase/client';
+import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
+import { authClient, type AuthSession, type RegisterResponse } from '@/lib/auth-client';
+import { api, setCurrentTenantId } from '@/lib/api-client';
+import type { User, Tenant, TenantMember } from '@/types/api';
+
+// =============================================================================
+// TYPES
+// =============================================================================
 
 interface Profile {
   id: string;
   email: string;
-  first_name: string;
-  last_name: string | null;
+  full_name: string;
   role: string | null;
   tenant_id: string | null;
 }
 
-interface Tenant {
-  id: string;
-  company_name: string;
-  subdomain?: string | null;
-}
-
 interface AuthContextType {
   user: User | null;
-  session: Session | null;
+  session: AuthSession['session'] | null;
   tenantId: string | null;
   profile: Profile | null;
   tenant: Tenant | null;
+  tenants: Tenant[];
   loading: boolean;
-  signIn: (email: string, password: string) => Promise<{ error: any }>;
-  signUp: (email: string, password: string, firstName: string, lastName: string, companyName: string, subdomain?: string) => Promise<{ error: any }>;
+  /** Critical auth error that requires user action (e.g., tenant creation failed) */
+  authError: string | null;
+  /** Clear the auth error */
+  clearAuthError: () => void;
+  signIn: (email: string, password: string) => Promise<{ error: Error | null }>;
+  signUp: (email: string, password: string, firstName: string, lastName: string, companyName: string) => Promise<{ error: Error | null }>;
   signOut: () => Promise<void>;
+  switchTenant: (tenantId: string) => Promise<void>;
+  refreshSession: () => Promise<void>;
 }
+
+// =============================================================================
+// CONTEXT
+// =============================================================================
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
@@ -39,224 +48,408 @@ export const useAuth = () => {
   return context;
 };
 
+// =============================================================================
+// PROVIDER
+// =============================================================================
+
 export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
   const [user, setUser] = useState<User | null>(null);
-  const [session, setSession] = useState<Session | null>(null);
+  const [session, setSession] = useState<AuthSession['session'] | null>(null);
   const [tenantId, setTenantId] = useState<string | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [tenant, setTenant] = useState<Tenant | null>(null);
+  const [tenants, setTenants] = useState<Tenant[]>([]);
   const [loading, setLoading] = useState(true);
+  const [authError, setAuthError] = useState<string | null>(null);
 
-  const fetchTenant = async (tenantId: string, userMetadata: any) => {
-    try {
-      const { data: tenantData, error } = await supabase
-        .from('tenants')
-        .select('id, company_name, subdomain')
-        .eq('id', tenantId)
-        .single();
-
-      if (tenantData && !error) {
-        setTenant(tenantData);
-      } else {
-        // Fallback to metadata if database fetch fails
-        setTenant({
-          id: tenantId,
-          company_name: userMetadata?.company_name || 'AutoPrintFarm',
-          subdomain: null
-        });
-      }
-    } catch (error) {
-      console.error('Error fetching tenant:', error);
-      // Fallback to metadata on error
-      setTenant({
-        id: tenantId,
-        company_name: userMetadata?.company_name || 'AutoPrintFarm',
-        subdomain: null
-      });
-    }
-  };
-
-  const fetchProfile = async (userId: string, userTenantId: string | null, userMetadata: any) => {
-    try {
-      const { data: profileData, error } = await supabase
-        .from('profiles')
-        .select('*')
-        .eq('id', userId)
-        .single();
-
-      if (profileData && !error) {
-        setProfile(profileData);
-      } else {
-        // Fallback to metadata if database fetch fails
-        setProfile({
-          id: userId,
-          email: userMetadata?.email || '',
-          first_name: userMetadata?.first_name || '',
-          last_name: userMetadata?.last_name || null,
-          role: userMetadata?.role || null,
-          tenant_id: userTenantId
-        });
-      }
-    } catch (error) {
-      console.error('Error fetching profile:', error);
-      // Fallback to metadata on error
-      setProfile({
-        id: userId,
-        email: userMetadata?.email || '',
-        first_name: userMetadata?.first_name || '',
-        last_name: userMetadata?.last_name || null,
-        role: userMetadata?.role || null,
-        tenant_id: userTenantId
-      });
-    }
-  };
-
-  useEffect(() => {
-    // Get initial session
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session);
-      setUser(session?.user ?? null);
-
-      const userTenantId = session?.user?.user_metadata?.tenant_id ?? null;
-      setTenantId(userTenantId);
-
-      // Defer profile and tenant fetching to avoid deadlock
-      if (session?.user) {
-        setTimeout(() => {
-          fetchProfile(session.user.id, userTenantId, session.user.user_metadata);
-
-          // Fetch tenant details from database (including subdomain)
-          if (userTenantId) {
-            fetchTenant(userTenantId, session.user.user_metadata);
-          }
-        }, 0);
-      } else {
-        setProfile(null);
-        setTenant(null);
-      }
-
-      setLoading(false);
-    });
-
-    // Listen for auth changes
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      (event, session) => {
-        setSession(session);
-        setUser(session?.user ?? null);
-
-        const userTenantId = session?.user?.user_metadata?.tenant_id ?? null;
-        setTenantId(userTenantId);
-
-        // Defer profile and tenant fetching to avoid deadlock
-        if (session?.user) {
-          setTimeout(() => {
-            fetchProfile(session.user.id, userTenantId, session.user.user_metadata);
-
-            // Fetch tenant details from database (including subdomain)
-            if (userTenantId) {
-              fetchTenant(userTenantId, session.user.user_metadata);
-            }
-          }, 0);
-        } else {
-          setProfile(null);
-          setTenant(null);
-        }
-
-        setLoading(false);
-      }
-    );
-
-    return () => subscription.unsubscribe();
+  /**
+   * Clear auth error
+   */
+  const clearAuthError = useCallback(() => {
+    setAuthError(null);
   }, []);
 
-  const signIn = async (email: string, password: string) => {
+  /**
+   * Fetch user's tenants from the API
+   */
+  const fetchTenants = useCallback(async (): Promise<Tenant[]> => {
     try {
-      // Call Pi backend authentication endpoint to update tenant_config.yaml
-      const response = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password })
-      });
+      // Backend returns { success: true, data: tenants[] }
+      // api.get unwraps to return just the data, which is the array
+      const response = await api.get<Tenant[]>('/api/v1/tenants');
+      return Array.isArray(response) ? response : [];
+    } catch (error) {
+      console.error('Error fetching tenants:', error);
+      return [];
+    }
+  }, []);
 
-      const data = await response.json();
+  /**
+   * Fetch single tenant details
+   */
+  const fetchTenant = useCallback(async (id: string): Promise<Tenant | null> => {
+    try {
+      const response = await api.get<Tenant>(`/api/v1/tenants/${id}`);
+      return response;
+    } catch (error) {
+      console.error('Error fetching tenant:', error);
+      return null;
+    }
+  }, []);
 
-      if (!response.ok) {
-        return { error: new Error(data.detail || 'Login failed') };
+  /**
+   * Fetch tenant membership to get user's role
+   */
+  const fetchMembership = useCallback(async (tenantIdToFetch: string, userId: string): Promise<TenantMember | null> => {
+    try {
+      // Backend returns { success: true, data: members[] }
+      // api.get unwraps to return just the data, which is the array
+      const response = await api.get<TenantMember[]>(`/api/v1/tenants/${tenantIdToFetch}/members`);
+      const members = Array.isArray(response) ? response : [];
+      const member = members.find(m => m.user_id === userId);
+      return member || null;
+    } catch (error) {
+      console.error('Error fetching membership:', error);
+      return null;
+    }
+  }, []);
+
+  /**
+   * Ensure user has a tenant - creates one if they don't have any
+   * This is a fallback for users who existed before atomic registration was implemented.
+   * New users registered via /register always have a tenant.
+   */
+  const ensureTenant = useCallback(async (): Promise<Tenant | null> => {
+    try {
+      console.warn('[Auth] User has no tenants - this should only happen for legacy users');
+      const response = await api.post<Tenant>('/api/v1/tenants/ensure', {});
+      return response;
+    } catch (error) {
+      console.error('Error ensuring tenant:', error);
+      return null;
+    }
+  }, []);
+
+  /**
+   * Initialize auth state from session
+   * This is called on app load and after sign-in.
+   *
+   * For NEW users: Registration via /register guarantees they have a tenant.
+   * For EXISTING users: They should already have a tenant. If not, ensureTenant is a fallback.
+   */
+  const initializeAuth = useCallback(async (authSession: AuthSession) => {
+    if (authSession.user && authSession.session) {
+      setUser(authSession.user);
+      setSession(authSession.session);
+
+      // Fetch user's tenants
+      const userTenants = await fetchTenants();
+      setTenants(userTenants);
+
+      // Get stored tenant ID or use first tenant
+      const storedTenantId = localStorage.getItem('printfarm_tenant_id');
+      let selectedTenantId = storedTenantId;
+
+      // Validate stored tenant ID is in user's tenants
+      if (storedTenantId && !userTenants.find(t => t.id === storedTenantId)) {
+        // Stored tenant is invalid (user removed from it, etc.)
+        localStorage.removeItem('printfarm_tenant_id');
+        selectedTenantId = null;
       }
 
-      // Backend has updated tenant_config.yaml, now authenticate with Supabase
-      const { error } = await supabase.auth.signInWithPassword({
-        email,
-        password,
-      });
+      // Default to first tenant if no valid stored tenant
+      if (!selectedTenantId && userTenants.length > 0) {
+        selectedTenantId = userTenants[0].id;
+      }
 
-      if (error) {
-        return { error };
+      if (selectedTenantId) {
+        // Normal case: user has a tenant
+        setTenantId(selectedTenantId);
+        setCurrentTenantId(selectedTenantId);
+        localStorage.setItem('printfarm_tenant_id', selectedTenantId);
+
+        // Fetch tenant details
+        const tenantDetails = await fetchTenant(selectedTenantId);
+        if (tenantDetails) {
+          setTenant(tenantDetails);
+        }
+
+        // Fetch membership for role
+        const membership = await fetchMembership(selectedTenantId, authSession.user.id);
+
+        // Build profile from user and membership
+        setProfile({
+          id: authSession.user.id,
+          email: authSession.user.email,
+          full_name: authSession.user.full_name,
+          role: membership?.role || null,
+          tenant_id: selectedTenantId,
+        });
+      } else {
+        // Edge case: User has no tenants
+        // This should NOT happen for users registered via /register
+        // But it's a fallback for legacy users or data corruption
+        const ensuredTenant = await ensureTenant();
+
+        if (ensuredTenant) {
+          setTenantId(ensuredTenant.id);
+          setTenant(ensuredTenant);
+          setTenants([ensuredTenant]);
+          setCurrentTenantId(ensuredTenant.id);
+          localStorage.setItem('printfarm_tenant_id', ensuredTenant.id);
+
+          setProfile({
+            id: authSession.user.id,
+            email: authSession.user.email,
+            full_name: authSession.user.full_name,
+            role: 'owner', // User who creates tenant is always owner
+            tenant_id: ensuredTenant.id,
+          });
+        } else {
+          // Critical error: Cannot create tenant for user
+          // This is a fatal state - user cannot use the app
+          // Sign out the user and show error message
+          console.error('[Auth] CRITICAL: Failed to ensure tenant for user. Forcing sign out.');
+
+          // Clear all state
+          setUser(null);
+          setSession(null);
+          setTenantId(null);
+          setTenant(null);
+          setTenants([]);
+          setProfile(null);
+          setCurrentTenantId(null);
+          localStorage.removeItem('printfarm_tenant_id');
+
+          // Try to sign out on server
+          try {
+            await authClient.signOut();
+          } catch {
+            // Ignore sign out errors
+          }
+
+          // Set user-facing error message
+          setAuthError(
+            'Account setup failed: Unable to create your organization. ' +
+            'Please try signing up again or contact support if the problem persists.'
+          );
+        }
+      }
+    } else {
+      // No session - clear everything
+      setUser(null);
+      setSession(null);
+      setTenantId(null);
+      setTenant(null);
+      setTenants([]);
+      setProfile(null);
+      setCurrentTenantId(null);
+    }
+  }, [fetchTenants, fetchTenant, fetchMembership, ensureTenant]);
+
+  /**
+   * Get initial session on mount
+   */
+  useEffect(() => {
+    const getInitialSession = async () => {
+      try {
+        const result = await authClient.getSession();
+        if (result.data) {
+          await initializeAuth(result.data);
+        }
+      } catch (error) {
+        console.error('Error getting initial session:', error);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    getInitialSession();
+  }, [initializeAuth]);
+
+  /**
+   * Sign in with email and password
+   */
+  const signIn = async (email: string, password: string): Promise<{ error: Error | null }> => {
+    try {
+      const result = await authClient.signIn({ email, password });
+
+      if (result.error) {
+        return { error: new Error(result.error.message) };
+      }
+
+      if (result.data) {
+        await initializeAuth(result.data);
       }
 
       return { error: null };
-    } catch (error: any) {
-      return { error };
+    } catch (error) {
+      return { error: error instanceof Error ? error : new Error('Sign in failed') };
     }
   };
 
-  const signUp = async (email: string, password: string, firstName: string, lastName: string, companyName: string, subdomain?: string) => {
+  /**
+   * Sign up with email, password, and profile info
+   * Uses the atomic /register endpoint that creates user + tenant together.
+   * This guarantees every user has exactly one tenant - no race conditions.
+   */
+  const signUp = async (
+    email: string,
+    password: string,
+    firstName: string,
+    lastName: string,
+    companyName: string
+  ): Promise<{ error: Error | null }> => {
     try {
-      // Call backend signup API endpoint
-      const response = await fetch('/api/auth/signup', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          email,
-          password,
-          first_name: firstName,
-          last_name: lastName,
-          company_name: companyName,
-          subdomain: subdomain || null  // Pass subdomain or null for auto-generation
-        })
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        return { error: new Error(data.detail || 'Signup failed') };
-      }
-
-      // Sign in after successful signup
-      const { error: signInError } = await supabase.auth.signInWithPassword({
+      // Use the atomic register endpoint
+      const result = await authClient.register({
         email,
         password,
+        name: `${firstName} ${lastName}`.trim(),
+        company_name: companyName || undefined,
       });
 
-      if (signInError) {
-        return { error: signInError };
+      if (result.error) {
+        return { error: new Error(result.error.message) };
       }
 
-      // Display success message with subdomain info
-      if (data.subdomain) {
-        console.log(`Account created successfully! Your domain: ${data.full_domain}`);
+      if (result.data) {
+        // The register response includes user, session, and tenant
+        // Set everything directly - no need to fetch anything
+        const { user: regUser, session: regSession, tenant: regTenant } = result.data;
+
+        // Transform to our User type
+        const transformedUser: User = {
+          id: regUser.id,
+          email: regUser.email,
+          full_name: regUser.name,
+          is_active: 1,
+          last_login: null,
+          created_at: regUser.createdAt,
+          updated_at: regUser.updatedAt,
+        };
+
+        setUser(transformedUser);
+        setSession({
+          id: regSession.id,
+          userId: regSession.userId,
+          expiresAt: regSession.expiresAt,
+          user: transformedUser,
+        });
+
+        // Set tenant directly from response
+        const tenantData: Tenant = {
+          id: regTenant.id,
+          subdomain: regTenant.subdomain,
+          company_name: regTenant.company_name,
+          is_active: 1,
+          role: regTenant.role,
+        };
+
+        setTenantId(regTenant.id);
+        setTenant(tenantData);
+        setTenants([tenantData]);
+        setCurrentTenantId(regTenant.id);
+        localStorage.setItem('printfarm_tenant_id', regTenant.id);
+
+        // Set profile
+        setProfile({
+          id: regUser.id,
+          email: regUser.email,
+          full_name: regUser.name,
+          role: regTenant.role,
+          tenant_id: regTenant.id,
+        });
       }
 
       return { error: null };
-    } catch (error: any) {
-      return { error };
+    } catch (error) {
+      return { error: error instanceof Error ? error : new Error('Sign up failed') };
     }
   };
 
-  const signOut = async () => {
-    await supabase.auth.signOut();
+  /**
+   * Sign out the current user
+   */
+  const signOut = async (): Promise<void> => {
+    try {
+      await authClient.signOut();
+    } catch (error) {
+      console.error('Error signing out:', error);
+    } finally {
+      // Clear state regardless of API result
+      setUser(null);
+      setSession(null);
+      setTenantId(null);
+      setTenant(null);
+      setTenants([]);
+      setProfile(null);
+      setCurrentTenantId(null);
+      localStorage.removeItem('printfarm_tenant_id');
+    }
   };
 
-  const value = {
+  /**
+   * Switch to a different tenant
+   */
+  const switchTenant = async (newTenantId: string): Promise<void> => {
+    // Validate tenant is in user's tenants
+    const targetTenant = tenants.find(t => t.id === newTenantId);
+    if (!targetTenant) {
+      throw new Error('Invalid tenant');
+    }
+
+    setTenantId(newTenantId);
+    setTenant(targetTenant);
+    setCurrentTenantId(newTenantId);
+    localStorage.setItem('printfarm_tenant_id', newTenantId);
+
+    // Update profile with new tenant and role
+    if (user) {
+      const membership = await fetchMembership(newTenantId, user.id);
+      if (profile) {
+        setProfile({
+          ...profile,
+          tenant_id: newTenantId,
+          role: membership?.role || null,
+        });
+      }
+    }
+  };
+
+  /**
+   * Refresh the current session
+   */
+  const refreshSession = async (): Promise<void> => {
+    try {
+      const result = await authClient.getSession();
+      if (result.data) {
+        await initializeAuth(result.data);
+      }
+    } catch (error) {
+      console.error('Error refreshing session:', error);
+    }
+  };
+
+  // =============================================================================
+  // RENDER
+  // =============================================================================
+
+  const value: AuthContextType = {
     user,
     session,
     tenantId,
     profile,
     tenant,
+    tenants,
     loading,
+    authError,
+    clearAuthError,
     signIn,
     signUp,
     signOut,
+    switchTenant,
+    refreshSession,
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

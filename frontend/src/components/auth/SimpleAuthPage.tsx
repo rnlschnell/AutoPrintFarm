@@ -4,16 +4,25 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Building2, Loader2, Check, X } from 'lucide-react';
+import { Building2, Loader2, AlertCircle } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 
 const SimpleAuthPage = () => {
-  const { signIn, signUp } = useAuth();
+  const { signIn, signUp, authError, clearAuthError } = useAuth();
   const navigate = useNavigate();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Show critical auth errors from context (e.g., tenant creation failed)
+  useEffect(() => {
+    if (authError) {
+      setError(authError);
+      // Clear the context error after displaying it
+      clearAuthError();
+    }
+  }, [authError, clearAuthError]);
 
   const [signInData, setSignInData] = useState({
     email: '',
@@ -27,76 +36,7 @@ const SimpleAuthPage = () => {
     firstName: '',
     lastName: '',
     companyName: '',
-    subdomain: '',
   });
-
-  const [subdomainStatus, setSubdomainStatus] = useState<{
-    checking: boolean;
-    available: boolean | null;
-    message: string;
-  }>({
-    checking: false,
-    available: null,
-    message: '',
-  });
-
-  // Debounced subdomain availability check
-  useEffect(() => {
-    const checkSubdomain = async () => {
-      const subdomain = signUpData.subdomain.trim();
-
-      if (!subdomain) {
-        setSubdomainStatus({ checking: false, available: null, message: '' });
-        return;
-      }
-
-      // Validate format
-      const subdomainRegex = /^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/;
-      if (!subdomainRegex.test(subdomain)) {
-        setSubdomainStatus({
-          checking: false,
-          available: false,
-          message: 'Use only lowercase letters, numbers, and hyphens (3-63 characters)'
-        });
-        return;
-      }
-
-      setSubdomainStatus({ checking: true, available: null, message: 'Checking...' });
-
-      try {
-        const response = await fetch('/api/auth/check-subdomain', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ subdomain })
-        });
-
-        const data = await response.json();
-
-        if (data.available) {
-          setSubdomainStatus({
-            checking: false,
-            available: true,
-            message: 'Available'
-          });
-        } else {
-          setSubdomainStatus({
-            checking: false,
-            available: false,
-            message: 'Already taken'
-          });
-        }
-      } catch (error) {
-        setSubdomainStatus({
-          checking: false,
-          available: false,
-          message: 'Error checking availability'
-        });
-      }
-    };
-
-    const timeoutId = setTimeout(checkSubdomain, 500); // 500ms debounce
-    return () => clearTimeout(timeoutId);
-  }, [signUpData.subdomain]);
 
   const handleSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -122,14 +62,8 @@ const SimpleAuthPage = () => {
       return;
     }
 
-    if (signUpData.password.length < 6) {
-      setError('Password must be at least 6 characters');
-      return;
-    }
-
-    // If subdomain is provided, ensure it's available
-    if (signUpData.subdomain && !subdomainStatus.available) {
-      setError('Please choose an available subdomain');
+    if (signUpData.password.length < 8) {
+      setError('Password must be at least 8 characters');
       return;
     }
 
@@ -141,8 +75,7 @@ const SimpleAuthPage = () => {
       signUpData.password,
       signUpData.firstName,
       signUpData.lastName,
-      signUpData.companyName,
-      signUpData.subdomain || undefined  // Pass subdomain or undefined for auto-generation
+      signUpData.companyName
     );
 
     if (error) {
@@ -247,59 +180,6 @@ const SimpleAuthPage = () => {
                     onChange={(e) => setSignUpData({ ...signUpData, companyName: e.target.value })}
                     required
                   />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="signup-subdomain">
-                    Your Subdomain <span className="text-muted-foreground font-normal">(optional)</span>
-                  </Label>
-                  <div className="flex items-center gap-2">
-                    <div className="flex-1 relative">
-                      <Input
-                        id="signup-subdomain"
-                        type="text"
-                        placeholder="my-farm"
-                        value={signUpData.subdomain}
-                        onChange={(e) => setSignUpData({ ...signUpData, subdomain: e.target.value.toLowerCase() })}
-                        className={
-                          signUpData.subdomain
-                            ? subdomainStatus.available
-                              ? 'border-green-500'
-                              : subdomainStatus.available === false
-                              ? 'border-red-500'
-                              : ''
-                            : ''
-                        }
-                      />
-                      {signUpData.subdomain && (
-                        <div className="absolute right-3 top-1/2 -translate-y-1/2">
-                          {subdomainStatus.checking ? (
-                            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-                          ) : subdomainStatus.available === true ? (
-                            <Check className="h-4 w-4 text-green-500" />
-                          ) : subdomainStatus.available === false ? (
-                            <X className="h-4 w-4 text-red-500" />
-                          ) : null}
-                        </div>
-                      )}
-                    </div>
-                    <span className="text-sm text-muted-foreground whitespace-nowrap">.autoprintfarm.com</span>
-                  </div>
-                  {signUpData.subdomain && (
-                    <p className={`text-xs ${
-                      subdomainStatus.available === true
-                        ? 'text-green-600'
-                        : subdomainStatus.available === false
-                        ? 'text-red-600'
-                        : 'text-muted-foreground'
-                    }`}>
-                      {subdomainStatus.message}
-                    </p>
-                  )}
-                  {!signUpData.subdomain && (
-                    <p className="text-xs text-muted-foreground">
-                      Leave blank to auto-generate from company name
-                    </p>
-                  )}
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="signup-email">Email</Label>

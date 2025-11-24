@@ -10,11 +10,73 @@ import type { DurableObjectNamespace } from "@cloudflare/workers-types";
 /**
  * Queue message types for type-safe queue operations
  */
-export interface PrintEventMessage {
-  type: "job_started" | "job_completed" | "job_failed" | "printer_status_changed";
-  payload: Record<string, unknown>;
+
+// Base interface for all print events
+interface BasePrintEvent {
+  type: PrintEventType;
+  jobId: string;
+  tenantId: string;
+  printerId: string | null;
   timestamp: number;
 }
+
+export type PrintEventType =
+  | "job_started"
+  | "job_progress"
+  | "job_completed"
+  | "job_failed"
+  | "job_cancelled"
+  | "job_paused"
+  | "job_resumed";
+
+interface JobStartedEvent extends BasePrintEvent {
+  type: "job_started";
+  hubId: string | null;
+  commandId: string;
+}
+
+interface JobProgressEvent extends BasePrintEvent {
+  type: "job_progress";
+  progressPercentage: number;
+  remainingTimeSeconds?: number;
+}
+
+interface JobCompletedEvent extends BasePrintEvent {
+  type: "job_completed";
+  productSkuId: string | null;
+  quantity: number;
+  requiresAssembly: boolean;
+}
+
+interface JobFailedEvent extends BasePrintEvent {
+  type: "job_failed";
+  failureReason?: string;
+  progressAtFailure?: number;
+}
+
+interface JobCancelledEvent extends BasePrintEvent {
+  type: "job_cancelled";
+  commandId: string;
+}
+
+interface JobPausedEvent extends BasePrintEvent {
+  type: "job_paused";
+  commandId: string;
+}
+
+interface JobResumedEvent extends BasePrintEvent {
+  type: "job_resumed";
+  commandId: string;
+}
+
+export type PrintEventMessage =
+  | JobStartedEvent
+  | JobProgressEvent
+  | JobCompletedEvent
+  | JobFailedEvent
+  | JobCancelledEvent
+  | JobPausedEvent
+  | JobResumedEvent;
 
 export interface FileProcessingMessage {
   type: "extract_metadata" | "generate_thumbnail" | "validate_file";

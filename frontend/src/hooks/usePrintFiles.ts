@@ -1,111 +1,78 @@
-import { useState, useEffect } from 'react';
-import { supabase } from '@/integrations/supabase/client';
+import { useState, useEffect, useCallback } from 'react';
 import { useToast } from '@/hooks/use-toast';
-import { useTenant } from '@/hooks/useTenant';
-import { 
-  FrontendPrintFile, 
-  transformPrintFileFromDb, 
+import { useAuth } from '@/contexts/AuthContext';
+import { api, ApiError, getApiBaseUrl } from '@/lib/api-client';
+import {
+  FrontendPrintFile,
+  transformPrintFileFromDb,
   transformPrintFileToDb,
-  DbPrintFile 
 } from '@/lib/transformers';
+import type { PrintFile as ApiPrintFile } from '@/types/api';
+
+export type { FrontendPrintFile as PrintFile };
 
 export const usePrintFiles = () => {
   const [printFiles, setPrintFiles] = useState<FrontendPrintFile[]>([]);
   const [loading, setLoading] = useState(true);
   const { toast } = useToast();
-  const { tenant } = useTenant();
+  const { tenantId } = useAuth();
 
-  const fetchPrintFiles = async () => {
-    if (!tenant?.id) return;
-    
+  const fetchPrintFiles = useCallback(async () => {
+    if (!tenantId) {
+      setLoading(false);
+      return;
+    }
+
     try {
-      // Get active products from local-first API
-      const productsResponse = await fetch('/api/products-sync/');
-      if (!productsResponse.ok) {
-        throw new Error(`Failed to fetch products: ${productsResponse.statusText}`);
-      }
-      const productsData = await productsResponse.json();
-      
-      // Filter active products with print files
-      const activeProducts = productsData.filter(p => p.is_active && p.print_file_id);
-      const activePrintFileIds = activeProducts.map(p => p.print_file_id);
-      const productFileMap = new Map(activeProducts.map(p => [p.print_file_id, { productName: p.name, originalFileName: p.file_name }]));
-
-      // Get all print files from local-first API
-      const printFilesResponse = await fetch('/api/print-files-sync/');
-      if (!printFilesResponse.ok) {
-        throw new Error(`Failed to fetch print files: ${printFilesResponse.statusText}`);
-      }
-      const allFilesData = await printFilesResponse.json();
-      
-      // Filter to only files linked to active products
-      const filesData = allFilesData.filter(file => activePrintFileIds.includes(file.id));
-      
-      // Sort by created_at descending
-      filesData.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-
-      // Combine files with friendly names
-      const transformedFiles: FrontendPrintFile[] = (filesData || []).map(file => {
-        const transformedFile = transformPrintFileFromDb(file as DbPrintFile);
-        const productInfo = productFileMap.get(file.id);
-
-        // Use product name + original file name for display
-        const displayName = productInfo
-          ? `${productInfo.productName} (${productInfo.originalFileName || file.name})`
-          : file.name;
-
-        return {
-          ...transformedFile,
-          name: displayName // Override with friendly name
-        };
+      // Get all print files from Cloud API
+      const response = await api.get<(ApiPrintFile & { thumbnail_url?: string })[]>('/api/v1/files', {
+        params: {
+          limit: 200,
+          sortBy: 'created_at',
+          sortOrder: 'desc'
+        }
       });
+
+      if (!Array.isArray(response)) {
+        throw new Error('Invalid response from server');
+      }
+
+      // Transform to frontend format
+      const transformedFiles = response.map(transformPrintFileFromDb);
 
       setPrintFiles(transformedFiles);
     } catch (error) {
       console.error('Error fetching print files:', error);
+      if (error instanceof ApiError && error.isAuthError()) {
+        return;
+      }
       toast({
         title: "Error",
-        description: "Failed to load print files from database.",
+        description: "Failed to load print files.",
         variant: "destructive",
       });
+      setPrintFiles([]);
     } finally {
       setLoading(false);
     }
-  };
+  }, [tenantId, toast]);
 
-  const addPrintFile = async (fileData: { 
-    name: string; 
+  const addPrintFile = async (fileData: {
+    name: string;
     fileSizeBytes?: number;
     numberOfUnits?: number;
-    notes?: string;
+    productId?: string;
   }) => {
     try {
-      // Create print file via local-first API
-      const response = await fetch('/api/print-files-sync/', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          name: fileData.name,
-          file_size_bytes: fileData.fileSizeBytes,
-          number_of_units: fileData.numberOfUnits || 1
-        }),
+      // Create print file via Cloud API
+      const response = await api.post<ApiPrintFile>('/api/v1/files', {
+        name: fileData.name,
+        file_size_bytes: fileData.fileSizeBytes,
+        number_of_units: fileData.numberOfUnits || 1,
+        product_id: fileData.productId
       });
 
-      if (!response.ok) {
-        throw new Error(`Failed to create print file: ${response.statusText}`);
-      }
-      
-      const result = await response.json();
-      
-      if (!result.success) {
-        throw new Error(result.message || 'Failed to create print file');
-      }
-      
-      const newFile = result.print_file;
-
-      const transformedFile = transformPrintFileFromDb(newFile as DbPrintFile);
+      const transformedFile = transformPrintFileFromDb(response);
 
       setPrintFiles(prev => [transformedFile, ...prev]);
       toast({
@@ -118,7 +85,7 @@ export const usePrintFiles = () => {
       console.error('Error adding print file:', error);
       toast({
         title: "Error",
-        description: "Failed to add print file to database.",
+        description: error instanceof Error ? error.message : "Failed to add print file.",
         variant: "destructive",
       });
       throw error;
@@ -128,34 +95,13 @@ export const usePrintFiles = () => {
   const updatePrintFile = async (id: string, updates: Partial<FrontendPrintFile>) => {
     try {
       const updateData = transformPrintFileToDb(updates);
-      
-      // Update via local-first API
-      const response = await fetch(`/api/print-files-sync/${id}`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(updateData),
-      });
 
-      if (!response.ok) {
-        throw new Error(`Failed to update print file: ${response.statusText}`);
-      }
-      
-      const result = await response.json();
-      
-      if (!result.success) {
-        throw new Error(result.message || 'Failed to update print file');
-      }
-      
-      const data = result.print_file;
+      // Update via Cloud API
+      const response = await api.put<ApiPrintFile>(`/api/v1/files/${id}`, updateData);
 
-      const transformedFile = transformPrintFileFromDb(data as DbPrintFile);
-      setPrintFiles(prev => prev.map(file => 
-        file.id === id ? { 
-          ...file, 
-          ...transformedFile
-        } : file
+      const transformedFile = transformPrintFileFromDb(response);
+      setPrintFiles(prev => prev.map(file =>
+        file.id === id ? transformedFile : file
       ));
 
       toast({
@@ -163,7 +109,7 @@ export const usePrintFiles = () => {
         description: "Print file updated successfully.",
       });
 
-      return data;
+      return transformedFile;
     } catch (error) {
       console.error('Error updating print file:', error);
       toast({
@@ -175,23 +121,10 @@ export const usePrintFiles = () => {
     }
   };
 
-
   const deletePrintFile = async (id: string) => {
     try {
-      // Delete via local-first API
-      const response = await fetch(`/api/print-files-sync/${id}`, {
-        method: 'DELETE',
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to delete print file: ${response.statusText}`);
-      }
-      
-      const result = await response.json();
-      
-      if (!result.success) {
-        throw new Error(result.message || 'Failed to delete print file');
-      }
+      // Delete via Cloud API (also deletes from R2)
+      await api.delete(`/api/v1/files/${id}`);
 
       setPrintFiles(prev => prev.filter(file => file.id !== id));
       toast({
@@ -209,11 +142,183 @@ export const usePrintFiles = () => {
     }
   };
 
+  // Get presigned upload URL
+  const getUploadUrl = async (fileName: string, contentType: string = 'application/octet-stream'): Promise<{
+    uploadUrl: string;
+    token: string;
+    fileId: string;
+  }> => {
+    try {
+      const response = await api.post<{
+        upload_url: string;
+        token: string;
+        file_id: string;
+      }>('/api/v1/files/upload-url', {
+        file_name: fileName,
+        content_type: contentType
+      });
+
+      return {
+        uploadUrl: response.upload_url,
+        token: response.token,
+        fileId: response.file_id
+      };
+    } catch (error) {
+      console.error('Error getting upload URL:', error);
+      throw error;
+    }
+  };
+
+  // Upload file using presigned URL
+  const uploadFile = async (file: File, onProgress?: (progress: number) => void): Promise<FrontendPrintFile> => {
+    try {
+      // Get presigned upload URL
+      const { uploadUrl, fileId } = await getUploadUrl(file.name, file.type || 'application/octet-stream');
+
+      // Upload to presigned URL
+      const response = await fetch(uploadUrl, {
+        method: 'PUT',
+        body: file,
+        headers: {
+          'Content-Type': file.type || 'application/octet-stream',
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to upload file');
+      }
+
+      // File record is already created, fetch it
+      const fileResponse = await api.get<ApiPrintFile & { thumbnail_url?: string }>(`/api/v1/files/${fileId}`);
+
+      const transformedFile = transformPrintFileFromDb(fileResponse);
+
+      setPrintFiles(prev => [transformedFile, ...prev]);
+      toast({
+        title: "Success",
+        description: `${file.name} has been uploaded.`,
+      });
+
+      if (onProgress) {
+        onProgress(100);
+      }
+
+      return transformedFile;
+    } catch (error) {
+      console.error('Error uploading file:', error);
+      toast({
+        title: "Error",
+        description: error instanceof Error ? error.message : "Failed to upload file.",
+        variant: "destructive",
+      });
+      throw error;
+    }
+  };
+
+  // Get download URL for a file
+  const getDownloadUrl = async (id: string): Promise<string> => {
+    try {
+      const response = await api.get<{ download_url: string }>(`/api/v1/files/${id}/download-url`);
+      return response.download_url;
+    } catch (error) {
+      console.error('Error getting download URL:', error);
+      throw error;
+    }
+  };
+
+  // Get thumbnail URL for a file
+  const getThumbnailUrl = (id: string): string => {
+    return `${getApiBaseUrl()}/api/v1/files/${id}/thumbnail`;
+  };
+
+  // Get file versions
+  const getFileVersions = async (id: string) => {
+    try {
+      const response = await api.get<Array<{
+        id: string;
+        version_number: number;
+        file_url: string | null;
+        r2_key: string | null;
+        notes: string | null;
+        is_current_version: boolean;
+        created_at: string;
+      }>>(`/api/v1/files/${id}/versions`);
+      return response;
+    } catch (error) {
+      console.error('Error getting file versions:', error);
+      throw error;
+    }
+  };
+
+  // Add a new version to a file
+  const addFileVersion = async (id: string, file: File, notes?: string) => {
+    try {
+      // Get upload URL for new version
+      const { uploadUrl } = await getUploadUrl(file.name, file.type || 'application/octet-stream');
+
+      // Upload file
+      const uploadResponse = await fetch(uploadUrl, {
+        method: 'PUT',
+        body: file,
+        headers: {
+          'Content-Type': file.type || 'application/octet-stream',
+        },
+      });
+
+      if (!uploadResponse.ok) {
+        throw new Error('Failed to upload file version');
+      }
+
+      // Create version record
+      await api.post(`/api/v1/files/${id}/versions`, {
+        notes
+      });
+
+      toast({
+        title: "Success",
+        description: "New version added.",
+      });
+
+      // Refresh file list
+      await fetchPrintFiles();
+    } catch (error) {
+      console.error('Error adding file version:', error);
+      toast({
+        title: "Error",
+        description: "Failed to add file version.",
+        variant: "destructive",
+      });
+      throw error;
+    }
+  };
+
+  // Set a version as current
+  const setCurrentVersion = async (fileId: string, versionNumber: number) => {
+    try {
+      await api.put(`/api/v1/files/${fileId}/versions/${versionNumber}/current`);
+
+      toast({
+        title: "Success",
+        description: `Version ${versionNumber} set as current.`,
+      });
+
+      await fetchPrintFiles();
+    } catch (error) {
+      console.error('Error setting current version:', error);
+      toast({
+        title: "Error",
+        description: "Failed to set current version.",
+        variant: "destructive",
+      });
+      throw error;
+    }
+  };
+
   useEffect(() => {
-    if (tenant?.id) {
+    if (tenantId) {
       fetchPrintFiles();
     }
-  }, [tenant?.id]);
+  }, [tenantId, fetchPrintFiles]);
 
   return {
     printFiles,
@@ -221,6 +326,13 @@ export const usePrintFiles = () => {
     addPrintFile,
     updatePrintFile,
     deletePrintFile,
+    getUploadUrl,
+    uploadFile,
+    getDownloadUrl,
+    getThumbnailUrl,
+    getFileVersions,
+    addFileVersion,
+    setCurrentVersion,
     refetch: fetchPrintFiles
   };
 };

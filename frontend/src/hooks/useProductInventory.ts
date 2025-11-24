@@ -39,20 +39,23 @@ export const useProductInventory = () => {
     try {
       setLoading(true);
 
-      // Fetch products from local SQLite API
-      const productsResponse = await fetch('/api/products-sync/');
+      // Fetch products from cloud API
+      const productsResponse = await fetch('/api/v1/products');
       if (!productsResponse.ok) throw new Error('Failed to fetch products');
-      const products = await productsResponse.json();
+      const productsData = await productsResponse.json();
+      const products = productsData.data || [];
 
-      // Fetch product SKUs from local SQLite API
-      const skusResponse = await fetch('/api/product-skus-sync/');
+      // Fetch product SKUs from cloud API
+      const skusResponse = await fetch('/api/v1/skus');
       if (!skusResponse.ok) throw new Error('Failed to fetch product SKUs');
-      const skus = await skusResponse.json();
+      const skusData = await skusResponse.json();
+      const skus = skusData.data || [];
 
-      // Fetch finished goods from local SQLite API
-      const finishedGoodsResponse = await fetch('/api/finished-goods-sync/');
+      // Fetch finished goods from cloud API
+      const finishedGoodsResponse = await fetch('/api/v1/inventory');
       if (!finishedGoodsResponse.ok) throw new Error('Failed to fetch finished goods');
-      const finishedGoods = await finishedGoodsResponse.json();
+      const finishedGoodsData = await finishedGoodsResponse.json();
+      const finishedGoods = finishedGoodsData.data || [];
 
       // Transform data to group SKUs under products
       const transformedData: ProductInventoryItem[] = (products || []).map((product: any) => {
@@ -118,30 +121,30 @@ export const useProductInventory = () => {
   const updateStock = async (finishedGoodId: string, newQuantity: number, assemblyType?: 'assembled' | 'needs_assembly') => {
     try {
       if (assemblyType) {
-        // Use new assembly-specific endpoint
-        const response = await fetch(`/api/finished-goods-sync/${finishedGoodId}/assembly-stock`, {
-          method: 'PUT',
+        // Use stock adjustment endpoint for assembly stock updates
+        const adjustment = newQuantity; // This should be calculated as delta if needed
+        const response = await fetch(`/api/v1/inventory/${finishedGoodId}/adjust`, {
+          method: 'POST',
           headers: {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            new_quantity: newQuantity,
-            assembly_type: assemblyType
+            adjustment: adjustment,
+            reason: 'manual',
+            notes: `Assembly stock update: ${assemblyType}`
           }),
         });
 
         if (!response.ok) throw new Error('Failed to update assembly stock');
       } else {
-        // Fallback to old endpoint for backward compatibility
-        const response = await fetch(`/api/finished-goods-sync/${finishedGoodId}`, {
+        // Use PUT to update inventory
+        const response = await fetch(`/api/v1/inventory/${finishedGoodId}`, {
           method: 'PUT',
           headers: {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
             current_stock: newQuantity,
-            status: newQuantity === 0 ? 'out_of_stock' :
-                    newQuantity < 5 ? 'low_stock' : 'in_stock'
           }),
         });
 

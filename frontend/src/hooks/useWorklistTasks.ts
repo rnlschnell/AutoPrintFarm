@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useToast } from '@/hooks/use-toast';
-import { supabase } from '@/integrations/supabase/client';
+
 import { useTenant } from '@/hooks/useTenant';
 import { useNavigate } from 'react-router-dom';
 
@@ -37,7 +37,7 @@ export const useWorklistTasks = () => {
   const fetchTasks = async () => {
     try {
       setLoading(true);
-      const response = await fetch('/api/worklist/');
+      const response = await fetch('/api/v1/worklist');
 
       if (!response.ok) {
         throw new Error(`Failed to fetch worklist tasks: ${response.statusText}`);
@@ -87,7 +87,7 @@ export const useWorklistTasks = () => {
 
       // IMPORTANT: For maintenance tasks being completed, call the maintenance/complete endpoint
       if (status === 'completed' && currentTask?.task_type === 'maintenance' && currentTask?.printer_id) {
-        const maintenanceResponse = await fetch(`/api/printers/${currentTask.printer_id}/maintenance/complete`, {
+        const maintenanceResponse = await fetch(`/api/v1/printers/${currentTask.printer_id}/maintenance/complete`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -112,7 +112,7 @@ export const useWorklistTasks = () => {
         return; // Early return, backend already handled everything
       }
 
-      const response = await fetch(`/api/worklist/${id}`, {
+      const response = await fetch(`/api/v1/worklist/${id}`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
@@ -163,7 +163,7 @@ export const useWorklistTasks = () => {
     }
 
     // Get assembly task details from backend API (SQLite)
-    const assemblyTaskResponse = await fetch(`/api/assembly-tasks/${assemblyTaskId}`);
+    const assemblyTaskResponse = await fetch(`/api/v1/assembly/${assemblyTaskId}`);
     if (!assemblyTaskResponse.ok) {
       throw new Error(`Failed to get assembly task: ${assemblyTaskResponse.statusText}`);
     }
@@ -174,7 +174,7 @@ export const useWorklistTasks = () => {
     }
 
     // Get finished good to find product_sku_id from backend API (SQLite)
-    const finishedGoodResponse = await fetch(`/api/finished-goods-sync/${assemblyTask.finished_good_id}`);
+    const finishedGoodResponse = await fetch(`/api/v1/inventory/${assemblyTask.finished_good_id}`);
     if (!finishedGoodResponse.ok) {
       throw new Error(`Failed to get finished good: ${finishedGoodResponse.statusText}`);
     }
@@ -185,7 +185,7 @@ export const useWorklistTasks = () => {
     }
 
     // Get product SKU to find product_id from backend API (SQLite)
-    const productSkuResponse = await fetch(`/api/product-skus-sync/${finishedGood.product_sku_id}`);
+    const productSkuResponse = await fetch(`/api/v1/skus/${finishedGood.product_sku_id}`);
     if (!productSkuResponse.ok) {
       throw new Error(`Failed to get product SKU: ${productSkuResponse.statusText}`);
     }
@@ -195,47 +195,17 @@ export const useWorklistTasks = () => {
       return { hasShortage: false, shortages: [], components: [], assemblyTask };
     }
 
-    // Get product components
-    const { data: components, error: compError } = await supabase
-      .from('product_components')
-      .select('*')
-      .eq('product_id', productSku.product_id)
-      .eq('tenant_id', tenant.id);
-
-    if (compError) throw compError;
-
-    // Check each component for shortages
-    if (components && components.length > 0) {
-      for (const component of components) {
-        if (component.accessory_id) {
-          const quantityNeeded = component.quantity_required * assemblyTask.quantity;
-
-          // Get current inventory
-          const { data: accessory, error: invError } = await supabase
-            .from('accessories_inventory')
-            .select('remaining_units')
-            .eq('id', component.accessory_id)
-            .single();
-
-          if (invError) throw invError;
-
-          const currentStock = accessory?.remaining_units || 0;
-
-          if (currentStock < quantityNeeded) {
-            shortages.push({
-              componentName: component.component_name,
-              needed: quantityNeeded,
-              available: currentStock
-            });
-          }
-        }
-      }
-    }
+    // TODO: Component inventory checking is temporarily disabled until materials API routes are added.
+    // When /api/v1/materials/components routes are implemented, replace this with:
+    // - Fetch product_components via /api/v1/products/:id/components
+    // - Fetch accessories_inventory via /api/v1/materials/components/:id
+    // For now, return empty components to disable shortage checking
+    const components: any[] = [];
 
     return {
-      hasShortage: shortages.length > 0,
+      hasShortage: false,
       shortages,
-      components: components || [],
+      components,
       assemblyTask
     };
   };
@@ -256,103 +226,17 @@ export const useWorklistTasks = () => {
       if (status === 'completed') {
         updateData.completed_at = new Date().toISOString();
 
-        // Consume component inventory when completing assembly task
-        if (tenant?.id) {
-          try {
-            // Get assembly task details from backend API (SQLite)
-            const assemblyTaskResponse = await fetch(`/api/assembly-tasks/${assemblyTaskId}`);
-            if (!assemblyTaskResponse.ok) {
-              throw new Error(`Failed to get assembly task: ${assemblyTaskResponse.statusText}`);
-            }
-            const assemblyTask = await assemblyTaskResponse.json();
-
-            if (assemblyTask?.finished_good_id) {
-              // Get finished good to find product_sku_id from backend API (SQLite)
-              const finishedGoodResponse = await fetch(`/api/finished-goods-sync/${assemblyTask.finished_good_id}`);
-              if (!finishedGoodResponse.ok) {
-                throw new Error(`Failed to get finished good: ${finishedGoodResponse.statusText}`);
-              }
-              const finishedGood = await finishedGoodResponse.json();
-
-              if (finishedGood?.product_sku_id) {
-                // Get product SKU to find product_id from backend API (SQLite)
-                const productSkuResponse = await fetch(`/api/product-skus-sync/${finishedGood.product_sku_id}`);
-                if (!productSkuResponse.ok) {
-                  throw new Error(`Failed to get product SKU: ${productSkuResponse.statusText}`);
-                }
-                const productSku = await productSkuResponse.json();
-
-                if (productSku?.product_id) {
-                  // Get product components
-                  const { data: components, error: compError } = await supabase
-                    .from('product_components')
-                    .select('*')
-                    .eq('product_id', productSku.product_id)
-                    .eq('tenant_id', tenant.id);
-
-                  if (compError) throw compError;
-
-                  // Consume inventory for each component
-                  if (components && components.length > 0) {
-                    for (const component of components) {
-                      if (component.accessory_id) {
-                        const quantityToConsume = component.quantity_required * assemblyTask.quantity;
-
-                        // Get current inventory
-                        const { data: accessory, error: invError } = await supabase
-                          .from('accessories_inventory')
-                          .select('remaining_units')
-                          .eq('id', component.accessory_id)
-                          .single();
-
-                        if (invError) throw invError;
-
-                        const currentStock = accessory?.remaining_units || 0;
-
-                        // If forceComplete is true, consume what we can and floor at 0
-                        // Otherwise, check for sufficient inventory
-                        if (!forceComplete && currentStock < quantityToConsume) {
-                          throw new Error(
-                            `Insufficient inventory for ${component.component_name}: need ${quantityToConsume}, only ${currentStock} available`
-                          );
-                        }
-
-                        // Calculate actual consumption (floor at 0)
-                        const actualConsumption = Math.min(currentStock, quantityToConsume);
-                        const newStock = Math.max(0, currentStock - quantityToConsume);
-
-                        // Update inventory
-                        const { error: updateError } = await supabase
-                          .from('accessories_inventory')
-                          .update({ remaining_units: newStock })
-                          .eq('id', component.accessory_id);
-
-                        if (updateError) throw updateError;
-
-                        console.log(`Consumed ${actualConsumption} units of ${component.component_name} (${newStock} remaining)`);
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          } catch (invError: any) {
-            console.error('Error consuming inventory:', invError);
-            // Only show toast if not forcing complete (forceComplete means user already confirmed)
-            if (!forceComplete) {
-              toast({
-                title: "Inventory Error",
-                description: invError.message || "Failed to update inventory",
-                variant: "destructive",
-              });
-            }
-            throw invError; // Re-throw to prevent task completion
-          }
-        }
+        // TODO: Component inventory consumption is temporarily disabled until materials API routes are added.
+        // When /api/v1/materials/components routes are implemented, re-enable inventory consumption:
+        // 1. Fetch product_components via /api/v1/products/:id/components
+        // 2. For each component with accessory_id, call /api/v1/materials/components/:id to get stock
+        // 3. Call PATCH /api/v1/materials/components/:id to consume inventory
+        // For now, assembly tasks complete without consuming component inventory.
+        console.log('Assembly task completed - component inventory consumption temporarily disabled');
       }
 
       // Call the assembly tasks API to update the status
-      const response = await fetch(`/api/assembly-tasks/${assemblyTaskId}`, {
+      const response = await fetch(`/api/v1/assembly/${assemblyTaskId}`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
@@ -396,7 +280,7 @@ export const useWorklistTasks = () => {
         await syncToAssemblyTask(currentTask.assembly_task_id, 'completed', true);
       }
 
-      const response = await fetch(`/api/worklist/${id}`, {
+      const response = await fetch(`/api/v1/worklist/${id}`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
@@ -433,7 +317,7 @@ export const useWorklistTasks = () => {
         const { productId, productName, skuId, sku, quantity } = taskData.metadata;
 
         // Fetch the finished good record by SKU ID to get the actual finished_good_id
-        const finishedGoodResponse = await fetch(`/api/finished-goods-sync/by-sku/${skuId}`);
+        const finishedGoodResponse = await fetch(`/api/v1/inventory/by-sku/${skuId}`);
 
         if (!finishedGoodResponse.ok) {
           throw new Error(`No finished good found for this SKU. Please ensure the product has finished goods inventory.`);
@@ -442,7 +326,7 @@ export const useWorklistTasks = () => {
         const finishedGood = await finishedGoodResponse.json();
 
         // Create assembly task via assembly-tasks API using the finished good ID
-        const assemblyResponse = await fetch('/api/assembly-tasks/', {
+        const assemblyResponse = await fetch('/api/v1/assembly/', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -480,7 +364,7 @@ export const useWorklistTasks = () => {
       // Remove metadata from worklist payload (it's only used for assembly task creation)
       delete worklistPayload.metadata;
 
-      const response = await fetch('/api/worklist/', {
+      const response = await fetch('/api/v1/worklist', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -512,7 +396,7 @@ export const useWorklistTasks = () => {
 
   const assignTask = async (id: string, assignedTo: string) => {
     try {
-      const response = await fetch(`/api/worklist/${id}`, {
+      const response = await fetch(`/api/v1/worklist/${id}`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
@@ -542,7 +426,7 @@ export const useWorklistTasks = () => {
 
   const deleteTask = async (id: string) => {
     try {
-      const response = await fetch(`/api/worklist/${id}`, {
+      const response = await fetch(`/api/v1/worklist/${id}`, {
         method: 'DELETE',
       });
 

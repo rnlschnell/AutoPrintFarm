@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
-import { supabase } from '@/integrations/supabase/client';
 import { useToast } from '@/hooks/use-toast';
-import { useTenant } from '@/hooks/useTenant';
+import { useAuth } from '@/contexts/AuthContext';
+import { api, ApiError } from '@/lib/api-client';
 
 export type InventoryType = 'Filament' | 'Packaging' | 'Components' | 'Printer Parts';
 
@@ -27,13 +27,13 @@ export interface MaterialInventoryItem {
   usageHistory?: any[];
 }
 
-const getTableName = (category: InventoryType) => {
+const getApiPath = (category: InventoryType): string => {
   switch (category) {
-    case 'Filament': return 'filament_inventory' as const;
-    case 'Packaging': return 'packaging_inventory' as const;
-    case 'Components': return 'accessories_inventory' as const;
-    case 'Printer Parts': return 'printer_parts_inventory' as const;
-    default: return 'filament_inventory' as const;
+    case 'Filament': return '/api/v1/materials/filament';
+    case 'Packaging': return '/api/v1/materials/packaging';
+    case 'Components': return '/api/v1/materials/components';
+    case 'Printer Parts': return '/api/v1/materials/parts';
+    default: return '/api/v1/materials/filament';
   }
 };
 
@@ -41,103 +41,53 @@ export const useMaterialInventory = () => {
   const [materials, setMaterials] = useState<MaterialInventoryItem[]>([]);
   const [loading, setLoading] = useState(true);
   const { toast } = useToast();
-  const { tenant } = useTenant();
+  const { tenantId } = useAuth();
 
   const fetchMaterials = async () => {
-    if (!tenant?.id) return;
-    
+    if (!tenantId) {
+      setLoading(false);
+      return;
+    }
+
     try {
       setLoading(true);
       const categories: InventoryType[] = ['Filament', 'Packaging', 'Components', 'Printer Parts'];
       const allMaterials: MaterialInventoryItem[] = [];
 
       for (const category of categories) {
-        if (category === 'Filament') {
-          const { data, error } = await supabase
-            .from('filament_inventory')
-            .select('*')
-            .eq('tenant_id', tenant?.id)
-            .order('created_at', { ascending: false });
+        const apiPath = getApiPath(category);
 
-          if (error) throw error;
+        try {
+          const data = await api.get<any[]>(apiPath);
 
-          const categoryMaterials = (data || []).map(item => ({
+          const categoryMaterials = (data || []).map((item: any) => ({
             ...item,
+            color: item.color || '',
             category,
-            remaining: item.remaining_grams,
+            remaining: category === 'Filament' ? item.remaining_grams : item.remaining_units,
             usageHistory: []
           }));
 
           allMaterials.push(...categoryMaterials);
-        } else if (category === 'Packaging') {
-          const { data, error } = await supabase
-            .from('packaging_inventory')
-            .select('*')
-            .eq('tenant_id', tenant?.id)
-            .order('created_at', { ascending: false });
-
-          if (error) throw error;
-
-          const categoryMaterials = (data || []).map(item => ({
-            ...item,
-            color: '', // Set empty color since it was removed from table
-            category,
-            remaining: item.remaining_units,
-            usageHistory: []
-          }));
-
-          allMaterials.push(...categoryMaterials);
-        } else if (category === 'Components') {
-          const { data, error } = await supabase
-            .from('accessories_inventory')
-            .select('*')
-            .eq('tenant_id', tenant?.id)
-            .order('created_at', { ascending: false });
-
-          if (error) throw error;
-
-          const categoryMaterials = (data || []).map(item => ({
-            ...item,
-            color: '', // Set empty color since it was removed from table
-            category,
-            remaining: item.remaining_units,
-            usageHistory: []
-          }));
-
-          allMaterials.push(...categoryMaterials);
-        } else if (category === 'Printer Parts') {
-          const { data, error } = await supabase
-            .from('printer_parts_inventory')
-            .select('*')
-            .eq('tenant_id', tenant?.id)
-            .order('created_at', { ascending: false });
-
-          if (error) throw error;
-
-          const categoryMaterials = (data || []).map(item => ({
-            ...item,
-            color: '', // Set empty color since it was removed from table
-            category,
-            remaining: item.remaining_units,
-            usageHistory: []
-          }));
-
-          allMaterials.push(...categoryMaterials);
+        } catch (err) {
+          // Skip this category if the endpoint returns an error (table might not exist yet)
+          console.warn(`Error fetching ${category}:`, err);
+          // Continue with other categories
         }
       }
 
       setMaterials(allMaterials);
     } catch (error: any) {
       console.error('Error fetching materials:', error);
-      // Only show toast for unexpected errors, not for missing table/data scenarios
-      if (error?.code !== 'PGRST116' && error?.code !== '42P01') {
-        toast({
-          title: "Error",
-          description: "Failed to load materials from database.",
-          variant: "destructive",
-        });
+      if (error instanceof ApiError && error.isAuthError()) {
+        // Don't show toast for auth errors - let AuthContext handle it
+        return;
       }
-      // Set empty array for missing table scenarios
+      toast({
+        title: "Error",
+        description: "Failed to load materials from database.",
+        variant: "destructive",
+      });
       setMaterials([]);
     } finally {
       setLoading(false);
@@ -155,84 +105,37 @@ export const useMaterialInventory = () => {
     low_threshold?: number;
     reorder_link?: string;
   }) => {
+    if (!tenantId) {
+      throw new Error('No tenant ID available');
+    }
+
     try {
+      const apiPath = getApiPath(category);
+
       const insertData: any = {
         type: materialData.type,
-        brand: materialData.brand,
-        location: materialData.location,
+        brand: materialData.brand || undefined,
+        location: materialData.location || undefined,
         cost_per_unit: materialData.cost_per_unit,
         low_threshold: materialData.low_threshold,
-        reorder_link: materialData.reorder_link,
-        tenant_id: tenant?.id,
-        status: materialData.remaining === 0 ? 'out_of_stock' : 
-                materialData.remaining <= (materialData.low_threshold || 100) ? 'low' : 'in_stock'
+        reorder_link: materialData.reorder_link || undefined,
       };
 
-      // Only add color for filament
+      // Only add color for filament (required field)
       if (category === 'Filament') {
-        insertData.color = materialData.color;
-      }
-
-      let data, error;
-
-      if (category === 'Filament') {
+        insertData.color = materialData.color || 'Unknown';
         insertData.remaining_grams = materialData.remaining;
-
-        const result = await supabase
-          .from('filament_inventory')
-          .insert(insertData)
-          .select()
-          .single();
-        
-        data = result.data;
-        error = result.error;
-      } else if (category === 'Packaging') {
+      } else {
         insertData.remaining_units = materialData.remaining;
-        // Remove color field for packaging
-        delete insertData.color;
-        
-        const result = await supabase
-          .from('packaging_inventory')
-          .insert(insertData)
-          .select()
-          .single();
-        
-        data = result.data;
-        error = result.error;
-      } else if (category === 'Components') {
-        insertData.remaining_units = materialData.remaining;
-        // Remove color field for components
-        delete insertData.color;
-        
-        const result = await supabase
-          .from('accessories_inventory')
-          .insert(insertData)
-          .select()
-          .single();
-        
-        data = result.data;
-        error = result.error;
-      } else if (category === 'Printer Parts') {
-        insertData.remaining_units = materialData.remaining;
-        // Remove color field for printer parts
-        delete insertData.color;
-        
-        const result = await supabase
-          .from('printer_parts_inventory')
-          .insert(insertData)
-          .select()
-          .single();
-        
-        data = result.data;
-        error = result.error;
       }
 
-      if (error) throw error;
+      const data = await api.post<any>(apiPath, insertData);
 
       const newMaterial: MaterialInventoryItem = {
         ...data,
+        color: data.color || '',
         category,
-        remaining: category === 'Filament' ? (data as any).remaining_grams : (data as any).remaining_units,
+        remaining: category === 'Filament' ? data.remaining_grams : data.remaining_units,
         usageHistory: []
       };
 
@@ -243,11 +146,11 @@ export const useMaterialInventory = () => {
       });
 
       return newMaterial;
-    } catch (error) {
+    } catch (error: any) {
       console.error('Error adding material:', error);
       toast({
         title: "Error",
-        description: "Failed to add material to database.",
+        description: error.message || "Failed to add material to database.",
         variant: "destructive",
       });
       throw error;
@@ -256,8 +159,10 @@ export const useMaterialInventory = () => {
 
   const updateMaterial = async (id: string, category: InventoryType, updates: Partial<MaterialInventoryItem>) => {
     try {
+      const apiPath = getApiPath(category);
+
       const updateData: any = { ...updates };
-      
+
       // Handle remaining quantity field mapping
       if (updates.remaining !== undefined) {
         if (category === 'Filament') {
@@ -283,60 +188,17 @@ export const useMaterialInventory = () => {
         delete updateData.color;
       }
 
-      let data, error;
-
-      if (category === 'Filament') {
-        const result = await supabase
-          .from('filament_inventory')
-          .update(updateData)
-          .eq('id', id)
-          .select()
-          .single();
-        
-        data = result.data;
-        error = result.error;
-      } else if (category === 'Packaging') {
-        const result = await supabase
-          .from('packaging_inventory')
-          .update(updateData)
-          .eq('id', id)
-          .select()
-          .single();
-        
-        data = result.data;
-        error = result.error;
-      } else if (category === 'Components') {
-        const result = await supabase
-          .from('accessories_inventory')
-          .update(updateData)
-          .eq('id', id)
-          .select()
-          .single();
-        
-        data = result.data;
-        error = result.error;
-      } else if (category === 'Printer Parts') {
-        const result = await supabase
-          .from('printer_parts_inventory')
-          .update(updateData)
-          .eq('id', id)
-          .select()
-          .single();
-        
-        data = result.data;
-        error = result.error;
-      }
-
-      if (error) throw error;
+      const data = await api.patch<any>(`${apiPath}/${id}`, updateData);
 
       const updatedMaterial: MaterialInventoryItem = {
         ...data,
+        color: data.color || '',
         category,
-        remaining: category === 'Filament' ? (data as any).remaining_grams : (data as any).remaining_units,
+        remaining: category === 'Filament' ? data.remaining_grams : data.remaining_units,
         usageHistory: []
       };
 
-      setMaterials(prev => prev.map(material => 
+      setMaterials(prev => prev.map(material =>
         material.id === id ? updatedMaterial : material
       ));
 
@@ -346,11 +208,11 @@ export const useMaterialInventory = () => {
       });
 
       return updatedMaterial;
-    } catch (error) {
+    } catch (error: any) {
       console.error('Error updating material:', error);
       toast({
         title: "Error",
-        description: "Failed to update material.",
+        description: error.message || "Failed to update material.",
         variant: "destructive",
       });
       throw error;
@@ -359,46 +221,20 @@ export const useMaterialInventory = () => {
 
   const deleteMaterial = async (id: string, category: InventoryType) => {
     try {
-      let error;
+      const apiPath = getApiPath(category);
 
-      if (category === 'Filament') {
-        const result = await supabase
-          .from('filament_inventory')
-          .delete()
-          .eq('id', id);
-        error = result.error;
-      } else if (category === 'Packaging') {
-        const result = await supabase
-          .from('packaging_inventory')
-          .delete()
-          .eq('id', id);
-        error = result.error;
-      } else if (category === 'Components') {
-        const result = await supabase
-          .from('accessories_inventory')
-          .delete()
-          .eq('id', id);
-        error = result.error;
-      } else if (category === 'Printer Parts') {
-        const result = await supabase
-          .from('printer_parts_inventory')
-          .delete()
-          .eq('id', id);
-        error = result.error;
-      }
-
-      if (error) throw error;
+      await api.delete(`${apiPath}/${id}`);
 
       setMaterials(prev => prev.filter(material => material.id !== id));
       toast({
         title: "Success",
         description: "Material deleted successfully.",
       });
-    } catch (error) {
+    } catch (error: any) {
       console.error('Error deleting material:', error);
       toast({
         title: "Error",
-        description: "Failed to delete material.",
+        description: error.message || "Failed to delete material.",
         variant: "destructive",
       });
       throw error;
@@ -406,10 +242,10 @@ export const useMaterialInventory = () => {
   };
 
   useEffect(() => {
-    if (tenant?.id) {
+    if (tenantId) {
       fetchMaterials();
     }
-  }, [tenant?.id]);
+  }, [tenantId]);
 
   return {
     materials,

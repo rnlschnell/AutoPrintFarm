@@ -1,12 +1,13 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useToast } from '@/hooks/use-toast';
-import { useTenant } from '@/hooks/useTenant';
-import { 
-  FrontendPrintJob, 
-  transformPrintJobFromDb, 
+import { useAuth } from '@/contexts/AuthContext';
+import { api, ApiError } from '@/lib/api-client';
+import {
+  FrontendPrintJob,
+  transformPrintJobFromDb,
   transformPrintJobToDb,
-  DbPrintJob 
 } from '@/lib/transformers';
+import type { PrintJob as ApiPrintJob, JobStats } from '@/types/api';
 
 export type { FrontendPrintJob as PrintJob };
 
@@ -14,44 +15,58 @@ export const usePrintJobs = () => {
   const [printJobs, setPrintJobs] = useState<FrontendPrintJob[]>([]);
   const [loading, setLoading] = useState(true);
   const { toast } = useToast();
-  const { tenant } = useTenant();
+  const { tenantId } = useAuth();
 
-  const fetchPrintJobs = async () => {
-    if (!tenant?.id) return;
-    
+  const fetchPrintJobs = useCallback(async (filters?: {
+    status?: string;
+    printer_id?: string;
+    date_from?: string;
+    date_to?: string;
+  }) => {
+    if (!tenantId) {
+      setLoading(false);
+      return;
+    }
+
     try {
-      // Fetch from local-first API
-      const response = await fetch('/api/print-jobs-sync/');
-      
-      if (!response.ok) {
-        throw new Error(`Failed to fetch print jobs: ${response.statusText}`);
+      // Fetch from Cloud API
+      const response = await api.get<ApiPrintJob[]>('/api/v1/jobs', {
+        params: {
+          limit: 100,
+          sortBy: 'time_submitted',
+          sortOrder: 'desc',
+          ...filters
+        }
+      });
+
+      if (!Array.isArray(response)) {
+        throw new Error('Invalid response from server');
       }
-      
-      const data = await response.json();
-      
-      // Transform and sort by time_submitted descending
-      const transformedJobs = data
-        .map(job => transformPrintJobFromDb(job as DbPrintJob))
-        .sort((a, b) => new Date(b.timeSubmitted).getTime() - new Date(a.timeSubmitted).getTime());
+
+      // Transform to frontend format
+      const transformedJobs = response.map(transformPrintJobFromDb);
 
       setPrintJobs(transformedJobs);
-    } catch (error: any) {
+    } catch (error) {
       console.error('Error fetching print jobs:', error);
+      if (error instanceof ApiError && error.isAuthError()) {
+        return;
+      }
       toast({
         title: "Error",
-        description: error instanceof Error ? error.message : "Failed to load print jobs from database.",
+        description: error instanceof Error ? error.message : "Failed to load print jobs.",
         variant: "destructive",
       });
-      // Set empty array for error scenarios
       setPrintJobs([]);
     } finally {
       setLoading(false);
     }
-  };
+  }, [tenantId, toast]);
 
   const addPrintJob = async (jobData: {
     printerId?: string;
     printFileId: string;
+    productSkuId?: string;
     fileName: string;
     color: string;
     filamentType: string;
@@ -62,39 +77,22 @@ export const usePrintJobs = () => {
     priority?: number;
   }) => {
     try {
-      // Create via local-first API
-      const response = await fetch('/api/print-jobs-sync/', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          printer_id: jobData.printerId,
-          print_file_id: jobData.printFileId,
-          file_name: jobData.fileName,
-          status: 'queued',
-          color: jobData.color,
-          filament_type: jobData.filamentType,
-          material_type: jobData.materialType,
-          number_of_units: jobData.numberOfUnits || 1,
-          filament_needed_grams: jobData.filamentNeededGrams,
-          estimated_print_time_minutes: jobData.estimatedPrintTimeMinutes,
-          priority: jobData.priority || 0,
-          progress_percentage: 0
-        }),
+      // Create via Cloud API
+      const response = await api.post<ApiPrintJob>('/api/v1/jobs', {
+        printer_id: jobData.printerId,
+        print_file_id: jobData.printFileId,
+        product_sku_id: jobData.productSkuId,
+        file_name: jobData.fileName,
+        color: jobData.color,
+        filament_type: jobData.filamentType,
+        material_type: jobData.materialType,
+        number_of_units: jobData.numberOfUnits || 1,
+        filament_needed_grams: jobData.filamentNeededGrams,
+        estimated_print_time_minutes: jobData.estimatedPrintTimeMinutes,
+        priority: jobData.priority || 0,
       });
 
-      if (!response.ok) {
-        throw new Error(`Failed to create print job: ${response.statusText}`);
-      }
-      
-      const result = await response.json();
-      
-      if (!result.success) {
-        throw new Error(result.message || 'Failed to create print job');
-      }
-
-      const newJob = transformPrintJobFromDb(result.print_job as DbPrintJob);
+      const newJob = transformPrintJobFromDb(response);
 
       setPrintJobs(prev => [newJob, ...prev]);
       toast({
@@ -107,7 +105,7 @@ export const usePrintJobs = () => {
       console.error('Error adding print job:', error);
       toast({
         title: "Error",
-        description: "Failed to create print job.",
+        description: error instanceof Error ? error.message : "Failed to create print job.",
         variant: "destructive",
       });
       throw error;
@@ -118,28 +116,12 @@ export const usePrintJobs = () => {
     try {
       const updateData = transformPrintJobToDb(updates);
 
-      // Update via local-first API
-      const response = await fetch(`/api/print-jobs-sync/${id}`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(updateData),
-      });
+      // Update via Cloud API
+      const response = await api.put<ApiPrintJob>(`/api/v1/jobs/${id}`, updateData);
 
-      if (!response.ok) {
-        throw new Error(`Failed to update print job: ${response.statusText}`);
-      }
-      
-      const result = await response.json();
-      
-      if (!result.success) {
-        throw new Error(result.message || 'Failed to update print job');
-      }
+      const updatedJob = transformPrintJobFromDb(response);
 
-      const updatedJob = transformPrintJobFromDb(result.print_job as DbPrintJob);
-
-      setPrintJobs(prev => prev.map(job => 
+      setPrintJobs(prev => prev.map(job =>
         job.id === id ? updatedJob : job
       ));
 
@@ -162,85 +144,43 @@ export const usePrintJobs = () => {
 
   const deletePrintJob = async (id: string) => {
     try {
-      console.log(`Deleting print job: ${id}`);
-      
-      // Delete via local-first API with increased timeout
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
-      
-      const response = await fetch(`/api/print-jobs-sync/${id}`, {
-        method: 'DELETE',
-        signal: controller.signal,
-        headers: {
-          'Content-Type': 'application/json',
-        },
-      });
+      // Delete via Cloud API
+      await api.delete(`/api/v1/jobs/${id}`);
 
-      clearTimeout(timeoutId);
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`HTTP ${response.status}: ${errorText || response.statusText}`);
-      }
-      
-      const result = await response.json();
-      
-      if (!result.success) {
-        throw new Error(result.message || 'Server reported failure to delete print job');
-      }
-
-      // Remove from local state immediately for responsive UI
+      // Remove from local state
       setPrintJobs(prev => prev.filter(job => job.id !== id));
-      
-      console.log(`Successfully deleted print job: ${id}`);
-      
-      // Success toast will be shown by CancelJobModal
+
+      toast({
+        title: "Success",
+        description: "Print job deleted.",
+      });
     } catch (error) {
       console.error('Error deleting print job:', error);
-      
-      if (error.name === 'AbortError') {
-        throw new Error('Delete request timed out. Please try again.');
-      }
-      
-      // Re-throw the error so CancelJobModal can handle it
+      toast({
+        title: "Error",
+        description: error instanceof Error ? error.message : "Failed to delete print job.",
+        variant: "destructive",
+      });
       throw error;
     }
   };
 
   const cancelPrintJob = async (id: string, reason?: string) => {
     try {
-      // Cancel via local-first API (using update)
-      const response = await fetch(`/api/print-jobs-sync/${id}`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ 
-          status: 'cancelled',
-          failure_reason: reason,
-          time_completed: new Date().toISOString()
-        }),
+      // Cancel via Cloud API
+      const response = await api.post<ApiPrintJob>(`/api/v1/jobs/${id}/cancel`, {
+        failure_reason: reason
       });
 
-      if (!response.ok) {
-        throw new Error(`Failed to cancel print job: ${response.statusText}`);
-      }
-      
-      const result = await response.json();
-      
-      if (!result.success) {
-        throw new Error(result.message || 'Failed to cancel print job');
-      }
+      const updatedJob = transformPrintJobFromDb(response);
 
-      const updatedJob = transformPrintJobFromDb(result.print_job as DbPrintJob);
-
-      setPrintJobs(prev => prev.map(job => 
+      setPrintJobs(prev => prev.map(job =>
         job.id === id ? updatedJob : job
       ));
 
       toast({
         title: "Success",
-        description: "Print job cancelled successfully.",
+        description: "Print job cancelled.",
       });
 
       return updatedJob;
@@ -255,10 +195,233 @@ export const usePrintJobs = () => {
     }
   };
 
-  // Set up real-time subscription for print job changes
+  // Job control methods
+  const assignJob = async (id: string, printerId: string) => {
+    try {
+      const response = await api.post<ApiPrintJob>(`/api/v1/jobs/${id}/assign`, {
+        printer_id: printerId
+      });
+
+      const updatedJob = transformPrintJobFromDb(response);
+
+      setPrintJobs(prev => prev.map(job =>
+        job.id === id ? updatedJob : job
+      ));
+
+      toast({
+        title: "Success",
+        description: "Job assigned to printer.",
+      });
+
+      return updatedJob;
+    } catch (error) {
+      console.error('Error assigning job:', error);
+      toast({
+        title: "Error",
+        description: error instanceof Error ? error.message : "Failed to assign job.",
+        variant: "destructive",
+      });
+      throw error;
+    }
+  };
+
+  const startJob = async (id: string) => {
+    try {
+      const response = await api.post<ApiPrintJob>(`/api/v1/jobs/${id}/start`);
+
+      const updatedJob = transformPrintJobFromDb(response);
+
+      setPrintJobs(prev => prev.map(job =>
+        job.id === id ? updatedJob : job
+      ));
+
+      toast({
+        title: "Success",
+        description: "Print job started.",
+      });
+
+      return updatedJob;
+    } catch (error) {
+      console.error('Error starting job:', error);
+      toast({
+        title: "Error",
+        description: error instanceof Error ? error.message : "Failed to start print.",
+        variant: "destructive",
+      });
+      throw error;
+    }
+  };
+
+  const pauseJob = async (id: string) => {
+    try {
+      const response = await api.post<ApiPrintJob>(`/api/v1/jobs/${id}/pause`);
+
+      const updatedJob = transformPrintJobFromDb(response);
+
+      setPrintJobs(prev => prev.map(job =>
+        job.id === id ? updatedJob : job
+      ));
+
+      toast({
+        title: "Success",
+        description: "Print paused.",
+      });
+
+      return updatedJob;
+    } catch (error) {
+      console.error('Error pausing job:', error);
+      toast({
+        title: "Error",
+        description: "Failed to pause print.",
+        variant: "destructive",
+      });
+      throw error;
+    }
+  };
+
+  const resumeJob = async (id: string) => {
+    try {
+      const response = await api.post<ApiPrintJob>(`/api/v1/jobs/${id}/resume`);
+
+      const updatedJob = transformPrintJobFromDb(response);
+
+      setPrintJobs(prev => prev.map(job =>
+        job.id === id ? updatedJob : job
+      ));
+
+      toast({
+        title: "Success",
+        description: "Print resumed.",
+      });
+
+      return updatedJob;
+    } catch (error) {
+      console.error('Error resuming job:', error);
+      toast({
+        title: "Error",
+        description: "Failed to resume print.",
+        variant: "destructive",
+      });
+      throw error;
+    }
+  };
+
+  const completeJob = async (id: string) => {
+    try {
+      const response = await api.post<ApiPrintJob>(`/api/v1/jobs/${id}/complete`);
+
+      const updatedJob = transformPrintJobFromDb(response);
+
+      setPrintJobs(prev => prev.map(job =>
+        job.id === id ? updatedJob : job
+      ));
+
+      toast({
+        title: "Success",
+        description: "Print marked as completed.",
+      });
+
+      return updatedJob;
+    } catch (error) {
+      console.error('Error completing job:', error);
+      toast({
+        title: "Error",
+        description: "Failed to complete print.",
+        variant: "destructive",
+      });
+      throw error;
+    }
+  };
+
+  const failJob = async (id: string, reason?: string) => {
+    try {
+      const response = await api.post<ApiPrintJob>(`/api/v1/jobs/${id}/fail`, {
+        failure_reason: reason
+      });
+
+      const updatedJob = transformPrintJobFromDb(response);
+
+      setPrintJobs(prev => prev.map(job =>
+        job.id === id ? updatedJob : job
+      ));
+
+      toast({
+        title: "Job Failed",
+        description: reason || "Print job marked as failed.",
+        variant: "destructive",
+      });
+
+      return updatedJob;
+    } catch (error) {
+      console.error('Error failing job:', error);
+      toast({
+        title: "Error",
+        description: "Failed to update job status.",
+        variant: "destructive",
+      });
+      throw error;
+    }
+  };
+
+  const retryJob = async (id: string) => {
+    try {
+      const response = await api.post<ApiPrintJob>(`/api/v1/jobs/${id}/retry`);
+
+      const updatedJob = transformPrintJobFromDb(response);
+
+      setPrintJobs(prev => prev.map(job =>
+        job.id === id ? updatedJob : job
+      ));
+
+      toast({
+        title: "Success",
+        description: "Job re-queued for printing.",
+      });
+
+      return updatedJob;
+    } catch (error) {
+      console.error('Error retrying job:', error);
+      toast({
+        title: "Error",
+        description: "Failed to retry job.",
+        variant: "destructive",
+      });
+      throw error;
+    }
+  };
+
+  const updateProgress = async (id: string, progress: number) => {
+    try {
+      await api.put(`/api/v1/jobs/${id}/progress`, {
+        progress_percentage: progress
+      });
+
+      setPrintJobs(prev => prev.map(job =>
+        job.id === id ? { ...job, progressPercentage: progress } : job
+      ));
+    } catch (error) {
+      console.error('Error updating progress:', error);
+      // Silent fail for progress updates
+    }
+  };
+
+  // Get job statistics
+  const getJobStats = async (): Promise<JobStats | null> => {
+    try {
+      const response = await api.get<JobStats>('/api/v1/jobs/stats');
+      return response;
+    } catch (error) {
+      console.error('Error fetching job stats:', error);
+      return null;
+    }
+  };
+
+  // Initial fetch
   useEffect(() => {
-    fetchPrintJobs();
-  }, [tenant?.id]);
+    if (tenantId) {
+      fetchPrintJobs();
+    }
+  }, [tenantId, fetchPrintJobs]);
 
   return {
     printJobs,
@@ -267,6 +430,15 @@ export const usePrintJobs = () => {
     updatePrintJob,
     deletePrintJob,
     cancelPrintJob,
+    assignJob,
+    startJob,
+    pauseJob,
+    resumeJob,
+    completeJob,
+    failJob,
+    retryJob,
+    updateProgress,
+    getJobStats,
     refetch: fetchPrintJobs
   };
 };

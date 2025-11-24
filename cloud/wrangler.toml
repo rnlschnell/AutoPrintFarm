@@ -83,11 +83,17 @@ queue = "file-processing"
 max_batch_size = 10
 max_batch_timeout = 30
 
-# Future queue consumers (will be configured in later phases)
-# [[queues.consumers]]
-# queue = "print-events"
-# max_batch_size = 10
-# max_batch_timeout = 30
+# Print events queue consumer (Phase 7)
+[[queues.consumers]]
+queue = "print-events"
+max_batch_size = 10
+max_batch_timeout = 30
+
+# Shopify sync queue consumer (Phase 10)
+[[queues.consumers]]
+queue = "shopify-sync"
+max_batch_size = 5
+max_batch_timeout = 60
 
 # ============================================================================
 # Durable Object Bindings
@@ -118,6 +124,13 @@ API_VERSION = "v1"
 # Better Auth Configuration
 # BETTER_AUTH_URL will default to the request origin if not set
 # TRUSTED_ORIGINS is a comma-separated list of allowed origins for CORS
+
+# ============================================================================
+# Cron Triggers (Scheduled Tasks)
+# ============================================================================
+# Session cleanup - runs daily at 3:00 AM UTC
+[triggers]
+crons = ["0 3 * * *"]
 
 # ============================================================================
 # Development Environment

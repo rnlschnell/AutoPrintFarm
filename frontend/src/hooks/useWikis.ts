@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react';
-import { supabase } from '@/integrations/supabase/client';
+import { api, ApiError } from '@/lib/api-client';
 import { useTenant } from '@/hooks/useTenant';
 import { useToast } from '@/hooks/use-toast';
 
@@ -29,6 +29,24 @@ export interface Wiki {
   sku_id?: string | null;
   created_at: string;
   updated_at: string;
+  // Additional fields from cloud API
+  slug?: string;
+  content?: string;
+  excerpt?: string;
+  category?: string;
+  tags?: string[];
+  is_published?: boolean;
+}
+
+interface CreateWikiData {
+  title: string;
+  description?: string;
+  estimated_time_minutes?: number;
+  difficulty?: 'easy' | 'medium' | 'hard';
+  tools_required?: string[];
+  sections?: WikiSection[];
+  product_id?: string | null;
+  sku_id?: string | null;
 }
 
 export const useWikis = () => {
@@ -45,21 +63,19 @@ export const useWikis = () => {
 
     setLoading(true);
     try {
-      const { data, error } = await supabase
-        .from('product_wikis')
-        .select('*')
-        .eq('tenant_id', tenantId)
-        .order('updated_at', { ascending: false });
+      const response = await api.get<Wiki[]>('/api/v1/wiki', {
+        params: { limit: 100 }
+      });
 
-      if (error) throw error;
-
-      setWikis(data || []);
-      return data || [];
-    } catch (error: any) {
+      const data = Array.isArray(response) ? response : [];
+      setWikis(data);
+      return data;
+    } catch (error: unknown) {
       console.error('Error fetching wikis:', error);
+      const message = error instanceof ApiError ? error.message : 'Unknown error';
       toast({
         title: 'Error',
-        description: `Failed to fetch wikis: ${error.message}`,
+        description: `Failed to fetch wikis: ${message}`,
         variant: 'destructive',
       });
       return [];
@@ -75,28 +91,21 @@ export const useWikis = () => {
     }
 
     try {
-      const { data, error } = await supabase
-        .from('product_wikis')
-        .select('*')
-        .eq('id', id)
-        .eq('tenant_id', tenantId)
-        .single();
-
-      if (error) throw error;
-
+      const data = await api.get<Wiki>(`/api/v1/wiki/${id}`);
       return data;
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('Error fetching wiki:', error);
+      const message = error instanceof ApiError ? error.message : 'Unknown error';
       toast({
         title: 'Error',
-        description: `Failed to fetch wiki: ${error.message}`,
+        description: `Failed to fetch wiki: ${message}`,
         variant: 'destructive',
       });
       return null;
     }
   }, [tenantId, toast]);
 
-  const createWiki = useCallback(async (wikiData: Partial<Wiki>): Promise<Wiki | null> => {
+  const createWiki = useCallback(async (wikiData: CreateWikiData): Promise<Wiki | null> => {
     if (!tenantId) {
       toast({
         title: 'Error',
@@ -107,18 +116,11 @@ export const useWikis = () => {
     }
 
     try {
-      const { data, error } = await supabase
-        .from('product_wikis')
-        .insert({
-          ...wikiData,
-          tenant_id: tenantId,
-          sections: wikiData.sections || [],
-          tools_required: wikiData.tools_required || [],
-        })
-        .select()
-        .single();
-
-      if (error) throw error;
+      const data = await api.post<Wiki>('/api/v1/wiki', {
+        ...wikiData,
+        sections: wikiData.sections || [],
+        tools_required: wikiData.tools_required || [],
+      });
 
       toast({
         title: 'Success',
@@ -127,11 +129,12 @@ export const useWikis = () => {
 
       await fetchWikis();
       return data;
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('Error creating wiki:', error);
+      const message = error instanceof ApiError ? error.message : 'Unknown error';
       toast({
         title: 'Error',
-        description: `Failed to create wiki: ${error.message}`,
+        description: `Failed to create wiki: ${message}`,
         variant: 'destructive',
       });
       return null;
@@ -149,15 +152,7 @@ export const useWikis = () => {
     }
 
     try {
-      const { data, error } = await supabase
-        .from('product_wikis')
-        .update(updates)
-        .eq('id', id)
-        .eq('tenant_id', tenantId)
-        .select()
-        .single();
-
-      if (error) throw error;
+      const data = await api.put<Wiki>(`/api/v1/wiki/${id}`, updates);
 
       toast({
         title: 'Success',
@@ -166,11 +161,12 @@ export const useWikis = () => {
 
       await fetchWikis();
       return data;
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('Error updating wiki:', error);
+      const message = error instanceof ApiError ? error.message : 'Unknown error';
       toast({
         title: 'Error',
-        description: `Failed to update wiki: ${error.message}`,
+        description: `Failed to update wiki: ${message}`,
         variant: 'destructive',
       });
       return null;
@@ -188,13 +184,7 @@ export const useWikis = () => {
     }
 
     try {
-      const { error } = await supabase
-        .from('product_wikis')
-        .delete()
-        .eq('id', id)
-        .eq('tenant_id', tenantId);
-
-      if (error) throw error;
+      await api.delete(`/api/v1/wiki/${id}`);
 
       toast({
         title: 'Success',
@@ -203,11 +193,12 @@ export const useWikis = () => {
 
       await fetchWikis();
       return true;
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('Error deleting wiki:', error);
+      const message = error instanceof ApiError ? error.message : 'Unknown error';
       toast({
         title: 'Error',
-        description: `Failed to delete wiki: ${error.message}`,
+        description: `Failed to delete wiki: ${message}`,
         variant: 'destructive',
       });
       return false;
@@ -238,36 +229,21 @@ export const useWikis = () => {
         return null;
       }
 
-      // Generate unique filename
-      const fileExt = file.name.split('.').pop();
-      const fileName = `${Date.now()}-${Math.random().toString(36).substring(2, 9)}.${fileExt}`;
-
-      // Upload to Supabase storage
-      const { error: uploadError } = await supabase.storage
-        .from('wiki-images')
-        .upload(fileName, file, {
-          cacheControl: '3600',
-          upsert: false,
-        });
-
-      if (uploadError) throw uploadError;
-
-      // Get public URL
-      const { data: { publicUrl } } = supabase.storage
-        .from('wiki-images')
-        .getPublicUrl(fileName);
+      // Upload to cloud R2 storage via files endpoint
+      const response = await api.upload<{ url: string }>('/api/v1/files/wiki-image', file, 'file');
 
       toast({
         title: 'Success',
         description: 'Image uploaded successfully',
       });
 
-      return publicUrl;
-    } catch (error: any) {
+      return response.url;
+    } catch (error: unknown) {
       console.error('Error uploading image:', error);
+      const message = error instanceof ApiError ? error.message : 'Unknown error';
       toast({
         title: 'Error',
-        description: `Failed to upload image: ${error.message}`,
+        description: `Failed to upload image: ${message}`,
         variant: 'destructive',
       });
       return null;
@@ -281,48 +257,37 @@ export const useWikis = () => {
     }
 
     try {
-      // Try to find wiki by SKU first
-      const { data: skuData, error: skuError } = await supabase
-        .from('product_skus')
-        .select('id, product_id')
-        .eq('sku', sku)
-        .eq('tenant_id', tenantId)
-        .single();
+      // Get SKU info first
+      const skuResponse = await api.get<{ id: string; product_id: string | null }>(`/api/v1/skus/by-sku/${sku}`);
 
-      if (skuError) {
-        console.warn('SKU not found:', skuError);
+      if (!skuResponse) {
+        console.warn('SKU not found:', sku);
         return null;
       }
 
-      // First try to find wiki by sku_id
-      const { data: wikiBySkuId, error: wikiSkuError } = await supabase
-        .from('product_wikis')
-        .select('*')
-        .eq('sku_id', skuData.id)
-        .eq('tenant_id', tenantId)
-        .maybeSingle();
+      // Try to find wiki by sku_id
+      const wikisResponse = await api.get<Wiki[]>('/api/v1/wiki', {
+        params: { sku_id: skuResponse.id, limit: 1 }
+      });
 
-      if (wikiBySkuId) {
-        return wikiBySkuId;
+      if (Array.isArray(wikisResponse) && wikisResponse.length > 0) {
+        return wikisResponse[0];
       }
 
       // Fallback: try to find wiki by product_id
-      if (skuData.product_id) {
-        const { data: wikiByProductId, error: wikiProductError } = await supabase
-          .from('product_wikis')
-          .select('*')
-          .eq('product_id', skuData.product_id)
-          .eq('tenant_id', tenantId)
-          .maybeSingle();
+      if (skuResponse.product_id) {
+        const productWikisResponse = await api.get<Wiki[]>('/api/v1/wiki', {
+          params: { product_id: skuResponse.product_id, limit: 1 }
+        });
 
-        if (wikiByProductId) {
-          return wikiByProductId;
+        if (Array.isArray(productWikisResponse) && productWikisResponse.length > 0) {
+          return productWikisResponse[0];
         }
       }
 
       // No wiki found
       return null;
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('Error fetching wiki by SKU:', error);
       return null;
     }

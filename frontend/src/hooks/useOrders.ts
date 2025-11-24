@@ -1,15 +1,14 @@
-import { useState, useEffect } from 'react';
-import { supabase } from '@/integrations/supabase/client';
+import { useState, useEffect, useCallback } from 'react';
 import { useToast } from '@/hooks/use-toast';
-import { 
-  FrontendOrder, 
+import { useAuth } from '@/contexts/AuthContext';
+import { api, ApiError } from '@/lib/api-client';
+import {
+  FrontendOrder,
   FrontendOrderItem,
-  transformOrderFromDb, 
-  transformOrderItemFromDb, 
+  transformOrderFromDb,
   transformOrderToDb,
-  DbOrder,
-  DbOrderItem
 } from '@/lib/transformers';
+import type { Order as ApiOrder, OrderItem as ApiOrderItem } from '@/types/api';
 
 export type { FrontendOrder as Order, FrontendOrderItem as OrderItem };
 
@@ -17,138 +16,141 @@ export const useOrders = () => {
   const [orders, setOrders] = useState<FrontendOrder[]>([]);
   const [loading, setLoading] = useState(true);
   const { toast } = useToast();
+  const { tenantId } = useAuth();
 
-  const fetchOrders = async () => {
+  const fetchOrders = useCallback(async (filters?: {
+    status?: string;
+    platform?: string;
+    date_from?: string;
+    date_to?: string;
+    search?: string;
+  }) => {
+    if (!tenantId) {
+      setLoading(false);
+      return;
+    }
+
     try {
-      const { data: ordersData, error: ordersError } = await supabase
-        .from('orders')
-        .select('*')
-        .order('order_date', { ascending: false });
-
-      if (ordersError) throw ordersError;
-
-      const { data: itemsData, error: itemsError } = await supabase
-        .from('order_items')
-        .select('*');
-
-      if (itemsError) throw itemsError;
-
-      // Combine orders with their items
-      const ordersWithItems: FrontendOrder[] = (ordersData || []).map(order => {
-        const orderItems = (itemsData || []).filter(item => item.order_id === order.id);
-        // Fix total_revenue type conversion
-        const orderWithNumericRevenue = {
-          ...order,
-          total_revenue: typeof order.total_revenue === 'string' ? parseFloat(order.total_revenue) || 0 : order.total_revenue || 0
-        };
-        const transformedOrder = transformOrderFromDb(orderWithNumericRevenue as DbOrder);
-        return {
-          ...transformedOrder,
-          items: orderItems.map(item => transformOrderItemFromDb(item as DbOrderItem))
-        };
+      // Fetch from Cloud API
+      const response = await api.get<(ApiOrder & { items?: ApiOrderItem[] })[]>('/api/v1/orders', {
+        params: {
+          limit: 100,
+          sortBy: 'order_date',
+          sortOrder: 'desc',
+          ...filters
+        }
       });
 
-      setOrders(ordersWithItems);
+      if (!Array.isArray(response)) {
+        throw new Error('Invalid response from server');
+      }
+
+      // Transform to frontend format
+      const transformedOrders = response.map(transformOrderFromDb);
+
+      setOrders(transformedOrders);
     } catch (error) {
       console.error('Error fetching orders:', error);
+      if (error instanceof ApiError && error.isAuthError()) {
+        return;
+      }
       toast({
         title: "Error",
-        description: "Failed to load orders from database.",
+        description: "Failed to load orders.",
         variant: "destructive",
       });
+      setOrders([]);
     } finally {
       setLoading(false);
+    }
+  }, [tenantId, toast]);
+
+  const getOrder = async (id: string): Promise<FrontendOrder | null> => {
+    try {
+      const response = await api.get<ApiOrder & { items?: ApiOrderItem[] }>(`/api/v1/orders/${id}`);
+      return transformOrderFromDb(response);
+    } catch (error) {
+      console.error('Error fetching order:', error);
+      toast({
+        title: "Error",
+        description: "Failed to load order details.",
+        variant: "destructive",
+      });
+      return null;
     }
   };
 
   const addOrder = async (orderData: {
-    orderNumber: string;
-    platform: string;
+    orderNumber?: string;
+    platform?: string;
     customerName: string;
     customerEmail?: string;
-    orderDate: string;
-    status?: string;
-    totalRevenue: number;
+    customerPhone?: string;
+    orderDate?: string;
+    totalRevenue?: number;
+    shippingCost?: number;
+    taxAmount?: number;
+    discountAmount?: number;
     shippingStreet?: string;
     shippingCity?: string;
     shippingState?: string;
     shippingZip?: string;
     shippingCountry?: string;
-    items: Array<{
+    notes?: string;
+    items?: Array<{
+      productSkuId?: string;
+      finishedGoodId?: string;
       sku: string;
       productName: string;
       quantity: number;
       unitPrice: number;
-      totalPrice: number;
-      finishedGoodId?: string;
+      totalPrice?: number;
     }>;
   }) => {
     try {
-      const insertData = {
+      // Create via Cloud API
+      const response = await api.post<ApiOrder & { items?: ApiOrderItem[] }>('/api/v1/orders', {
         order_number: orderData.orderNumber,
-        platform: orderData.platform,
+        platform: orderData.platform || 'manual',
         customer_name: orderData.customerName,
         customer_email: orderData.customerEmail,
-        order_date: orderData.orderDate,
-        status: orderData.status || 'pending',
-        total_revenue: orderData.totalRevenue.toString(),
+        customer_phone: orderData.customerPhone,
+        order_date: orderData.orderDate || new Date().toISOString(),
+        total_revenue: orderData.totalRevenue || 0,
+        shipping_cost: orderData.shippingCost || 0,
+        tax_amount: orderData.taxAmount || 0,
+        discount_amount: orderData.discountAmount || 0,
         shipping_street: orderData.shippingStreet,
         shipping_city: orderData.shippingCity,
         shipping_state: orderData.shippingState,
         shipping_zip: orderData.shippingZip,
-        shipping_country: orderData.shippingCountry || 'USA',
-        tenant_id: '550e8400-e29b-41d4-a716-446655440000' // Using demo tenant
-      };
-
-      const { data: newOrder, error: orderError } = await supabase
-        .from('orders')
-        .insert(insertData)
-        .select()
-        .single();
-
-      if (orderError) throw orderError;
-
-      const { data: newItems, error: itemsError } = await supabase
-        .from('order_items')
-        .insert(
-          orderData.items.map(item => ({
-            order_id: newOrder.id,
-            sku: item.sku,
-            product_name: item.productName,
-            quantity: item.quantity,
-            unit_price: item.unitPrice,
-            total_price: item.totalPrice,
-            finished_good_id: item.finishedGoodId,
-            tenant_id: '550e8400-e29b-41d4-a716-446655440000' // Using demo tenant
-          }))
-        )
-        .select();
-
-      if (itemsError) throw itemsError;
-
-      // Fix total_revenue type conversion
-      const orderWithNumericRevenue = {
-        ...newOrder,
-        total_revenue: typeof newOrder.total_revenue === 'string' ? parseFloat(newOrder.total_revenue) || 0 : newOrder.total_revenue || 0
-      };
-      const transformedOrder = transformOrderFromDb(orderWithNumericRevenue as DbOrder);
-      const orderWithItems: FrontendOrder = {
-        ...transformedOrder,
-        items: (newItems || []).map(item => transformOrderItemFromDb(item as DbOrderItem))
-      };
-
-      setOrders(prev => [orderWithItems, ...prev]);
-      toast({
-        title: "Success",
-        description: `Order ${orderData.orderNumber} has been created.`,
+        shipping_country: orderData.shippingCountry || 'US',
+        notes: orderData.notes,
+        items: orderData.items?.map(item => ({
+          product_sku_id: item.productSkuId,
+          finished_good_id: item.finishedGoodId,
+          sku: item.sku,
+          product_name: item.productName,
+          quantity: item.quantity,
+          unit_price: item.unitPrice,
+          total_price: item.totalPrice ?? item.quantity * item.unitPrice
+        }))
       });
 
-      return orderWithItems;
+      const newOrder = transformOrderFromDb(response);
+
+      setOrders(prev => [newOrder, ...prev]);
+      toast({
+        title: "Success",
+        description: `Order ${newOrder.orderNumber} has been created.`,
+      });
+
+      return newOrder;
     } catch (error) {
       console.error('Error adding order:', error);
       toast({
         title: "Error",
-        description: "Failed to create order.",
+        description: error instanceof Error ? error.message : "Failed to create order.",
         variant: "destructive",
       });
       throw error;
@@ -157,29 +159,15 @@ export const useOrders = () => {
 
   const updateOrder = async (id: string, updates: Partial<FrontendOrder>) => {
     try {
-      const updateData: any = transformOrderToDb(updates);
-      // Convert total_revenue to string if it's a number for database storage
-      if (typeof updateData.total_revenue === 'number') {
-        updateData.total_revenue = updateData.total_revenue.toString();
-      }
+      const updateData = transformOrderToDb(updates);
 
-      const { data, error } = await supabase
-        .from('orders')
-        .update(updateData)
-        .eq('id', id)
-        .select()
-        .single();
+      // Update via Cloud API
+      const response = await api.put<ApiOrder>(`/api/v1/orders/${id}`, updateData);
 
-      if (error) throw error;
+      const updatedOrder = transformOrderFromDb(response);
 
-      // Fix total_revenue type conversion
-      const orderWithNumericRevenue = {
-        ...data,
-        total_revenue: typeof data.total_revenue === 'string' ? parseFloat(data.total_revenue) || 0 : data.total_revenue || 0
-      };
-      const transformedOrder = transformOrderFromDb(orderWithNumericRevenue as DbOrder);
-      setOrders(prev => prev.map(order => 
-        order.id === id ? { ...order, ...transformedOrder } : order
+      setOrders(prev => prev.map(order =>
+        order.id === id ? { ...order, ...updatedOrder } : order
       ));
 
       toast({
@@ -187,7 +175,7 @@ export const useOrders = () => {
         description: "Order updated successfully.",
       });
 
-      return data;
+      return updatedOrder;
     } catch (error) {
       console.error('Error updating order:', error);
       toast({
@@ -201,39 +189,116 @@ export const useOrders = () => {
 
   const deleteOrder = async (id: string) => {
     try {
-      const { error } = await supabase
-        .from('orders')
-        .delete()
-        .eq('id', id);
-
-      if (error) throw error;
+      // Cancel/delete via Cloud API
+      await api.delete(`/api/v1/orders/${id}`);
 
       setOrders(prev => prev.filter(order => order.id !== id));
       toast({
         title: "Success",
-        description: "Order deleted successfully.",
+        description: "Order cancelled.",
       });
     } catch (error) {
       console.error('Error deleting order:', error);
       toast({
         title: "Error",
-        description: "Failed to delete order.",
+        description: "Failed to cancel order.",
         variant: "destructive",
       });
       throw error;
     }
   };
 
+  // Fulfill entire order
+  const fulfillOrder = async (id: string) => {
+    try {
+      const response = await api.post<ApiOrder & { items?: ApiOrderItem[] }>(`/api/v1/orders/${id}/fulfill`);
+
+      const updatedOrder = transformOrderFromDb(response);
+
+      setOrders(prev => prev.map(order =>
+        order.id === id ? updatedOrder : order
+      ));
+
+      toast({
+        title: "Success",
+        description: "Order fulfilled.",
+      });
+
+      return updatedOrder;
+    } catch (error) {
+      console.error('Error fulfilling order:', error);
+      toast({
+        title: "Error",
+        description: error instanceof Error ? error.message : "Failed to fulfill order.",
+        variant: "destructive",
+      });
+      throw error;
+    }
+  };
+
+  // Fulfill single item
+  const fulfillItem = async (orderId: string, itemId: string, quantity?: number) => {
+    try {
+      const response = await api.post<ApiOrder & { items?: ApiOrderItem[] }>(
+        `/api/v1/orders/${orderId}/items/${itemId}/fulfill`,
+        { quantity }
+      );
+
+      const updatedOrder = transformOrderFromDb(response);
+
+      setOrders(prev => prev.map(order =>
+        order.id === orderId ? updatedOrder : order
+      ));
+
+      toast({
+        title: "Success",
+        description: "Item fulfilled.",
+      });
+
+      return updatedOrder;
+    } catch (error) {
+      console.error('Error fulfilling item:', error);
+      toast({
+        title: "Error",
+        description: error instanceof Error ? error.message : "Failed to fulfill item.",
+        variant: "destructive",
+      });
+      throw error;
+    }
+  };
+
+  // Get order statistics
+  const getOrderStats = async () => {
+    try {
+      const response = await api.get<{
+        by_status: Record<string, number>;
+        by_platform: Record<string, number>;
+        total_revenue: number;
+        total_orders: number;
+      }>('/api/v1/orders/stats');
+      return response;
+    } catch (error) {
+      console.error('Error fetching order stats:', error);
+      return null;
+    }
+  };
+
   useEffect(() => {
-    fetchOrders();
-  }, []);
+    if (tenantId) {
+      fetchOrders();
+    }
+  }, [tenantId, fetchOrders]);
 
   return {
     orders,
     loading,
+    getOrder,
     addOrder,
     updateOrder,
     deleteOrder,
+    fulfillOrder,
+    fulfillItem,
+    getOrderStats,
     refetch: fetchOrders
   };
 };

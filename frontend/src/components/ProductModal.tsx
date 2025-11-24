@@ -173,13 +173,13 @@ export const ProductModal = ({ product, isOpen, onClose, onSave, onDelete, initi
   useEffect(() => {
     if (!isOpen) {
       // Clean up temp files when modal closes without saving
-      tempFileManager.clearAll();
+      tempFileManager.clear();
     }
   }, [isOpen]);
 
   const handleClose = () => {
     // Always clean up temp files when closing
-    tempFileManager.clearAll();
+    tempFileManager.clear();
     setShowDeleteConfirm(false);
     onClose();
   };
@@ -320,10 +320,10 @@ export const ProductModal = ({ product, isOpen, onClose, onSave, onDelete, initi
       };
 
       await onSave(productData);
-      
+
       // Clear temp files after successful save
-      tempFileManager.clearAll();
-      
+      tempFileManager.clear();
+
       // Only close modal if save was successful
       handleClose();
     } catch (error: any) {

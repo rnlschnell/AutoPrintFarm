@@ -1,10 +1,13 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useToast } from '@/hooks/use-toast';
-import { useTenant } from '@/hooks/useTenant';
+import { useAuth } from '@/contexts/AuthContext';
+import { api, ApiError } from '@/lib/api-client';
 import {
   FrontendPrinter,
   transformPrinterFromDb,
+  transformPrinterToDb,
 } from '@/lib/transformers';
+import type { Printer as ApiPrinter } from '@/types/api';
 
 export type { FrontendPrinter as Printer };
 
@@ -12,142 +15,97 @@ export const usePrinters = () => {
   const [printers, setPrinters] = useState<FrontendPrinter[]>([]);
   const [loading, setLoading] = useState(true);
   const { toast } = useToast();
-  const { tenant } = useTenant();
+  const { tenantId } = useAuth();
 
   // Track recent local updates to preserve them during fetchPrinters calls
   const recentUpdatesRef = useRef<Map<string, { timestamp: number; printer: FrontendPrinter }>>(new Map());
 
   const fetchPrinters = useCallback(async () => {
-    if (!tenant?.id) return;
+    if (!tenantId) {
+      setLoading(false);
+      return;
+    }
 
     try {
-      // Get printers from Pi API (local-first) - SQLite is now the source of truth
-      const response = await fetch('/api/printers-sync/');
+      // Get printers from Cloud API
+      const response = await api.get<ApiPrinter[]>('/api/v1/printers', {
+        params: { limit: 100 }
+      });
 
-      if (!response.ok) {
-        throw new Error(`Failed to fetch printers: ${response.statusText}`);
+      if (!Array.isArray(response)) {
+        throw new Error('Invalid response from server');
       }
 
-      const data = await response.json();
+      // Transform database data to frontend format
+      const transformedData = response.map(transformPrinterFromDb);
 
-      // Transform database data to frontend format (data is already in dict format)
-      const transformedData = data.map(transformPrinterFromDb);
+      // Merge with recent local updates (within last 5 seconds)
+      const now = Date.now();
+      const mergedPrinters = transformedData.map(printer => {
+        const recentUpdate = recentUpdatesRef.current.get(printer.id);
+        const isRecentUpdate = recentUpdate && (now - recentUpdate.timestamp) < 5000;
 
-      // Immediately check printer connection status via HTTP API
-      try {
-        const statusResponse = await fetch('/api/printers/status-quick-fixed', {
-          signal: AbortSignal.timeout(3000) // 3 second timeout
-        });
-
-        if (statusResponse.ok) {
-          const statusData = await statusResponse.json();
-          if (statusData.success && statusData.printers) {
-            // Merge live status with database data, preserving recent local updates
-            const updatedPrinters = transformedData.map(printer => {
-              const liveStatus = statusData.printers.find(
-                (s: any) => s.printer_id === printer.printerId?.toString()
-              );
-
-              // Check if we have a recent local update for this printer (within last 5 seconds)
-              const recentUpdate = recentUpdatesRef.current.get(printer.id);
-              const now = Date.now();
-              const isRecentUpdate = recentUpdate && (now - recentUpdate.timestamp) < 5000;
-
-              let updatedPrinter = printer;
-
-              // If we have a recent local update, use the locally updated printer data
-              if (isRecentUpdate) {
-                updatedPrinter = {
-                  ...recentUpdate.printer,
-                  // But still update connection status from live data
-                  status: liveStatus?.status || recentUpdate.printer.status,
-                  connected: liveStatus?.connected || recentUpdate.printer.connected
-                };
-              } else if (liveStatus) {
-                // No recent local update, use database data + live status
-                updatedPrinter = {
-                  ...printer,
-                  status: liveStatus.status,
-                  connected: liveStatus.connected
-                };
-              }
-
-              return updatedPrinter;
-            });
-
-            setPrinters([...updatedPrinters]);
-            console.log('[FETCH] Set printers, first 3:', updatedPrinters.slice(0, 3).map(p => ({ id: p.id.substring(0, 8), name: p.name, color: p.currentColor, hex: p.currentColorHex })));
-          } else {
-            // Fallback to database status if HTTP check fails
-            setPrinters([...transformedData]);
-          }
-        } else {
-          // Fallback to database status if HTTP check fails
-          setPrinters([...transformedData]);
+        if (isRecentUpdate) {
+          return {
+            ...recentUpdate.printer,
+            // Still update connection status from server
+            status: printer.status,
+            connected: printer.connected
+          };
         }
-      } catch (statusError) {
-        console.warn('Failed to check immediate printer status, using database status:', statusError);
-        // Fallback to database status if HTTP check fails
-        setPrinters([...transformedData]);
-      }
+        return printer;
+      });
+
+      // Sort by sortOrder
+      mergedPrinters.sort((a, b) => a.sortOrder - b.sortOrder);
+
+      setPrinters([...mergedPrinters]);
 
       // Clean up old entries from recentUpdatesRef (older than 10 seconds)
-      const now = Date.now();
       for (const [printerId, update] of recentUpdatesRef.current.entries()) {
         if (now - update.timestamp > 10000) {
           recentUpdatesRef.current.delete(printerId);
         }
       }
-    } catch (error: any) {
+    } catch (error) {
       console.error('Error fetching printers:', error);
+      if (error instanceof ApiError && error.isAuthError()) {
+        // Don't show toast for auth errors - let AuthContext handle it
+        return;
+      }
       toast({
         title: "Error",
-        description: "Failed to load printers from database.",
+        description: "Failed to load printers from server.",
         variant: "destructive",
       });
       setPrinters([]);
     } finally {
       setLoading(false);
     }
-  }, [tenant?.id, toast]);
+  }, [tenantId, toast]);
 
   const addPrinter = async (printer: Omit<FrontendPrinter, 'id' | 'printerId' | 'tenantId' | 'createdAt' | 'updatedAt'>) => {
-    if (!tenant?.id) {
+    if (!tenantId) {
       throw new Error('No tenant ID available');
     }
 
     try {
-      // Send to Pi API (local-first)
-      const response = await fetch('/api/printers-sync/', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          name: printer.name,
-          model: printer.model,
-          manufacturer: printer.manufacturer,
-          ip_address: printer.ipAddress,
-          access_code: printer.accessCode,
-          serial_number: printer.serialNumber,
-          firmware_version: printer.firmwareVersion,
-          location: printer.location,
-          sort_order: printer.sortOrder || 0,
-        }),
+      // Send to Cloud API
+      const response = await api.post<ApiPrinter>('/api/v1/printers', {
+        name: printer.name,
+        model: printer.model,
+        manufacturer: printer.manufacturer,
+        ip_address: printer.ipAddress,
+        access_code: printer.accessCode,
+        serial_number: printer.serialNumber,
+        firmware_version: printer.firmwareVersion,
+        location: printer.location,
+        sort_order: printer.sortOrder || 0,
+        connection_type: printer.connectionType || 'bambu',
       });
 
-      if (!response.ok) {
-        throw new Error(`Failed to add printer: ${response.statusText}`);
-      }
-
-      const data = await response.json();
-
-      if (!data.success) {
-        throw new Error(data.message || 'Failed to add printer');
-      }
-
       // Transform the returned data
-      const transformedPrinter = transformPrinterFromDb(data.printer);
+      const transformedPrinter = transformPrinterFromDb(response);
 
       // Add to local state
       setPrinters(prev => [...prev, transformedPrinter]);
@@ -171,46 +129,14 @@ export const usePrinters = () => {
 
   const updatePrinter = async (id: string, updates: Partial<FrontendPrinter>) => {
     try {
-      // Send to Pi API (local-first)
-      const response = await fetch(`/api/printers-sync/${id}`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          name: updates.name,
-          model: updates.model,
-          manufacturer: updates.manufacturer,
-          ip_address: updates.ipAddress,
-          access_code: updates.accessCode,
-          serial_number: updates.serialNumber,
-          firmware_version: updates.firmwareVersion,
-          location: updates.location,
-          sort_order: updates.sortOrder,
-          status: updates.status,
-          current_color: updates.currentColor,
-          current_color_hex: updates.currentColorHex,
-          current_filament_type: updates.currentFilamentType,
-          current_build_plate: updates.currentBuildPlate,
-          filament_level: updates.filamentLevel,
-          nozzle_size: updates.nozzleSize,
-          in_maintenance: updates.inMaintenance,
-          maintenance_type: updates.maintenanceType,
-        }),
-      });
+      // Transform to API format
+      const apiUpdates = transformPrinterToDb(updates);
 
-      if (!response.ok) {
-        throw new Error(`Failed to update printer: ${response.statusText}`);
-      }
-
-      const data = await response.json();
-
-      if (!data.success) {
-        throw new Error(data.message || 'Failed to update printer');
-      }
+      // Send to Cloud API
+      const response = await api.put<ApiPrinter>(`/api/v1/printers/${id}`, apiUpdates);
 
       // Transform the returned data
-      const transformedPrinter = transformPrinterFromDb(data.printer);
+      const transformedPrinter = transformPrinterFromDb(response);
 
       // Track this as a recent update FIRST (before any fetches)
       recentUpdatesRef.current.set(id, {
@@ -220,12 +146,6 @@ export const usePrinters = () => {
 
       // Update local state immediately
       setPrinters(prev => prev.map(p => p.id === id ? transformedPrinter : p));
-
-      // Force a fresh fetch to ensure all components see the latest data
-      // The recentUpdatesRef will preserve our update during the fetch
-      console.log('[UPDATE] Before fetchPrinters, updated printer:', { id: id.substring(0, 8), color: transformedPrinter.currentColor, hex: transformedPrinter.currentColorHex });
-      await fetchPrinters();
-      console.log('[UPDATE] After fetchPrinters completed');
 
       toast({
         title: "Success",
@@ -249,24 +169,8 @@ export const usePrinters = () => {
       // Optimistically remove from UI immediately
       setPrinters(prev => prev.filter(p => p.id !== id));
 
-      // Send to Pi API (local-first)
-      const response = await fetch(`/api/printers-sync/${id}`, {
-        method: 'DELETE',
-      });
-
-      if (!response.ok) {
-        // Restore on error by refetching
-        await fetchPrinters();
-        throw new Error(`Failed to delete printer: ${response.statusText}`);
-      }
-
-      const data = await response.json();
-
-      if (!data.success) {
-        // Restore on error by refetching
-        await fetchPrinters();
-        throw new Error(data.message || 'Failed to delete printer');
-      }
+      // Send to Cloud API
+      await api.delete(`/api/v1/printers/${id}`);
 
       // Remove from recent updates tracking
       recentUpdatesRef.current.delete(id);
@@ -277,6 +181,8 @@ export const usePrinters = () => {
       });
     } catch (error) {
       console.error('Error deleting printer:', error);
+      // Restore on error by refetching
+      await fetchPrinters();
       toast({
         title: "Error",
         description: "Failed to remove printer.",
@@ -288,16 +194,25 @@ export const usePrinters = () => {
 
   const updatePrintersOrder = async (reorderedPrinters: FrontendPrinter[]) => {
     try {
-      // Update sort_order for all printers using local API
+      // Update sort_order for all printers using batch update
+      const updates = reorderedPrinters.map((printer, index) => ({
+        id: printer.id,
+        sort_order: index + 1
+      }));
+
+      // Send batch update to Cloud API
+      await api.put('/api/v1/printers/order', { printers: updates });
+
+      // Update local state
+      setPrinters(reorderedPrinters.map((p, i) => ({ ...p, sortOrder: i + 1 })));
+
+    } catch (error) {
+      console.error('Error updating printer order:', error);
+      // Fallback to individual updates
       for (let i = 0; i < reorderedPrinters.length; i++) {
         const printer = reorderedPrinters[i];
         await updatePrinter(printer.id, { sortOrder: i + 1 });
       }
-
-      setPrinters(reorderedPrinters);
-
-    } catch (error) {
-      console.error('Error updating printer order:', error);
       toast({
         title: "Error",
         description: "Failed to save printer order.",
@@ -310,27 +225,16 @@ export const usePrinters = () => {
   const toggleCleared = async (printerId: string) => {
     try {
       // Call the cleared toggle API endpoint
-      const response = await fetch(`/api/printers/${printerId}/cleared/toggle`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-      });
+      const response = await api.put<ApiPrinter>(`/api/v1/printers/${printerId}/cleared`);
 
-      if (!response.ok) {
-        throw new Error(`Failed to toggle cleared status: ${response.statusText}`);
-      }
+      // Transform and update state
+      const transformedPrinter = transformPrinterFromDb(response);
 
-      const data = await response.json();
+      setPrinters(prev => prev.map(p =>
+        p.id === printerId ? transformedPrinter : p
+      ));
 
-      if (!data.success) {
-        throw new Error(data.message || 'Failed to toggle cleared status');
-      }
-
-      // Refetch printers to get the updated cleared status
-      await fetchPrinters();
-
-      return data;
+      return { success: true, cleared: transformedPrinter.cleared };
     } catch (error) {
       console.error('Error toggling cleared status:', error);
       toast({
@@ -342,13 +246,99 @@ export const usePrinters = () => {
     }
   };
 
+  const toggleMaintenance = async (printerId: string, maintenanceType?: string) => {
+    try {
+      // Call the maintenance toggle API endpoint
+      const response = await api.put<ApiPrinter>(`/api/v1/printers/${printerId}/maintenance`, {
+        maintenance_type: maintenanceType
+      });
+
+      // Transform and update state
+      const transformedPrinter = transformPrinterFromDb(response);
+
+      setPrinters(prev => prev.map(p =>
+        p.id === printerId ? transformedPrinter : p
+      ));
+
+      return { success: true, inMaintenance: transformedPrinter.inMaintenance };
+    } catch (error) {
+      console.error('Error toggling maintenance:', error);
+      toast({
+        title: "Error",
+        description: "Failed to update maintenance status.",
+        variant: "destructive",
+      });
+      throw error;
+    }
+  };
+
+  // Printer control commands
+  const connectPrinter = async (printerId: string) => {
+    try {
+      await api.post(`/api/v1/printers/${printerId}/connect`);
+      await fetchPrinters();
+      toast({
+        title: "Success",
+        description: "Printer connection initiated.",
+      });
+    } catch (error) {
+      console.error('Error connecting printer:', error);
+      toast({
+        title: "Error",
+        description: "Failed to connect to printer.",
+        variant: "destructive",
+      });
+      throw error;
+    }
+  };
+
+  const disconnectPrinter = async (printerId: string) => {
+    try {
+      await api.post(`/api/v1/printers/${printerId}/disconnect`);
+      await fetchPrinters();
+      toast({
+        title: "Success",
+        description: "Printer disconnected.",
+      });
+    } catch (error) {
+      console.error('Error disconnecting printer:', error);
+      toast({
+        title: "Error",
+        description: "Failed to disconnect printer.",
+        variant: "destructive",
+      });
+      throw error;
+    }
+  };
+
+  const controlPrinter = async (printerId: string, action: 'pause' | 'resume' | 'stop') => {
+    try {
+      await api.post(`/api/v1/printers/${printerId}/control`, { action });
+      await fetchPrinters();
+
+      const actionText = action === 'pause' ? 'paused' : action === 'resume' ? 'resumed' : 'stopped';
+      toast({
+        title: "Success",
+        description: `Print ${actionText}.`,
+      });
+    } catch (error) {
+      console.error(`Error ${action}ing printer:`, error);
+      toast({
+        title: "Error",
+        description: `Failed to ${action} print.`,
+        variant: "destructive",
+      });
+      throw error;
+    }
+  };
+
   // Initial fetch - only on mount or tenant change
   useEffect(() => {
-    if (tenant?.id) {
+    if (tenantId) {
       fetchPrinters();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tenant?.id]);
+  }, [tenantId]);
 
   return {
     printers,
@@ -358,6 +348,10 @@ export const usePrinters = () => {
     deletePrinter,
     updatePrintersOrder,
     toggleCleared,
+    toggleMaintenance,
+    connectPrinter,
+    disconnectPrinter,
+    controlPrinter,
     refetch: fetchPrinters
   };
 };

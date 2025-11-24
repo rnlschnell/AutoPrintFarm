@@ -1,26 +1,12 @@
 {
   "permissions": {
     "allow": [
-      "Bash(npm install)",
+      "Bash(echo:*)",
+      "Bash(npm run dev:*)",
       "Bash(npx tsc:*)",
-      "Bash(npx wrangler d1 create printfarm)",
-      "Bash(npx wrangler:*)",
-      "Bash(git add:*)",
-      "Bash(git reset:*)",
+      "Bash(npm ls:*)",
       "Bash(cat:*)",
-      "Bash(nul)",
-      "WebSearch",
-      "Bash(timeout 15 npx wrangler dev:*)",
-      "Bash(curl:*)",
-      "Bash(powershell:*)",
-      "WebFetch(domain:www.better-auth.com)",
-      "WebFetch(domain:github.com)",
-      "WebFetch(domain:hono.dev)",
-      "Bash(npm install:*)",
-      "Bash(.gitignore)",
-      "Bash(npm run typecheck:*)",
-      "Bash(/tmp/signup.json)",
-      "Bash(node test-auth.mjs:*)"
+      "Bash(git add:*)"
     ],
     "deny": [],
     "ask": []
