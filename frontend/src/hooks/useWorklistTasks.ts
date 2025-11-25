@@ -180,33 +180,26 @@ export const useWorklistTasks = () => {
 
   const syncToAssemblyTask = async (assemblyTaskId: string, status: WorklistTask['status'], forceComplete: boolean = false) => {
     try {
-      // Map worklist status to assembly status
-      const statusMapping = {
-        'pending': 'pending',
-        'in_progress': 'in_progress',
-        'completed': 'completed',
-        'cancelled': 'pending' // Reset cancelled tasks back to pending
-      };
-
-      const assemblyStatus = statusMapping[status];
-      const updateData: any = { status: assemblyStatus };
-
       if (status === 'completed') {
-        updateData.completed_at = new Date().toISOString();
+        // Use the dedicated completion endpoint which properly updates inventory
+        // This moves quantity from quantity_needs_assembly to quantity_assembled
+        await api.post(`/api/v1/assembly/${assemblyTaskId}/complete`, {
+          notes: 'Completed via worklist'
+        });
+        console.log(`Completed assembly task ${assemblyTaskId} via completion endpoint`);
+      } else {
+        // For non-completion status changes, use the update endpoint
+        const statusMapping: Record<string, string> = {
+          'pending': 'pending',
+          'in_progress': 'in_progress',
+          'cancelled': 'pending' // Reset cancelled tasks back to pending
+        };
 
-        // TODO: Component inventory consumption is temporarily disabled until materials API routes are added.
-        // When /api/v1/materials/components routes are implemented, re-enable inventory consumption:
-        // 1. Fetch product_components via /api/v1/products/:id/components
-        // 2. For each component with accessory_id, call /api/v1/materials/components/:id to get stock
-        // 3. Call PATCH /api/v1/materials/components/:id to consume inventory
-        // For now, assembly tasks complete without consuming component inventory.
-        console.log('Assembly task completed - component inventory consumption temporarily disabled');
+        await api.put(`/api/v1/assembly/${assemblyTaskId}`, {
+          status: statusMapping[status]
+        });
+        console.log(`Synced worklist status '${status}' to assembly task ${assemblyTaskId}`);
       }
-
-      // Call the assembly tasks API to update the status
-      await api.patch(`/api/v1/assembly/${assemblyTaskId}`, updateData);
-
-      console.log(`Synced worklist status '${status}' to assembly task ${assemblyTaskId}`);
     } catch (error) {
       console.error('Error syncing to assembly task:', error);
       // Re-throw the error so the task status update fails
@@ -272,7 +265,7 @@ export const useWorklistTasks = () => {
         }
 
         // Create assembly task via assembly-tasks API using the finished good ID
-        const assemblyTask = await api.post<any>('/api/v1/assembly/', {
+        const assemblyTask = await api.post<any>('/api/v1/assembly', {
           finished_good_id: finishedGood.id, // Use actual finished goods ID, not SKU ID
           product_name: productName,
           sku: sku,

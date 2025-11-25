@@ -11,8 +11,7 @@ import { Plus, Loader2, Package, RefreshCw, AlertTriangle } from "lucide-react";
 import ProductSelector from "@/components/ProductSelector";
 import SkuSelector from "@/components/SkuSelector";
 import { usePrinters } from "@/hooks/usePrinters";
-import { useTenant } from "@/hooks/useTenant";
-import { usePrintJobProcessor, type EnhancedJobRequest, type ObjectCountData } from "@/hooks/usePrintJobProcessor";
+import { usePrintJobs } from "@/hooks/usePrintJobs";
 import { api } from "@/lib/api-client";
 
 interface CreateJobModalEnhancedProps {
@@ -39,7 +38,17 @@ interface Sku {
   stock_level: number;
   price: number;
   is_active: number;
-  finishedGoodsStock?: number;
+  finished_goods_stock?: number;
+}
+
+interface PrintFile {
+  id: string;
+  name: string;
+  product_id?: string;
+  printer_model_id?: string;
+  object_count?: number;
+  filament_used_g?: number;
+  estimated_print_time_minutes?: number;
 }
 
 // Normalize printer model names to Bambu code IDs
@@ -79,15 +88,12 @@ const CreateJobModalEnhanced = ({ isOpen, onClose, onJobCreated }: CreateJobModa
 
   const [selectedSku, setSelectedSku] = useState<Sku | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
-  const [clearingTaskCreated, setClearingTaskCreated] = useState(false);
+  const [processing, setProcessing] = useState(false);
+  const [productFiles, setProductFiles] = useState<PrintFile[]>([]);
 
   const { toast } = useToast();
-  const { tenant } = useTenant();
   const { printers, loading: printersLoading, refetch: refetchPrinters } = usePrinters();
-  const { processing, createEnhancedJob, testConnection, getObjectCount } = usePrintJobProcessor();
-
-  const [objectCountData, setObjectCountData] = useState<ObjectCountData | null>(null);
-  const [loadingObjectCount, setLoadingObjectCount] = useState(false);
+  const { addPrintJob } = usePrintJobs();
 
   // Reset form when modal opens/closes
   useEffect(() => {
@@ -100,9 +106,31 @@ const CreateJobModalEnhanced = ({ isOpen, onClose, onJobCreated }: CreateJobModa
       });
       setSelectedSku(null);
       setValidationError(null);
-      setClearingTaskCreated(false);
+      setProductFiles([]);
     }
   }, [isOpen]);
+
+  // Fetch print files for the selected product
+  useEffect(() => {
+    if (!formData.productId) {
+      setProductFiles([]);
+      return;
+    }
+
+    const fetchProductFiles = async () => {
+      try {
+        const files = await api.get<PrintFile[]>('/api/v1/files', {
+          params: { product_id: formData.productId }
+        });
+        setProductFiles(files || []);
+      } catch (error) {
+        console.error('Error fetching product files:', error);
+        setProductFiles([]);
+      }
+    };
+
+    fetchProductFiles();
+  }, [formData.productId]);
 
   // Fetch selected SKU details when skuId changes
   useEffect(() => {
@@ -127,35 +155,24 @@ const CreateJobModalEnhanced = ({ isOpen, onClose, onJobCreated }: CreateJobModa
     fetchSkuDetails();
   }, [formData.skuId]);
 
-  // Fetch object count and projected stock when product and printer are selected
-  useEffect(() => {
-    if (!formData.productId || !formData.printerId) {
-      setObjectCountData(null);
-      return;
+  // Find the matching print file for a printer model
+  const findMatchingPrintFile = (printerModel: string): PrintFile | null => {
+    if (productFiles.length === 0) return null;
+
+    const normalizedModel = normalizePrinterModel(printerModel);
+
+    // First try to find an exact match by printer_model_id
+    if (normalizedModel) {
+      const exactMatch = productFiles.find(f => f.printer_model_id === normalizedModel);
+      if (exactMatch) return exactMatch;
     }
 
-    const fetchObjectCount = async () => {
-      setLoadingObjectCount(true);
-      try {
-        const data = await getObjectCount(
-          formData.productId,
-          formData.printerId,
-          formData.skuId || undefined
-        );
-        setObjectCountData(data);
-      } catch (error) {
-        console.error('Error fetching object count:', error);
-        setObjectCountData(null);
-      } finally {
-        setLoadingObjectCount(false);
-      }
-    };
-
-    fetchObjectCount();
-  }, [formData.productId, formData.printerId, formData.skuId]);
+    // If no exact match, return the first available file for the product
+    // (Some products may have a single file that works on multiple printers)
+    return productFiles[0] || null;
+  };
 
   const handleCreateJob = async () => {
-
     // Validation
     if (!formData.productId) {
       toast({
@@ -198,66 +215,6 @@ const CreateJobModalEnhanced = ({ isOpen, onClose, onJobCreated }: CreateJobModa
         });
         return;
       }
-
-      // Check if selected printer needs bed clearing
-      const isConnected = selectedPrinter?.connected;
-      const needsClearing = isConnected && (selectedPrinter?.cleared === false || selectedPrinter?.cleared === 0);
-
-      if (needsClearing) {
-        // Fetch print file data to get build plate info for the selected product and printer model
-        let buildPlate = 'Unknown';
-        try {
-          const printFilesResponse = await fetch('/api/print-files-sync/');
-
-          if (printFilesResponse.ok) {
-            const printFiles = await printFilesResponse.json();
-
-            // Normalize printer model to Bambu code (e.g., "A1 Mini" -> "N1", "A1" -> "N2S")
-            const printerModelCode = normalizePrinterModel(selectedPrinter.model);
-
-            // Find the print file for this product and printer model
-            const matchingFile = printFiles.find((f: any) =>
-              f.product_id === formData.productId &&
-              f.printer_model_id === printerModelCode
-            );
-
-            if (matchingFile && matchingFile.curr_bed_type) {
-              buildPlate = matchingFile.curr_bed_type;
-            }
-          }
-        } catch (error) {
-          console.error('Failed to fetch print file data:', error);
-        }
-
-        // Create worklist task for clearing the printer bed
-        try {
-          await fetch('/api/worklist/', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              title: `Clear Printer Bed - ${selectedPrinter.name}`,
-              subtitle: selectedPrinter.model,
-              description: `Clear the build plate for ${selectedPrinter.name} to start the print job.`,
-              task_type: 'collection',
-              priority: 'high',
-              status: 'pending',
-              printer_id: selectedPrinter.id,
-              metadata: {
-                auto_created: true,
-                reason: 'print_job_creation_blocked',
-                printer_name: selectedPrinter.name,
-                printer_model: selectedPrinter.model,
-                build_plate_needed: buildPlate
-              }
-            })
-          });
-          setClearingTaskCreated(true);
-        } catch (error) {
-          console.error('Failed to create clearing task:', error);
-          setClearingTaskCreated(true);
-        }
-        return;
-      }
     }
 
     // Auto-select mode is not yet implemented
@@ -279,91 +236,61 @@ const CreateJobModalEnhanced = ({ isOpen, onClose, onJobCreated }: CreateJobModa
       return;
     }
 
-    // Test connection to Pi before proceeding
-    const isConnected = await testConnection();
-    if (!isConnected) {
-      toast({
-        title: "Connection Error",
-        description: "Cannot connect to Pi. Check network connection and try again.",
-        variant: "destructive",
-      });
-      return;
-    }
-
-    // Find the selected printer to get its printerId
+    // Find the selected printer
     const selectedPrinter = printers.find(p => p.id === formData.printerId);
-    if (!selectedPrinter || !selectedPrinter.printerId) {
+    if (!selectedPrinter) {
       toast({
         title: "Error",
-        description: "Selected printer not found or invalid printer ID.",
+        description: "Selected printer not found.",
         variant: "destructive",
       });
       return;
     }
 
-    // Prepare enhanced job request with SKU data
-    const request: EnhancedJobRequest = {
-      job_type: 'product',
-      target_id: formData.productId,
-      product_sku_id: formData.skuId,
-      printer_id: selectedPrinter.printerId.toString(),
-      color: `${selectedSku.color}|${selectedSku.hex_code}`,
-      filament_type: selectedSku.filament_type,
-      material_type: selectedSku.filament_type,
-      copies: 1,
-      start_print: true
-    };
+    // Find the matching print file for this printer model
+    const printFile = findMatchingPrintFile(selectedPrinter.model);
+    if (!printFile) {
+      setValidationError("There is no print file for that printer model in the selected product. Please choose a different printer, or add a new file to that product.");
+      return;
+    }
+
+    setProcessing(true);
+    setValidationError(null);
 
     try {
-      const result = await createEnhancedJob(request);
+      // Create the print job via cloud API
+      await addPrintJob({
+        printerId: formData.printerId,
+        printFileId: printFile.id,
+        productSkuId: formData.skuId,
+        fileName: printFile.name,
+        color: selectedSku.color,
+        filamentType: selectedSku.filament_type,
+        materialType: selectedSku.filament_type,
+        numberOfUnits: printFile.object_count || 1,
+        filamentNeededGrams: printFile.filament_used_g,
+        estimatedPrintTimeMinutes: printFile.estimated_print_time_minutes,
+        priority: 50, // Default normal priority
+      });
 
-      if (result.success) {
-        setValidationError(null);
+      toast({
+        title: "Success",
+        description: `Print job created and added to queue.`,
+      });
 
-        // Build success message with stock information if available
-        let description = `Job created successfully! ${result.processing_status?.auto_start ? 'Print should start automatically.' : 'File uploaded to printer.'}`;
-        if (result.processing_status?.quantity_per_print) {
-          description += `\n${result.processing_status.quantity_per_print} objects will be printed.`;
-        }
-        if (result.processing_status?.projected_stock !== undefined && result.processing_status?.current_stock !== undefined) {
-          description += `\nStock: ${result.processing_status.current_stock} → ${result.processing_status.projected_stock}`;
-        }
-
-        toast({
-          title: "Success",
-          description,
-        });
-
-        onClose();
-        if (onJobCreated) {
-          onJobCreated();
-        }
-      } else {
-        // Check if this is a file validation error (case-insensitive)
-        const errorMsg = result.message?.toLowerCase() || '';
-        if (errorMsg.includes('file validation') || errorMsg.includes('print file not available')) {
-          setValidationError("There is no print file for that printer model in the selected product. Please choose a different printer, or add a new file to that product.");
-        } else {
-          // For other errors, show toast
-          let errorMessage = result.message || "Unknown error occurred";
-          if (result.error_details) {
-            errorMessage += `. Details: ${result.error_details}`;
-          }
-
-          toast({
-            title: "Job Creation Failed",
-            description: errorMessage,
-            variant: "destructive",
-          });
-        }
+      onClose();
+      if (onJobCreated) {
+        onJobCreated();
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error('Job creation error:', error);
       toast({
-        title: "Network Error",
-        description: "Failed to communicate with printer. Check your connection and try again.",
+        title: "Job Creation Failed",
+        description: error?.message || "Failed to create print job. Please try again.",
         variant: "destructive",
       });
+    } finally {
+      setProcessing(false);
     }
   };
 
@@ -371,10 +298,6 @@ const CreateJobModalEnhanced = ({ isOpen, onClose, onJobCreated }: CreateJobModa
     // Clear validation error when printer or product changes
     if (updates.printerId || updates.productId) {
       setValidationError(null);
-    }
-    // Clear clearing task created flag when printer changes
-    if (updates.printerId) {
-      setClearingTaskCreated(false);
     }
     setFormData(prev => ({ ...prev, ...updates }));
   };
@@ -463,7 +386,7 @@ const CreateJobModalEnhanced = ({ isOpen, onClose, onJobCreated }: CreateJobModa
                 <SelectContent>
                   {printers.map((printer) => {
                     const isConnected = printer.connected;
-                    const isCleared = printer.cleared !== false && printer.cleared !== 0; // Check for both false and 0
+                    const isCleared = printer.cleared !== false && printer.cleared !== 0;
                     const isInMaintenance = printer.inMaintenance;
 
                     // Determine dot color and badge
@@ -473,19 +396,15 @@ const CreateJobModalEnhanced = ({ isOpen, onClose, onJobCreated }: CreateJobModa
                     let showInMaintenance = false;
 
                     if (!isConnected) {
-                      // Offline: grey dot, show "(offline)"
                       dotColor = 'bg-gray-400';
                       showOffline = true;
                     } else if (isInMaintenance) {
-                      // In maintenance: red dot, show badge
                       dotColor = 'bg-red-500';
                       showInMaintenance = true;
                     } else if (!isCleared) {
-                      // Connected but needs clearing: amber dot, show badge
                       dotColor = 'bg-amber-500';
                       showNeedsClearing = true;
                     } else {
-                      // Connected and cleared: green dot
                       dotColor = 'bg-green-500';
                     }
 
@@ -510,15 +429,13 @@ const CreateJobModalEnhanced = ({ isOpen, onClose, onJobCreated }: CreateJobModa
                 </SelectContent>
               </Select>
               <p className="text-xs text-muted-foreground">
-                Required for printing. Click refresh to update connection status.
+                Select the printer to queue this job on.
               </p>
 
-              {/* Warning when maintenance or uncleared printer is selected */}
+              {/* Warning when maintenance printer is selected */}
               {formData.printerId && (() => {
                 const selectedPrinter = printers.find(p => p.id === formData.printerId);
                 const isInMaintenance = selectedPrinter?.inMaintenance;
-                const isConnected = selectedPrinter?.connected;
-                const needsClearing = isConnected && (selectedPrinter?.cleared === false || selectedPrinter?.cleared === 0);
 
                 if (isInMaintenance) {
                   return (
@@ -526,19 +443,6 @@ const CreateJobModalEnhanced = ({ isOpen, onClose, onJobCreated }: CreateJobModa
                       <AlertTriangle className="h-4 w-4 text-red-600 self-start mt-0.5" />
                       <AlertDescription className="text-red-800">
                         The selected printer is currently under maintenance. Please complete the maintenance or select a different printer.
-                      </AlertDescription>
-                    </Alert>
-                  );
-                }
-
-                if (needsClearing) {
-                  return (
-                    <Alert className={clearingTaskCreated ? "border-green-500 bg-green-50" : "border-amber-500 bg-amber-50"}>
-                      <AlertTriangle className={`h-4 w-4 ${clearingTaskCreated ? "text-green-600" : "text-amber-600"} self-start mt-0.5`} />
-                      <AlertDescription className={clearingTaskCreated ? "text-green-800" : "text-amber-800"}>
-                        {clearingTaskCreated
-                          ? "A task has been created to clear build plate for the selected printer. Once you complete the task, the print job will start."
-                          : "This printer's bed needs to be cleared before starting a new print job."}
                       </AlertDescription>
                     </Alert>
                   );
@@ -572,20 +476,21 @@ const CreateJobModalEnhanced = ({ isOpen, onClose, onJobCreated }: CreateJobModa
                 </div>
                 <div>
                   <span className="text-muted-foreground">Current Stock: </span>
-                  <span className="font-medium">{selectedSku.finishedGoodsStock || 0}</span>
+                  <span className="font-medium">{selectedSku.finished_goods_stock || 0}</span>
                 </div>
-                <div>
-                  <span className="text-muted-foreground">Projected Stock: </span>
-                  {loadingObjectCount ? (
-                    <span className="font-medium text-muted-foreground">Calculating...</span>
-                  ) : objectCountData && objectCountData.projected_stock !== null ? (
-                    <span className="font-medium">
-                      {objectCountData.projected_stock}
-                    </span>
-                  ) : (
-                    <span className="font-medium text-muted-foreground">N/A</span>
-                  )}
-                </div>
+                {formData.printerId && productFiles.length > 0 && (() => {
+                  const selectedPrinter = printers.find(p => p.id === formData.printerId);
+                  const matchingFile = selectedPrinter ? findMatchingPrintFile(selectedPrinter.model) : null;
+                  if (matchingFile?.object_count) {
+                    return (
+                      <div>
+                        <span className="text-muted-foreground">Objects per print: </span>
+                        <span className="font-medium">{matchingFile.object_count}</span>
+                      </div>
+                    );
+                  }
+                  return null;
+                })()}
               </div>
             </div>
           )}
@@ -595,11 +500,8 @@ const CreateJobModalEnhanced = ({ isOpen, onClose, onJobCreated }: CreateJobModa
             <div className="p-4 border rounded-lg bg-blue-50 border-blue-200">
               <div className="flex items-center gap-2 text-sm text-blue-700">
                 <Loader2 className="h-4 w-4 animate-spin" />
-                <span>Processing print job...</span>
+                <span>Creating print job...</span>
               </div>
-              <p className="text-xs text-blue-600 mt-1">
-                Preparing and uploading to printer. This may take several minutes.
-              </p>
             </div>
           )}
         </div>
@@ -615,12 +517,12 @@ const CreateJobModalEnhanced = ({ isOpen, onClose, onJobCreated }: CreateJobModa
             {processing ? (
               <>
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                Processing...
+                Creating...
               </>
             ) : (
               <>
                 <Plus className="mr-2 h-4 w-4" />
-                Create & Process Job
+                Create Job
               </>
             )}
           </Button>

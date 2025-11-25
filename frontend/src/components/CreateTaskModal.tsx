@@ -14,6 +14,7 @@ import { useToast } from "@/hooks/use-toast";
 import { WorklistTask } from "@/hooks/useWorklistTasks";
 import ProductSelector from "@/components/ProductSelector";
 import ProductSkuSelector from "@/components/ProductSkuSelector";
+import { api } from "@/lib/api-client";
 
 interface CreateTaskModalProps {
   isOpen: boolean;
@@ -205,19 +206,16 @@ const CreateTaskModal = ({ isOpen, onClose, onTaskCreated }: CreateTaskModalProp
               <ProductSelector
                 value={assemblyData.productId}
                 onValueChange={async (productId) => {
-                  // Fetch product name
+                  // Fetch product name from cloud API
                   try {
-                    const response = await fetch(`/api/products-sync/${productId}`);
-                    if (response.ok) {
-                      const product = await response.json();
-                      setAssemblyData({
-                        ...assemblyData,
-                        productId,
-                        productName: product.name,
-                        skuId: '', // Reset SKU when product changes
-                        sku: ''
-                      });
-                    }
+                    const product = await api.get<{ name: string }>(`/api/v1/products/${productId}`);
+                    setAssemblyData({
+                      ...assemblyData,
+                      productId,
+                      productName: product.name,
+                      skuId: '', // Reset SKU when product changes
+                      sku: ''
+                    });
                   } catch (error) {
                     console.error('Error fetching product:', error);
                   }

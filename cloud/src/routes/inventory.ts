@@ -171,6 +171,39 @@ inventory.get("/", requireAuth(), requireTenant(), async (c) => {
 });
 
 // =============================================================================
+// GET FINISHED GOOD BY SKU ID
+// =============================================================================
+
+/**
+ * GET /api/v1/inventory/by-sku/:skuId
+ * Get a finished good by its associated product SKU ID
+ */
+inventory.get("/by-sku/:skuId", requireAuth(), requireTenant(), async (c) => {
+  const tenantId = c.get("tenantId")!;
+  const skuId = c.req.param("skuId");
+
+  const result = await c.env.DB.prepare(
+    `SELECT fg.*, ps.product_id, p.name as product_name
+     FROM finished_goods fg
+     LEFT JOIN product_skus ps ON fg.product_sku_id = ps.id
+     LEFT JOIN products p ON ps.product_id = p.id
+     WHERE fg.product_sku_id = ? AND fg.tenant_id = ?
+     LIMIT 1`
+  )
+    .bind(skuId, tenantId)
+    .first();
+
+  if (!result) {
+    throw new ApiError("Finished good not found for this SKU", 404, "INVENTORY_NOT_FOUND");
+  }
+
+  return c.json({
+    success: true,
+    data: result,
+  });
+});
+
+// =============================================================================
 // GET SINGLE FINISHED GOOD
 // =============================================================================
 
