@@ -21,6 +21,7 @@ import WikiManagement from "./pages/WikiManagement";
 import WikiEditor from "./pages/WikiEditor";
 import WikiView from "./pages/WikiView";
 import TaskDetailPage from "./pages/TaskDetailPage";
+import HubManagement from "./pages/HubManagement";
 import ErrorBoundary from "./components/ErrorBoundary";
 
 import SimpleAuthPage from "./components/auth/SimpleAuthPage";
@@ -67,6 +68,7 @@ const App = () => {
                 <Route path="wiki-management/:wikiId" element={<WikiEditor />} />
                 <Route path="wiki/:wikiId" element={<WikiView />} />
                 <Route path="settings" element={<Settings />} />
+                <Route path="hub-management" element={<HubManagement />} />
               </Route>
               
               {/* Public auth route */}

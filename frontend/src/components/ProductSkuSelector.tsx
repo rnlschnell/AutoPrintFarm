@@ -3,6 +3,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import ColorSwatch from "@/components/ColorSwatch";
 import { Package } from "lucide-react";
+import { api } from "@/lib/api-client";
 
 interface ProductSku {
   id: string;
@@ -39,16 +40,11 @@ const ProductSkuSelector = ({ productId, value, onValueChange, disabled = false 
   const fetchSkus = async () => {
     setLoading(true);
     try {
-      const response = await fetch(`/api/product-skus-sync/product/${productId}`);
-      if (response.ok) {
-        const data = await response.json();
-        // Filter to only show active SKUs
-        const activeSkus = data.filter((sku: ProductSku) => sku.is_active !== false);
-        setSkus(activeSkus);
-      } else {
-        console.error("Failed to fetch SKUs");
-        setSkus([]);
-      }
+      // Use cloud API to fetch SKUs filtered by product_id
+      const data = await api.get<ProductSku[]>('/api/v1/skus', { params: { product_id: productId } });
+      // Filter to only show active SKUs
+      const activeSkus = (data || []).filter((sku: ProductSku) => sku.is_active !== false);
+      setSkus(activeSkus);
     } catch (error) {
       console.error("Error fetching SKUs:", error);
       setSkus([]);

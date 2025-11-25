@@ -6,6 +6,7 @@ import { Separator } from '@/components/ui/separator';
 import { Input } from '@/components/ui/input';
 import { FileText, Clock, Package, Printer, Settings, Loader2, Edit2, Check, X } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
+import { api, ApiError } from '@/lib/api-client';
 
 interface FileDetailsModalProps {
   printFileId: string | null;
@@ -76,16 +77,15 @@ export const FileDetailsModal = ({ printFileId, isOpen, onClose }: FileDetailsMo
 
     try {
       setLoading(true);
-      const response = await fetch(`/api/print-files-sync/${printFileId}`);
-
-      if (!response.ok) {
-        throw new Error('Failed to fetch print file metadata');
-      }
-
-      const data = await response.json();
+      // Use cloud API endpoint
+      const data = await api.get<PrintFileMetadata>(`/api/v1/files/${printFileId}`);
       setMetadata(data);
     } catch (error) {
       console.error('Error fetching print file metadata:', error);
+      // Don't show error toast for auth errors (user will be redirected)
+      if (error instanceof ApiError && error.isAuthError()) {
+        return;
+      }
       toast({
         title: "Error",
         description: "Failed to load file metadata. Please try again.",
@@ -121,19 +121,8 @@ export const FileDetailsModal = ({ printFileId, isOpen, onClose }: FileDetailsMo
 
     try {
       setSavingObjectCount(true);
-      const response = await fetch(`/api/print-files-sync/${printFileId}/object-count`, {
-        method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ object_count: newCount }),
-      });
-
-      if (!response.ok) {
-        throw new Error('Failed to update object count');
-      }
-
-      const result = await response.json();
+      // Use cloud API endpoint - PUT to update the file with object_count
+      await api.put(`/api/v1/files/${printFileId}`, { object_count: newCount });
 
       // Update local state with new value
       if (metadata) {

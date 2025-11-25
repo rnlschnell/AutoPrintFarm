@@ -13,6 +13,7 @@ import { requireAuth } from "../middleware/auth";
 import { requireTenant, requireRoles } from "../middleware/tenant";
 import { ApiError } from "../middleware/errors";
 import { generateId } from "../lib/crypto";
+import { calculateFinishedGoodStatus } from "../lib/inventory";
 import type { ProductSku } from "../types";
 
 export const skus = new Hono<HonoEnv>();
@@ -202,14 +203,19 @@ skus.post(
     const skuId = generateId();
     const now = new Date().toISOString();
 
-    await c.env.DB.prepare(
-      `INSERT INTO product_skus (
-        id, product_id, tenant_id, sku, color, filament_type, hex_code,
-        quantity, stock_level, price, low_stock_threshold, is_active,
-        created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`
-    )
-      .bind(
+    // Create SKU and corresponding finished_goods record in a batch
+    const finishedGoodId = generateId();
+    const status = calculateFinishedGoodStatus(0, body.low_stock_threshold, 0);
+
+    await c.env.DB.batch([
+      // Create the SKU
+      c.env.DB.prepare(
+        `INSERT INTO product_skus (
+          id, product_id, tenant_id, sku, color, filament_type, hex_code,
+          quantity, stock_level, price, low_stock_threshold, is_active,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`
+      ).bind(
         skuId,
         productId,
         tenantId,
@@ -223,8 +229,43 @@ skus.post(
         body.low_stock_threshold,
         now,
         now
-      )
-      .run();
+      ),
+      // Create corresponding finished_goods record
+      c.env.DB.prepare(
+        `INSERT INTO finished_goods (
+          id, tenant_id, product_sku_id, print_job_id,
+          sku, color, material,
+          current_stock, low_stock_threshold, quantity_per_sku,
+          unit_price, extra_cost, profit_margin,
+          requires_assembly, quantity_assembled, quantity_needs_assembly,
+          status, assembly_status, image_url, is_active,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        finishedGoodId,
+        tenantId,
+        skuId,
+        null, // print_job_id
+        body.sku,
+        body.color,
+        body.filament_type || "PLA",
+        0, // current_stock starts at 0
+        body.low_stock_threshold,
+        body.quantity,
+        body.price ?? 0,
+        0, // extra_cost
+        0, // profit_margin
+        0, // requires_assembly - will be inherited from product if needed
+        0, // quantity_assembled
+        0, // quantity_needs_assembly
+        status,
+        "printed", // assembly_status
+        null, // image_url
+        1, // is_active
+        now,
+        now
+      ),
+    ]);
 
     // Fetch the created SKU
     const sku = await c.env.DB.prepare(
@@ -365,6 +406,52 @@ skus.put(
       .bind(...values)
       .run();
 
+    // Sync changes to finished_goods record if relevant fields changed
+    const fgUpdates: string[] = [];
+    const fgValues: (string | number | null)[] = [];
+
+    if (body.sku !== undefined) {
+      fgUpdates.push("sku = ?");
+      fgValues.push(body.sku);
+    }
+    if (body.color !== undefined) {
+      fgUpdates.push("color = ?");
+      fgValues.push(body.color);
+    }
+    if (body.filament_type !== undefined) {
+      fgUpdates.push("material = ?");
+      fgValues.push(body.filament_type);
+    }
+    if (body.price !== undefined) {
+      fgUpdates.push("unit_price = ?");
+      fgValues.push(body.price);
+    }
+    if (body.low_stock_threshold !== undefined) {
+      fgUpdates.push("low_stock_threshold = ?");
+      fgValues.push(body.low_stock_threshold);
+    }
+    if (body.quantity !== undefined) {
+      fgUpdates.push("quantity_per_sku = ?");
+      fgValues.push(body.quantity);
+    }
+    if (body.is_active !== undefined) {
+      fgUpdates.push("is_active = ?");
+      fgValues.push(body.is_active ? 1 : 0);
+    }
+
+    if (fgUpdates.length > 0) {
+      fgUpdates.push("updated_at = ?");
+      fgValues.push(new Date().toISOString());
+      fgValues.push(skuId);
+      fgValues.push(tenantId);
+
+      await c.env.DB.prepare(
+        `UPDATE finished_goods SET ${fgUpdates.join(", ")} WHERE product_sku_id = ? AND tenant_id = ?`
+      )
+        .bind(...fgValues)
+        .run();
+    }
+
     // Fetch updated SKU
     const sku = await c.env.DB.prepare(
       "SELECT * FROM product_skus WHERE id = ?"
@@ -407,12 +494,17 @@ skus.delete(
       throw new ApiError("SKU not found", 404, "SKU_NOT_FOUND");
     }
 
-    // Delete the SKU
-    await c.env.DB.prepare(
-      "DELETE FROM product_skus WHERE id = ? AND tenant_id = ?"
-    )
-      .bind(skuId, tenantId)
-      .run();
+    // Delete the SKU and its corresponding finished_goods record
+    await c.env.DB.batch([
+      // Delete finished_goods record first (references SKU)
+      c.env.DB.prepare(
+        "DELETE FROM finished_goods WHERE product_sku_id = ? AND tenant_id = ?"
+      ).bind(skuId, tenantId),
+      // Delete the SKU
+      c.env.DB.prepare(
+        "DELETE FROM product_skus WHERE id = ? AND tenant_id = ?"
+      ).bind(skuId, tenantId),
+    ]);
 
     return c.json({
       success: true,
@@ -502,6 +594,7 @@ skus.post(
 /**
  * GET /api/v1/skus
  * List all SKUs for the tenant with optional filters
+ * Includes finished_goods_stock (total current_stock from finished_goods)
  */
 skus.get("/", requireAuth(), requireTenant(), async (c) => {
   const tenantId = c.get("tenantId")!;
@@ -511,38 +604,44 @@ skus.get("/", requireAuth(), requireTenant(), async (c) => {
   const lowStock = c.req.query("low_stock"); // true to filter only low stock items
   const isActive = c.req.query("is_active");
 
-  let query = "SELECT * FROM product_skus WHERE tenant_id = ?";
+  // Use LEFT JOIN to include finished_goods stock
+  let query = `
+    SELECT ps.*,
+           COALESCE(SUM(fg.current_stock), 0) as finished_goods_stock
+    FROM product_skus ps
+    LEFT JOIN finished_goods fg ON fg.product_sku_id = ps.id AND fg.is_active = 1
+    WHERE ps.tenant_id = ?`;
   const params: (string | number)[] = [tenantId];
 
   if (productId) {
-    query += " AND product_id = ?";
+    query += " AND ps.product_id = ?";
     params.push(productId);
   }
 
   if (color) {
-    query += " AND color = ?";
+    query += " AND ps.color = ?";
     params.push(color);
   }
 
   if (filamentType) {
-    query += " AND filament_type = ?";
+    query += " AND ps.filament_type = ?";
     params.push(filamentType);
   }
 
   if (lowStock === "true") {
-    query += " AND stock_level <= low_stock_threshold";
+    query += " AND ps.stock_level <= ps.low_stock_threshold";
   }
 
   if (isActive !== undefined) {
-    query += " AND is_active = ?";
+    query += " AND ps.is_active = ?";
     params.push(isActive === "true" ? 1 : 0);
   }
 
-  query += " ORDER BY sku ASC";
+  query += " GROUP BY ps.id ORDER BY ps.sku ASC";
 
   const result = await c.env.DB.prepare(query)
     .bind(...params)
-    .all<ProductSku>();
+    .all<ProductSku & { finished_goods_stock: number }>();
 
   return c.json({
     success: true,

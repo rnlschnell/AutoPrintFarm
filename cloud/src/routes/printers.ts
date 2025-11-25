@@ -72,6 +72,7 @@ const updatePrinterSchema = z.object({
   current_color_hex: z.string().max(7).nullable().optional(),
   current_filament_type: z.string().max(50).nullable().optional(),
   current_build_plate: z.string().max(100).nullable().optional(),
+  filament_level: z.number().int().min(0).nullable().optional(),
   is_active: z.boolean().optional(),
 });
 
@@ -456,6 +457,7 @@ printers.put(
       { key: "current_color_hex", column: "current_color_hex" },
       { key: "current_filament_type", column: "current_filament_type" },
       { key: "current_build_plate", column: "current_build_plate" },
+      { key: "filament_level", column: "filament_level" },
       { key: "is_active", column: "is_active", transform: (v) => (v ? 1 : 0) },
     ];
 

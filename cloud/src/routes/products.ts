@@ -13,6 +13,7 @@ import { requireTenant, requireRoles } from "../middleware/tenant";
 import { ApiError } from "../middleware/errors";
 import { generateId } from "../lib/crypto";
 import { paginate, getCount } from "../lib/db";
+import { calculateFinishedGoodStatus } from "../lib/inventory";
 import type { Product, ProductSku } from "../types";
 
 export const products = new Hono<HonoEnv>();
@@ -23,15 +24,15 @@ export const products = new Hono<HonoEnv>();
 
 const createProductSchema = z.object({
   name: z.string().min(1).max(200),
-  description: z.string().max(2000).optional(),
-  category: z.string().max(100).optional(),
-  print_file_id: z.string().optional(),
-  file_name: z.string().max(255).optional(),
+  description: z.string().max(2000).nullable().optional(),
+  category: z.string().max(100).nullable().optional(),
+  print_file_id: z.string().nullable().optional(),
+  file_name: z.string().max(255).nullable().optional(),
   requires_assembly: z.boolean().default(false),
   requires_post_processing: z.boolean().default(false),
-  printer_priority: z.array(z.string()).optional(), // Array of printer IDs
-  image_url: z.string().max(500).optional(),
-  wiki_id: z.string().optional(),
+  printer_priority: z.array(z.string()).nullable().optional(), // Array of printer IDs
+  image_url: z.string().max(500).nullable().optional(),
+  wiki_id: z.string().nullable().optional(),
 });
 
 const updateProductSchema = z.object({
@@ -46,6 +47,20 @@ const updateProductSchema = z.object({
   image_url: z.string().max(500).nullable().optional(),
   wiki_id: z.string().nullable().optional(),
   is_active: z.boolean().optional(),
+});
+
+const createSkuSchema = z.object({
+  sku: z.string().min(1).max(100),
+  color: z.string().min(1).max(100),
+  filament_type: z.string().max(50).optional(),
+  hex_code: z
+    .string()
+    .regex(/^#[0-9A-Fa-f]{6}$/, "Invalid hex color code")
+    .optional(),
+  quantity: z.number().int().min(1).default(1),
+  stock_level: z.number().int().min(0).default(0),
+  price: z.number().min(0).optional(), // Price in dollars (frontend sends dollars)
+  low_stock_threshold: z.number().int().min(0).default(0),
 });
 
 // =============================================================================
@@ -642,3 +657,157 @@ products.get("/categories", requireAuth(), requireTenant(), async (c) => {
     data: categories,
   });
 });
+
+// =============================================================================
+// CREATE SKU FOR PRODUCT
+// =============================================================================
+
+/**
+ * POST /api/v1/products/:id/skus
+ * Create a new SKU for a product
+ */
+products.post(
+  "/:id/skus",
+  requireAuth(),
+  requireTenant(),
+  requireRoles(["owner", "admin", "operator"]),
+  async (c) => {
+    const tenantId = c.get("tenantId")!;
+    const productId = c.req.param("id");
+
+    // Verify product exists and belongs to tenant
+    const product = await c.env.DB.prepare(
+      "SELECT id FROM products WHERE id = ? AND tenant_id = ?"
+    )
+      .bind(productId, tenantId)
+      .first();
+
+    if (!product) {
+      throw new ApiError("Product not found", 404, "PRODUCT_NOT_FOUND");
+    }
+
+    // Parse and validate request body
+    let body: z.infer<typeof createSkuSchema>;
+    try {
+      const rawBody = await c.req.json();
+      body = createSkuSchema.parse(rawBody);
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        throw error;
+      }
+      throw new ApiError("Invalid request body", 400, "INVALID_REQUEST");
+    }
+
+    // Check for duplicate SKU code within tenant
+    const existingSku = await c.env.DB.prepare(
+      "SELECT id FROM product_skus WHERE tenant_id = ? AND sku = ?"
+    )
+      .bind(tenantId, body.sku)
+      .first();
+
+    if (existingSku) {
+      throw new ApiError(
+        "A SKU with this code already exists",
+        409,
+        "DUPLICATE_SKU"
+      );
+    }
+
+    // Check for duplicate color within product
+    const existingColor = await c.env.DB.prepare(
+      "SELECT id FROM product_skus WHERE product_id = ? AND color = ?"
+    )
+      .bind(productId, body.color)
+      .first();
+
+    if (existingColor) {
+      throw new ApiError(
+        "A SKU with this color already exists for this product",
+        409,
+        "DUPLICATE_COLOR"
+      );
+    }
+
+    const skuId = generateId();
+    const now = new Date().toISOString();
+
+    // Create SKU and corresponding finished_goods record in a batch
+    const finishedGoodId = generateId();
+    const status = calculateFinishedGoodStatus(0, body.low_stock_threshold, 0);
+
+    await c.env.DB.batch([
+      // Create the SKU
+      c.env.DB.prepare(
+        `INSERT INTO product_skus (
+          id, product_id, tenant_id, sku, color, filament_type, hex_code,
+          quantity, stock_level, price, low_stock_threshold, is_active,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`
+      ).bind(
+        skuId,
+        productId,
+        tenantId,
+        body.sku,
+        body.color,
+        body.filament_type || null,
+        body.hex_code || null,
+        body.quantity,
+        body.stock_level,
+        body.price ?? null,
+        body.low_stock_threshold,
+        now,
+        now
+      ),
+      // Create corresponding finished_goods record
+      c.env.DB.prepare(
+        `INSERT INTO finished_goods (
+          id, tenant_id, product_sku_id, print_job_id,
+          sku, color, material,
+          current_stock, low_stock_threshold, quantity_per_sku,
+          unit_price, extra_cost, profit_margin,
+          requires_assembly, quantity_assembled, quantity_needs_assembly,
+          status, assembly_status, image_url, is_active,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        finishedGoodId,
+        tenantId,
+        skuId,
+        null, // print_job_id
+        body.sku,
+        body.color,
+        body.filament_type || "PLA",
+        0, // current_stock starts at 0
+        body.low_stock_threshold,
+        body.quantity,
+        body.price ?? 0,
+        0, // extra_cost
+        0, // profit_margin
+        0, // requires_assembly
+        0, // quantity_assembled
+        0, // quantity_needs_assembly
+        status,
+        "printed", // assembly_status
+        null, // image_url
+        1, // is_active
+        now,
+        now
+      ),
+    ]);
+
+    // Fetch the created SKU
+    const sku = await c.env.DB.prepare(
+      "SELECT * FROM product_skus WHERE id = ?"
+    )
+      .bind(skuId)
+      .first<ProductSku>();
+
+    return c.json(
+      {
+        success: true,
+        data: sku,
+      },
+      201
+    );
+  }
+);

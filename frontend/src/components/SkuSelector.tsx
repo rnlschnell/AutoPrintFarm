@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Package2 } from "lucide-react";
+import { api } from "@/lib/api-client";
 
 interface Sku {
   id: string;
@@ -36,15 +37,14 @@ const SkuSelector = ({ productId, value, onValueChange, disabled = false }: SkuS
     const fetchSkus = async () => {
       setLoading(true);
       try {
-        const response = await fetch('/api/product-skus-sync/');
-        if (!response.ok) throw new Error('Failed to fetch SKUs');
-        const allSkus = await response.json();
-        
-        // Filter SKUs for this product and only active ones
-        const productSkus = allSkus.filter((sku: Sku) => 
-          sku.product_id === productId && sku.is_active === 1
+        // Use cloud API to fetch SKUs filtered by product_id
+        const allSkus = await api.get<Sku[]>('/api/v1/skus', { params: { product_id: productId } });
+
+        // Filter to only active SKUs (is_active could be 1 or true)
+        const productSkus = (allSkus || []).filter((sku: Sku) =>
+          sku.is_active === 1 || sku.is_active === true as any
         );
-        
+
         setSkus(productSkus);
       } catch (error) {
         console.error('Error fetching SKUs:', error);

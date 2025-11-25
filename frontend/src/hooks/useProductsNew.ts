@@ -98,9 +98,17 @@ export const useProductsNew = () => {
         // Find ALL print files for this product (multi-file support)
         const productPrintFiles = (printFilesData || []).filter(file => file.product_id === product.id);
 
+        // Filter and map SKUs for this product, including finished_goods_stock
+        const productSkus = (skusData || [])
+          .filter(sku => sku.product_id === product.id)
+          .map(sku => ({
+            ...sku,
+            finishedGoodsStock: sku.finished_goods_stock || 0, // Map snake_case to camelCase
+          }));
+
         return {
           ...product,
-          skus: (skusData || []).filter(sku => sku.product_id === product.id),
+          skus: productSkus,
           components: [], // Components are not yet migrated to cloud
           print_file: printFile ? { id: printFile.id, name: printFile.name } : null,
           print_files: productPrintFiles.map(pf => ({

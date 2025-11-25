@@ -611,7 +611,7 @@ const PrinterDetailsModal = ({ printer, isOpen, onClose }: PrinterDetailsModalPr
                         <span className="text-sm">{currentPrinter.currentColor ? currentPrinter.currentColor.split('|')[0] : 'None'}</span>
                         <span className="text-xs text-muted-foreground">{currentPrinter.currentFilamentType || 'PLA'}</span>
                       </div>
-                      <PrinterColorSelector printer={currentPrinter} />
+                      <PrinterColorSelector printer={currentPrinter} updatePrinter={updatePrinter} />
                     </div>
                   </div>
 
@@ -623,7 +623,7 @@ const PrinterDetailsModal = ({ printer, isOpen, onClose }: PrinterDetailsModalPr
                       <div className="flex flex-col flex-1">
                         <span className="text-sm">{currentPrinter.currentBuildPlate || 'Not set'}</span>
                       </div>
-                      <PrinterBuildPlateSelector printer={currentPrinter} />
+                      <PrinterBuildPlateSelector printer={currentPrinter} updatePrinter={updatePrinter} />
                     </div>
                   </div>
 

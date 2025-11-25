@@ -115,15 +115,14 @@ export const useProductInventory = () => {
   const updateStock = async (finishedGoodId: string, newQuantity: number, assemblyType?: 'assembled' | 'needs_assembly') => {
     try {
       if (assemblyType) {
-        // Use stock adjustment endpoint for assembly stock updates
-        const adjustment = newQuantity; // This should be calculated as delta if needed
-        await api.post(`/api/v1/inventory/${finishedGoodId}/adjust`, {
-          adjustment: adjustment,
-          reason: 'manual',
-          notes: `Assembly stock update: ${assemblyType}`
-        });
+        // Update the specific assembly quantity field
+        const updatePayload: Record<string, number> = assemblyType === 'assembled'
+          ? { quantity_assembled: newQuantity }
+          : { quantity_needs_assembly: newQuantity };
+
+        await api.put(`/api/v1/inventory/${finishedGoodId}`, updatePayload);
       } else {
-        // Use PUT to update inventory
+        // Use PUT to update total inventory
         await api.put(`/api/v1/inventory/${finishedGoodId}`, {
           current_stock: newQuantity,
         });

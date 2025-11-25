@@ -13,6 +13,7 @@ import SkuSelector from "@/components/SkuSelector";
 import { usePrinters } from "@/hooks/usePrinters";
 import { useTenant } from "@/hooks/useTenant";
 import { usePrintJobProcessor, type EnhancedJobRequest, type ObjectCountData } from "@/hooks/usePrintJobProcessor";
+import { api } from "@/lib/api-client";
 
 interface CreateJobModalEnhancedProps {
   isOpen: boolean;
@@ -112,11 +113,10 @@ const CreateJobModalEnhanced = ({ isOpen, onClose, onJobCreated }: CreateJobModa
 
     const fetchSkuDetails = async () => {
       try {
-        const response = await fetch('/api/product-skus-sync/');
-        if (!response.ok) throw new Error('Failed to fetch SKUs');
-        const allSkus = await response.json();
+        // Use cloud API to fetch all SKUs
+        const allSkus = await api.get<Sku[]>('/api/v1/skus');
 
-        const sku = allSkus.find((s: Sku) => s.id === formData.skuId);
+        const sku = (allSkus || []).find((s: Sku) => s.id === formData.skuId);
         setSelectedSku(sku || null);
       } catch (error) {
         console.error('Error fetching SKU details:', error);

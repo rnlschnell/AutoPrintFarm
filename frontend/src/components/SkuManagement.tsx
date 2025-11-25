@@ -6,12 +6,12 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Plus, Edit2, Trash2, Tag, Sparkles } from 'lucide-react';
 import { ProductSku, useProductsNew } from '@/hooks/useProductsNew';
-import { supabase } from '@/integrations/supabase/client';
 import { useTenant } from '@/hooks/useTenant';
 import { useColorPresetsContext } from '@/contexts/ColorPresetsContext';
 import ColorSwatch from '@/components/ColorSwatch';
 import { useToast } from '@/hooks/use-toast';
 import FilamentSelector from '@/components/FilamentSelector';
+import { api } from '@/lib/api-client';
 
 interface SkuData {
   id?: string;
@@ -104,9 +104,8 @@ export const SkuManagement = ({ productId, productName = '', skus, onSkusChange,
 
     // Check for duplicate SKU name (case-insensitive) across ALL products in tenant
     try {
-      const response = await fetch('/api/product-skus-sync/');
-      if (response.ok) {
-        const allTenantSkus = await response.json();
+      const allTenantSkus = await api.get<any[]>('/api/v1/skus');
+      if (allTenantSkus && allTenantSkus.length > 0) {
         const duplicateSku = allTenantSkus.find(existingSku =>
           existingSku.sku.toLowerCase() === newSku.sku.toLowerCase()
         );
@@ -434,9 +433,8 @@ const SkuEditForm = ({
   const handleSave = async () => {
     // Check for duplicate SKU name (case-insensitive) across ALL products in tenant, excluding current SKU
     try {
-      const response = await fetch('/api/product-skus-sync/');
-      if (response.ok) {
-        const allTenantSkus = await response.json();
+      const allTenantSkus = await api.get<any[]>('/api/v1/skus');
+      if (allTenantSkus && allTenantSkus.length > 0) {
         const duplicateSku = allTenantSkus.find(existingSku =>
           existingSku.id !== sku.id && existingSku.sku.toLowerCase() === editSku.sku.toLowerCase()
         );

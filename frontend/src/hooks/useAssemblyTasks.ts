@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { supabase } from '@/integrations/supabase/client';
 import { useToast } from '@/hooks/use-toast';
 import { useTenant } from '@/hooks/useTenant';
+import { api } from '@/lib/api-client';
 
 export interface AssemblyTask {
   id: string;
@@ -88,12 +89,8 @@ export const useAssemblyTasks = () => {
             const finishedGood = await finishedGoodResponse.json();
 
             if (finishedGood?.product_sku_id) {
-              // Get product SKU to find product_id from backend API (SQLite)
-              const productSkuResponse = await fetch(`/api/product-skus-sync/${finishedGood.product_sku_id}`);
-              if (!productSkuResponse.ok) {
-                throw new Error(`Failed to get product SKU: ${productSkuResponse.statusText}`);
-              }
-              const productSku = await productSkuResponse.json();
+              // Get product SKU to find product_id from cloud API
+              const productSku = await api.get<any>(`/api/v1/skus/${finishedGood.product_sku_id}`);
 
               if (productSku?.product_id) {
                 // Get product components

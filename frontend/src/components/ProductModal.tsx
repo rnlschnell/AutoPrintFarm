@@ -107,8 +107,8 @@ export const ProductModal = ({ product, isOpen, onClose, onSave, onDelete, initi
         setFormData({
           name: product.name,
           description: product.description || '',
-          requires_assembly: product.requires_assembly,
-          requires_post_processing: product.requires_post_processing || false,
+          requires_assembly: !!product.requires_assembly,
+          requires_post_processing: !!product.requires_post_processing,
           use_printer_priority: usePrinterPriority,
           printer_priority: printerPriority,
           image_url: product.image_url || '',
