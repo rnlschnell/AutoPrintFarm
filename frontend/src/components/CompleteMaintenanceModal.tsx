@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useToast } from "@/hooks/use-toast";
 import { Wrench, CheckCircle } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { api } from "@/lib/api-client";
 
 interface CompleteMaintenanceModalProps {
   printer: any | null;
@@ -22,16 +23,19 @@ const CompleteMaintenanceModal = ({ printer, isOpen, onClose, onMaintenanceCompl
     setIsSubmitting(true);
 
     try {
-      // Find the associated worklist task
-      const tasksResponse = await fetch(
-        `/api/worklist/?status=in_progress&task_type=maintenance&printer_id=${printer.id}`
-      );
+      // Find the associated worklist task using cloud API
+      const tasksResponse = await api.get<{
+        success: boolean;
+        data: any[];
+      }>(`/api/v1/worklist`, {
+        params: {
+          status: 'in_progress',
+          task_type: 'maintenance',
+          printer_id: printer.id
+        }
+      });
 
-      if (!tasksResponse.ok) {
-        throw new Error('Failed to fetch worklist tasks');
-      }
-
-      const tasks = await tasksResponse.json();
+      const tasks = tasksResponse.data || [];
       const maintenanceTask = tasks.find((task: any) =>
         task.printer_id === printer.id &&
         task.task_type === 'maintenance' &&
@@ -39,40 +43,22 @@ const CompleteMaintenanceModal = ({ printer, isOpen, onClose, onMaintenanceCompl
       );
 
       if (maintenanceTask) {
-        // Use the proper maintenance completion endpoint
-        // This endpoint handles both task and printer updates
-        const response = await fetch(`/api/printers/${printer.id}/maintenance/complete`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            task_id: maintenanceTask.id,
-          }),
-        });
+        // Use cloud API to complete the maintenance task
+        await api.post(`/api/v1/worklist/${maintenanceTask.id}/complete`, {});
 
-        if (!response.ok) {
-          const errorData = await response.json();
-          throw new Error(errorData.detail || 'Failed to complete maintenance');
-        }
+        // Also update the printer status via cloud API
+        await api.put(`/api/v1/printers/${printer.id}`, {
+          in_maintenance: false,
+          maintenance_type: null,
+          status: 'idle',
+        });
       } else {
-        // Fallback: No task found, just update printer directly
-        // This handles cases where maintenance was started before the worklist feature
-        const response = await fetch(`/api/printers-sync/${printer.id}`, {
-          method: 'PUT',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            in_maintenance: false,
-            maintenance_type: null,
-            status: 'idle',
-          }),
+        // Fallback: No task found, just update printer directly via cloud API
+        await api.put(`/api/v1/printers/${printer.id}`, {
+          in_maintenance: false,
+          maintenance_type: null,
+          status: 'idle',
         });
-
-        if (!response.ok) {
-          throw new Error(`Failed to complete maintenance: ${response.statusText}`);
-        }
       }
 
       toast({

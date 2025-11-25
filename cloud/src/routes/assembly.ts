@@ -207,6 +207,55 @@ assembly.get("/:id", requireAuth(), requireTenant(), async (c) => {
 });
 
 // =============================================================================
+// GET ASSEMBLY TASK WIKI
+// =============================================================================
+
+/**
+ * GET /api/v1/assembly/:id/wiki
+ * Get the wiki associated with an assembly task's product
+ * Lookup chain: AssemblyTask → FinishedGood → ProductSku → Product → wiki_id
+ */
+assembly.get("/:id/wiki", requireAuth(), requireTenant(), async (c) => {
+  const tenantId = c.get("tenantId")!;
+  const taskId = c.req.param("id");
+
+  // Get task with full product lookup via JOIN
+  const result = await c.env.DB.prepare(`
+    SELECT
+      at.id as task_id,
+      p.id as product_id,
+      p.name as product_name,
+      p.wiki_id
+    FROM assembly_tasks at
+    JOIN finished_goods fg ON at.finished_good_id = fg.id
+    JOIN product_skus ps ON fg.product_sku_id = ps.id
+    JOIN products p ON ps.product_id = p.id
+    WHERE at.id = ? AND at.tenant_id = ?
+  `)
+    .bind(taskId, tenantId)
+    .first<{
+      task_id: string;
+      product_id: string;
+      product_name: string;
+      wiki_id: string | null;
+    }>();
+
+  if (!result) {
+    throw new ApiError("Assembly task not found", 404, "ASSEMBLY_TASK_NOT_FOUND");
+  }
+
+  return c.json({
+    success: true,
+    data: {
+      wiki_id: result.wiki_id,
+      product_id: result.product_id,
+      product_name: result.product_name,
+      message: result.wiki_id ? "Wiki found for product" : "No wiki configured for this product"
+    }
+  });
+});
+
+// =============================================================================
 // CREATE ASSEMBLY TASK
 // =============================================================================
 

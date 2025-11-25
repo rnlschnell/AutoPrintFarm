@@ -8,6 +8,7 @@ import { useWorklistTasks, WorklistTask } from '@/hooks/useWorklistTasks';
 import { useWikis } from '@/hooks/useWikis';
 import { useToast } from '@/hooks/use-toast';
 import { WikiViewer } from '@/components/wiki/WikiViewer';
+import { api } from '@/lib/api-client';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -88,15 +89,25 @@ const TaskDetailPage = () => {
 
   const fetchAssemblyTaskData = async (assemblyTaskId: string) => {
     try {
-      const response = await fetch(`/api/assembly-tasks/${assemblyTaskId}`);
-      if (response.ok) {
-        const data = await response.json();
+      // Use cloud API to get assembly task data
+      const response = await api.get<{
+        success: boolean;
+        data: {
+          product_name: string;
+          sku: string;
+          quantity: number;
+          notes: string | null;
+          created_at: string;
+        };
+      }>(`/api/v1/assembly/${assemblyTaskId}`);
+
+      if (response.data) {
         setAssemblyTaskData({
-          product_name: data.product_name,
-          sku: data.sku,
-          quantity: data.quantity,
-          notes: data.notes,
-          created_at: data.created_at,
+          product_name: response.data.product_name,
+          sku: response.data.sku,
+          quantity: response.data.quantity,
+          notes: response.data.notes || undefined,
+          created_at: response.data.created_at,
         });
       }
     } catch (error) {
@@ -107,16 +118,21 @@ const TaskDetailPage = () => {
 
   const fetchWikiForTask = async (assemblyTaskId: string) => {
     try {
-      // Get wiki_id from backend API
-      const response = await fetch(`/api/assembly-tasks/${assemblyTaskId}/wiki`);
-      if (response.ok) {
-        const data = await response.json();
-        if (data.wiki_id) {
-          // Use the useWikis hook's getWiki function to fetch from Supabase
-          const wikiData = await getWiki(data.wiki_id);
-          if (wikiData) {
-            setWiki(wikiData);
-          }
+      // Use cloud API to get wiki_id for this assembly task
+      const response = await api.get<{
+        success: boolean;
+        data: {
+          wiki_id: string | null;
+          product_id: string;
+          product_name: string;
+        };
+      }>(`/api/v1/assembly/${assemblyTaskId}/wiki`);
+
+      if (response.data?.wiki_id) {
+        // Fetch the full wiki content
+        const wikiData = await getWiki(response.data.wiki_id);
+        if (wikiData) {
+          setWiki(wikiData);
         }
       }
     } catch (error) {

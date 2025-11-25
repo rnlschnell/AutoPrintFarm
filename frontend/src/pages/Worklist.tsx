@@ -18,6 +18,7 @@ import { CheckCircle, Clock, ClipboardList, User, Printer, Package, Wrench, X, P
 import { useWorklistTasks, WorklistTask } from '@/hooks/useWorklistTasks';
 import { useToast } from '@/hooks/use-toast';
 import CreateTaskModal from '@/components/CreateTaskModal';
+import { api } from '@/lib/api-client';
 
 const Worklist = () => {
   const navigate = useNavigate();
@@ -139,10 +140,10 @@ const Worklist = () => {
     try {
       const taskCount = completedTasks.length;
 
-      // Delete all tasks in parallel without triggering individual fetches
+      // Delete all tasks in parallel using cloud API
       await Promise.all(
         completedTasks.map(task =>
-          fetch(`/api/worklist/${task.id}`, { method: 'DELETE' })
+          api.delete(`/api/v1/worklist/${task.id}`)
         )
       );
 
