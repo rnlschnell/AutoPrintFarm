@@ -81,11 +81,12 @@ export const useProductsNew = () => {
       setLoading(true);
       console.log('Fetching products for tenant:', tenant?.id);
 
-      // Fetch products, files, and SKUs in parallel using the api client
-      const [productsData, printFilesData, skusData] = await Promise.all([
+      // Fetch products, files, SKUs, and components in parallel using the api client
+      const [productsData, printFilesData, skusData, componentsData] = await Promise.all([
         api.get<any[]>('/api/v1/products'),
         api.get<any[]>('/api/v1/files'),
         api.get<any[]>('/api/v1/skus'),
+        api.get<any[]>('/api/v1/products/components/all'),
       ]);
 
       console.log('Products fetched successfully:', productsData?.length || 0, 'products');
@@ -106,10 +107,15 @@ export const useProductsNew = () => {
             finishedGoodsStock: sku.finished_goods_stock || 0, // Map snake_case to camelCase
           }));
 
+        // Filter components for this product
+        const productComponents = (componentsData || []).filter(
+          (comp: any) => comp.product_id === product.id
+        );
+
         return {
           ...product,
           skus: productSkus,
-          components: [], // Components are not yet migrated to cloud
+          components: productComponents,
           print_file: printFile ? { id: printFile.id, name: printFile.name } : null,
           print_files: productPrintFiles.map(pf => ({
             id: pf.id,
@@ -192,6 +198,26 @@ export const useProductsNew = () => {
             console.error(`Error linking print file ${printFileId} to product:`, error);
             // Don't throw - product is already created
           }
+        }
+      }
+
+      // Save assembly components if they exist
+      if (components && components.length > 0) {
+        try {
+          console.log(`Saving ${components.length} assembly components for product ${data.id}`);
+          await api.post(`/api/v1/products/${data.id}/components`, {
+            components: components.map(c => ({
+              component_name: c.component_name,
+              component_type: c.component_type,
+              quantity_required: c.quantity_required,
+              notes: c.notes
+            })),
+            replace: true
+          });
+          console.log(`Successfully saved assembly components for product ${data.id}`);
+        } catch (error) {
+          console.error('Error saving assembly components:', error);
+          // Don't throw - product is already created
         }
       }
 
@@ -333,6 +359,34 @@ export const useProductsNew = () => {
           updated: skusToUpdate.length,
           deleted: skusToDelete.length
         });
+      }
+
+      // Handle assembly components
+      if (components !== undefined) {
+        try {
+          if (components.length > 0) {
+            // Replace all components with new ones
+            console.log(`Saving ${components.length} assembly components for product ${id}`);
+            await api.post(`/api/v1/products/${id}/components`, {
+              components: components.map(c => ({
+                component_name: c.component_name,
+                component_type: c.component_type,
+                quantity_required: c.quantity_required,
+                notes: c.notes
+              })),
+              replace: true
+            });
+            console.log(`Successfully saved assembly components for product ${id}`);
+          } else {
+            // Delete all components if array is empty
+            console.log(`Deleting all assembly components for product ${id}`);
+            await api.delete(`/api/v1/products/${id}/components`);
+            console.log(`Successfully deleted assembly components for product ${id}`);
+          }
+        } catch (error) {
+          console.error('Error saving assembly components:', error);
+          // Don't throw - product update already succeeded
+        }
       }
 
       toast({

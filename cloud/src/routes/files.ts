@@ -17,9 +17,11 @@ import { generateId } from "../lib/crypto";
 import {
   uploadFile,
   downloadFile,
+  downloadFileAsBuffer,
   deleteFile,
   deleteFiles,
   printFilePath,
+  thumbnailPath,
   getContentType,
   generateSignedUrlToken,
   verifySignedUrlToken,
@@ -479,15 +481,117 @@ files.post(
       .bind(versionId, fileId, 1, body.r2_key, 1, now)
       .run();
 
-    // Queue metadata extraction
-    await c.env.FILE_PROCESSING.send({
-      type: "extract_metadata",
-      fileId,
-      tenantId,
-      timestamp: Date.now(),
-    });
+    // Extract metadata synchronously for 3MF files
+    // This ensures metadata is available immediately (especially important for local dev
+    // where Cloudflare Queues don't run)
+    const extension = getFileExtension(body.name);
+    console.log(`[files] File extension: ${extension}, name: ${body.name}`);
+    if (extension === "3mf") {
+      try {
+        console.log(`[files] Downloading file from R2: ${body.r2_key}`);
+        const fileData = await downloadFileAsBuffer(c.env.R2, body.r2_key);
+        console.log(`[files] Downloaded ${fileData.byteLength} bytes`);
+        const isValid = validate3MF(fileData);
+        console.log(`[files] Is valid 3MF: ${isValid}`);
+        if (isValid) {
+          console.log(`[files] Parsing 3MF file...`);
+          const { metadata, thumbnail } = await parse3MF(fileData);
+          console.log(`[files] Parsed metadata:`, JSON.stringify(metadata, null, 2));
 
-    // Fetch the created file
+          // Build update for extracted metadata
+          const metadataUpdates: string[] = [];
+          const metadataValues: (string | number | null)[] = [];
+
+          if (metadata.printTimeSeconds !== null) {
+            metadataUpdates.push("print_time_seconds = ?");
+            metadataValues.push(metadata.printTimeSeconds);
+          }
+          if (metadata.filamentWeightGrams !== null) {
+            metadataUpdates.push("filament_weight_grams = ?");
+            metadataValues.push(metadata.filamentWeightGrams);
+          }
+          if (metadata.filamentLengthMeters !== null) {
+            metadataUpdates.push("filament_length_meters = ?");
+            metadataValues.push(metadata.filamentLengthMeters);
+          }
+          if (metadata.layerCount !== null) {
+            metadataUpdates.push("layer_count = ?");
+            metadataValues.push(metadata.layerCount);
+          }
+          if (metadata.filamentType !== null) {
+            metadataUpdates.push("filament_type = ?");
+            metadataValues.push(metadata.filamentType);
+          }
+          if (metadata.printerModelId !== null) {
+            metadataUpdates.push("printer_model_id = ?");
+            metadataValues.push(metadata.printerModelId);
+          }
+          if (metadata.nozzleDiameter !== null) {
+            metadataUpdates.push("nozzle_diameter = ?");
+            metadataValues.push(metadata.nozzleDiameter);
+          }
+          if (metadata.currBedType !== null) {
+            metadataUpdates.push("curr_bed_type = ?");
+            metadataValues.push(metadata.currBedType);
+          }
+          if (metadata.defaultPrintProfile !== null) {
+            metadataUpdates.push("default_print_profile = ?");
+            metadataValues.push(metadata.defaultPrintProfile);
+          }
+          if (metadata.objectCount > 0) {
+            metadataUpdates.push("object_count = ?");
+            metadataValues.push(metadata.objectCount);
+          }
+
+          // Upload thumbnail if found
+          if (thumbnail) {
+            const thumbKey = thumbnailPath(tenantId, fileId);
+            const thumbnailBuffer = thumbnail.data.buffer as ArrayBuffer;
+            await uploadFile(c.env.R2, thumbKey, thumbnailBuffer, {
+              contentType: thumbnail.contentType,
+              cacheControl: "public, max-age=31536000",
+            });
+            metadataUpdates.push("thumbnail_r2_key = ?");
+            metadataValues.push(thumbKey);
+          }
+
+          // Update the database with extracted metadata
+          if (metadataUpdates.length > 0) {
+            metadataUpdates.push("updated_at = ?");
+            metadataValues.push(new Date().toISOString());
+            metadataValues.push(fileId);
+            metadataValues.push(tenantId);
+
+            await c.env.DB.prepare(
+              `UPDATE print_files SET ${metadataUpdates.join(", ")} WHERE id = ? AND tenant_id = ?`
+            )
+              .bind(...metadataValues)
+              .run();
+
+            console.log(`[files] Extracted metadata for file ${fileId}: ${metadataUpdates.length - 1} fields`);
+          }
+        }
+      } catch (err) {
+        // Log but don't fail - queue will retry in production if needed
+        console.error(`[files] Sync metadata extraction failed for ${fileId}:`, err);
+      }
+    }
+
+    // Queue metadata extraction as backup (for production where queue runs)
+    // This handles cases where sync extraction failed or for re-processing
+    try {
+      await c.env.FILE_PROCESSING.send({
+        type: "extract_metadata",
+        fileId,
+        tenantId,
+        timestamp: Date.now(),
+      });
+    } catch (err) {
+      // Queue may not be available in local dev - that's OK since we did sync extraction
+      console.log(`[files] Queue not available (local dev?), sync extraction already done`);
+    }
+
+    // Fetch the created file (now includes metadata if extraction succeeded)
     const file = await c.env.DB.prepare("SELECT * FROM print_files WHERE id = ?")
       .bind(fileId)
       .first<PrintFile>();
@@ -496,7 +600,7 @@ files.post(
       {
         success: true,
         data: file,
-        message: "File created. Metadata extraction queued.",
+        message: "File created successfully.",
       },
       201
     );

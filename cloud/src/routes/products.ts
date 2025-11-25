@@ -811,3 +811,205 @@ products.post(
     );
   }
 );
+
+// =============================================================================
+// PRODUCT COMPONENTS - Assembly component management
+// =============================================================================
+
+const componentSchema = z.object({
+  component_name: z.string().min(1).max(200),
+  component_type: z.string().max(100).nullable().optional(),
+  quantity_required: z.number().int().min(1).default(1),
+  notes: z.string().max(500).nullable().optional(),
+});
+
+const createComponentsSchema = z.object({
+  components: z.array(componentSchema).min(1),
+  replace: z.boolean().default(false),
+});
+
+/**
+ * GET /api/v1/products/:id/components
+ * List all assembly components for a product
+ */
+products.get(
+  "/:id/components",
+  requireAuth(),
+  requireTenant(),
+  async (c) => {
+    const tenantId = c.get("tenantId")!;
+    const productId = c.req.param("id");
+
+    // Verify product exists and belongs to tenant
+    const product = await c.env.DB.prepare(
+      "SELECT id FROM products WHERE id = ? AND tenant_id = ?"
+    )
+      .bind(productId, tenantId)
+      .first();
+
+    if (!product) {
+      throw new ApiError("Product not found", 404, "PRODUCT_NOT_FOUND");
+    }
+
+    // Get all components for this product
+    const result = await c.env.DB.prepare(
+      "SELECT * FROM product_components WHERE product_id = ? ORDER BY component_name ASC"
+    )
+      .bind(productId)
+      .all();
+
+    return c.json({
+      success: true,
+      data: result.results || [],
+    });
+  }
+);
+
+/**
+ * POST /api/v1/products/:id/components
+ * Create assembly components for a product (supports bulk create/replace)
+ */
+products.post(
+  "/:id/components",
+  requireAuth(),
+  requireTenant(),
+  requireRoles(["owner", "admin", "operator"]),
+  async (c) => {
+    const tenantId = c.get("tenantId")!;
+    const productId = c.req.param("id");
+
+    // Verify product exists and belongs to tenant
+    const product = await c.env.DB.prepare(
+      "SELECT id FROM products WHERE id = ? AND tenant_id = ?"
+    )
+      .bind(productId, tenantId)
+      .first();
+
+    if (!product) {
+      throw new ApiError("Product not found", 404, "PRODUCT_NOT_FOUND");
+    }
+
+    // Parse and validate request body
+    let body: z.infer<typeof createComponentsSchema>;
+    try {
+      const rawBody = await c.req.json();
+      body = createComponentsSchema.parse(rawBody);
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        throw error;
+      }
+      throw new ApiError("Invalid request body", 400, "INVALID_REQUEST");
+    }
+
+    const now = new Date().toISOString();
+
+    // If replace mode, delete existing components first
+    if (body.replace) {
+      await c.env.DB.prepare("DELETE FROM product_components WHERE product_id = ?")
+        .bind(productId)
+        .run();
+    }
+
+    // Insert new components using batch
+    const insertStatements = body.components.map((comp) => {
+      const componentId = generateId();
+      return c.env.DB.prepare(
+        `INSERT INTO product_components (id, product_id, component_name, component_type, quantity_required, notes, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        componentId,
+        productId,
+        comp.component_name,
+        comp.component_type || null,
+        comp.quantity_required,
+        comp.notes || null,
+        now
+      );
+    });
+
+    if (insertStatements.length > 0) {
+      await c.env.DB.batch(insertStatements);
+    }
+
+    // Fetch all components for this product
+    const result = await c.env.DB.prepare(
+      "SELECT * FROM product_components WHERE product_id = ? ORDER BY component_name ASC"
+    )
+      .bind(productId)
+      .all();
+
+    return c.json(
+      {
+        success: true,
+        data: result.results || [],
+      },
+      201
+    );
+  }
+);
+
+/**
+ * DELETE /api/v1/products/:id/components
+ * Delete all assembly components for a product
+ */
+products.delete(
+  "/:id/components",
+  requireAuth(),
+  requireTenant(),
+  requireRoles(["owner", "admin", "operator"]),
+  async (c) => {
+    const tenantId = c.get("tenantId")!;
+    const productId = c.req.param("id");
+
+    // Verify product exists and belongs to tenant
+    const product = await c.env.DB.prepare(
+      "SELECT id FROM products WHERE id = ? AND tenant_id = ?"
+    )
+      .bind(productId, tenantId)
+      .first();
+
+    if (!product) {
+      throw new ApiError("Product not found", 404, "PRODUCT_NOT_FOUND");
+    }
+
+    // Delete all components for this product
+    await c.env.DB.prepare("DELETE FROM product_components WHERE product_id = ?")
+      .bind(productId)
+      .run();
+
+    return c.json({
+      success: true,
+      message: "Components deleted successfully",
+    });
+  }
+);
+
+/**
+ * GET /api/v1/products/components/all
+ * List all assembly components for the tenant (bulk fetch for product list)
+ * This endpoint returns all components grouped by product_id for efficient frontend loading
+ */
+products.get(
+  "/components/all",
+  requireAuth(),
+  requireTenant(),
+  async (c) => {
+    const tenantId = c.get("tenantId")!;
+
+    // Get all components for products belonging to this tenant
+    const result = await c.env.DB.prepare(
+      `SELECT pc.* FROM product_components pc
+       INNER JOIN products p ON pc.product_id = p.id
+       WHERE p.tenant_id = ?
+       ORDER BY pc.product_id, pc.component_name ASC`
+    )
+      .bind(tenantId)
+      .all();
+
+    return c.json({
+      success: true,
+      data: result.results || [],
+    });
+  }
+);
+

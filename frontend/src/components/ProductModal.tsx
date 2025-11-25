@@ -417,7 +417,7 @@ export const ProductModal = ({ product, isOpen, onClose, onSave, onDelete, initi
 
             {/* Print Files Manager - Multi-Model Support */}
             <ProductPrintFilesManager
-              key={product?.id || 'new-product'}
+              key={`print-files-${product?.id || 'new-product'}`}
               productId={product?.id}
               existingFiles={printFiles}
               onFilesChange={handlePrintFilesChange}
@@ -498,7 +498,7 @@ export const ProductModal = ({ product, isOpen, onClose, onSave, onDelete, initi
             {isEditing && (
               <div className="space-y-2">
                 <DeferredImageUpload
-                  key={product?.id || 'new-product'}
+                  key={`image-${product?.id || 'new-product'}`}
                   currentImageUrl={formData.image_url}
                   onImageChange={handleImageChange}
                   label="Product Image"
@@ -509,7 +509,7 @@ export const ProductModal = ({ product, isOpen, onClose, onSave, onDelete, initi
 
             {/* SKUs Section */}
             <SkuManagement
-              key={product?.id || 'new-product'}
+              key={`skus-${product?.id || 'new-product'}`}
               productId={product?.id}
               productName={formData.name}
               skus={skus}

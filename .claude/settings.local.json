@@ -14,7 +14,8 @@
       "Bash(git -C \"C:\\Users\\nlsch\\AutoPrintFarm\" push)",
       "Bash(git -C \"C:\\Users\\nlsch\\AutoPrintFarm\" status)",
       "Bash(git -C \"C:\\Users\\nlsch\\AutoPrintFarm\" add .)",
-      "Bash(git -C \"C:\\Users\\nlsch\\AutoPrintFarm\" add -A)"
+      "Bash(git -C \"C:\\Users\\nlsch\\AutoPrintFarm\" add -A)",
+      "Bash(git -C \"C:\\Users\\nlsch\\AutoPrintFarm\" diff --stat)"
     ],
     "deny": [],
     "ask": []
