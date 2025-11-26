@@ -163,19 +163,62 @@ export const useWorklistTasks = () => {
       return { hasShortage: false, shortages: [], components: [], assemblyTask };
     }
 
-    // TODO: Component inventory checking is temporarily disabled until materials API routes are added.
-    // When /api/v1/materials/components routes are implemented, replace this with:
-    // - Fetch product_components via /api/v1/products/:id/components
-    // - Fetch accessories_inventory via /api/v1/materials/components/:id
-    // For now, return empty components to disable shortage checking
-    const components: any[] = [];
+    // Get product components required for assembly
+    let components: any[] = [];
+    try {
+      components = await api.get<any[]>(`/api/v1/products/${productSku.product_id}/components`);
+    } catch (err) {
+      // No components defined for this product
+      console.log('No components found for product:', productSku.product_id);
+      return { hasShortage: false, shortages: [], components: [], assemblyTask };
+    }
 
-    return {
-      hasShortage: false,
-      shortages,
-      components,
-      assemblyTask
-    };
+    if (!components || components.length === 0) {
+      return { hasShortage: false, shortages: [], components: [], assemblyTask };
+    }
+
+    // Check availability of all required components using the cloud API
+    const quantityNeeded = assemblyTask.quantity || 1;
+    const componentsToCheck = components.map((c: any) => ({
+      component_type: c.component_name || c.component_type,
+      quantity_needed: (c.quantity_required || 1) * quantityNeeded
+    }));
+
+    try {
+      const availabilityResult = await api.post<{
+        has_shortage: boolean;
+        components: Array<{
+          component_type: string;
+          quantity_needed: number;
+          quantity_available: number;
+          has_shortage: boolean;
+          shortage_amount: number;
+          component_id: string | null;
+        }>;
+      }>('/api/v1/materials/components/check-availability', { components: componentsToCheck });
+
+      // Build shortages array for UI display
+      for (const result of availabilityResult.components) {
+        if (result.has_shortage) {
+          shortages.push({
+            componentName: result.component_type,
+            needed: result.quantity_needed,
+            available: result.quantity_available
+          });
+        }
+      }
+
+      return {
+        hasShortage: availabilityResult.has_shortage,
+        shortages,
+        components,
+        assemblyTask
+      };
+    } catch (err) {
+      console.error('Error checking component availability:', err);
+      // If the availability check fails, proceed without blocking (fail open)
+      return { hasShortage: false, shortages: [], components, assemblyTask };
+    }
   };
 
   const syncToAssemblyTask = async (assemblyTaskId: string, status: WorklistTask['status'], forceComplete: boolean = false) => {

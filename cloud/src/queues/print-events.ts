@@ -17,6 +17,8 @@ import {
   broadcastPrinterStatus,
   broadcastInventoryAlert,
 } from "../lib/broadcast";
+import { sendToDeadLetter } from "../lib/dlq";
+import { triggerAutomationRules } from "../lib/automation";
 
 // Re-export types for use by other modules
 export type { PrintEventMessage } from "../types/env";
@@ -56,11 +58,15 @@ export async function handlePrintEventsQueue(
         const delaySeconds = Math.pow(2, message.attempts) * 10;
         message.retry({ delaySeconds });
       } else {
-        // After 3 failures, acknowledge to prevent infinite retries
-        // In production, you'd want to send to a dead letter queue
-        console.error(
-          `Print event failed after ${message.attempts} attempts, giving up:`,
-          message.body
+        // Send to dead letter queue after max retries
+        const errorObj = error instanceof Error ? error : new Error(String(error));
+        await sendToDeadLetter(
+          env,
+          "print-events",
+          message.body,
+          errorObj,
+          message.attempts,
+          message.body.tenantId
         );
         message.ack();
       }
@@ -138,6 +144,12 @@ async function handleJobStarted(
   // Broadcast job update to dashboard
   await broadcastJobUpdate(env, tenantId, jobId, "printing", 0, printerId || undefined);
 
+  // Trigger automation rules for print_started
+  await triggerAutomationRules(env, tenantId, "print_started", {
+    jobId,
+    ...(printerId && { printerId }),
+  });
+
   console.log(`Job ${jobId} started on printer ${printerId}`);
 }
 
@@ -212,8 +224,21 @@ async function handleJobCompleted(
     await createAssemblyTask(env, tenantId, jobId, productSkuId, quantity);
   }
 
-  // 5. TODO: Trigger automation rules (Phase 12)
-  // await triggerAutomationRules(env, tenantId, 'print_completed', { jobId, printerId });
+  // 5. Trigger automation rules for print_completed
+  // Get job details for automation context
+  const completedJob = await env.DB.prepare(
+    "SELECT file_name FROM print_jobs WHERE id = ? AND tenant_id = ?"
+  )
+    .bind(jobId, tenantId)
+    .first<{ file_name: string }>();
+
+  await triggerAutomationRules(env, tenantId, "print_completed", {
+    jobId,
+    ...(printerId && { printerId }),
+    ...(productSkuId && { productSkuId }),
+    quantity,
+    ...(completedJob?.file_name && { fileName: completedJob.file_name }),
+  });
 
   // 6. Broadcast job completion to dashboard
   await broadcastJobUpdate(env, tenantId, jobId, "completed", 100, printerId || undefined);
@@ -292,8 +317,13 @@ async function handleJobFailed(
       .run();
   }
 
-  // 4. TODO: Trigger automation rules (Phase 12)
-  // await triggerAutomationRules(env, tenantId, 'print_failed', { jobId, printerId, failureReason });
+  // 4. Trigger automation rules for print_failed
+  await triggerAutomationRules(env, tenantId, "print_failed", {
+    jobId,
+    ...(printerId && { printerId }),
+    ...(failureReason && { failureReason }),
+    ...(progressAtFailure !== undefined && { progressAtFailure }),
+  });
 
   // 5. Broadcast job failure to dashboard
   await broadcastJobUpdate(env, tenantId, jobId, "failed", job?.progress_percentage || 0, printerId || undefined);
@@ -685,6 +715,13 @@ async function checkAndBroadcastLowStockAlert(
       finishedGood.current_stock,
       finishedGood.low_stock_threshold
     );
+
+    // Trigger automation rules for low_stock
+    await triggerAutomationRules(env, tenantId, "low_stock", {
+      productSkuId,
+      currentStock: finishedGood.current_stock,
+      threshold: finishedGood.low_stock_threshold,
+    });
 
     console.log(
       `Low stock alert for ${finishedGood.sku}: ${finishedGood.current_stock}/${finishedGood.low_stock_threshold}`

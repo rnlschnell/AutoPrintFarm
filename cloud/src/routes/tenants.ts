@@ -538,3 +538,97 @@ tenants.delete(
     });
   }
 );
+
+// =============================================================================
+// HUB CLAIM TOKEN
+// =============================================================================
+
+/**
+ * GET /api/v1/tenants/hub-token
+ * Get the current tenant's hub claim token for BLE setup flow
+ * Generates a new token if one doesn't exist
+ */
+tenants.get("/hub-token", requireAuth(), requireTenant(), async (c) => {
+  const tenantId = c.get("tenantId")!;
+
+  // Get current token
+  const tenant = await c.env.DB.prepare(
+    "SELECT hub_claim_token FROM tenants WHERE id = ?"
+  )
+    .bind(tenantId)
+    .first<{ hub_claim_token: string | null }>();
+
+  if (!tenant) {
+    throw new ApiError("Tenant not found", 404, "TENANT_NOT_FOUND");
+  }
+
+  // If token exists, return it
+  if (tenant.hub_claim_token) {
+    return c.json({
+      success: true,
+      data: {
+        token: tenant.hub_claim_token,
+      },
+    });
+  }
+
+  // Generate new token
+  const tokenBytes = new Uint8Array(24);
+  crypto.getRandomValues(tokenBytes);
+  const token = Array.from(tokenBytes)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+
+  const now = new Date().toISOString();
+
+  await c.env.DB.prepare(
+    "UPDATE tenants SET hub_claim_token = ?, updated_at = ? WHERE id = ?"
+  )
+    .bind(token, now, tenantId)
+    .run();
+
+  return c.json({
+    success: true,
+    data: {
+      token: token,
+    },
+  });
+});
+
+/**
+ * POST /api/v1/tenants/hub-token/regenerate
+ * Regenerate the hub claim token (invalidates old token)
+ * Owner/admin only
+ */
+tenants.post(
+  "/hub-token/regenerate",
+  requireAuth(),
+  requireTenant(),
+  requireRoles(["owner", "admin"]),
+  async (c) => {
+    const tenantId = c.get("tenantId")!;
+
+    // Generate new token
+    const tokenBytes = new Uint8Array(24);
+    crypto.getRandomValues(tokenBytes);
+    const token = Array.from(tokenBytes)
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+
+    const now = new Date().toISOString();
+
+    await c.env.DB.prepare(
+      "UPDATE tenants SET hub_claim_token = ?, updated_at = ? WHERE id = ?"
+    )
+      .bind(token, now, tenantId)
+      .run();
+
+    return c.json({
+      success: true,
+      message: "Hub claim token regenerated",
+      data: {
+        token: token,
+      },
+    });
+  }
+);

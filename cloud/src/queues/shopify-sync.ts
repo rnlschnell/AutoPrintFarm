@@ -19,6 +19,7 @@ import {
   matchSku,
   type ShopifyOrder,
 } from "../lib/orders";
+import { sendToDeadLetter } from "../lib/dlq";
 
 // =============================================================================
 // TYPES
@@ -514,6 +515,100 @@ async function syncFulfillmentToShopify(
 }
 
 // =============================================================================
+// ORDER UPDATE HANDLER
+// =============================================================================
+
+/**
+ * Handle order updates from Shopify
+ */
+async function handleOrderUpdate(
+  env: Env,
+  tenantId: string,
+  payload: {
+    shopify_order_id?: string;
+    status?: string;
+    cancelled?: boolean;
+    notes?: string;
+    tags?: string[];
+  }
+): Promise<void> {
+  const { shopify_order_id, status, cancelled, notes, tags } = payload;
+
+  if (!shopify_order_id) {
+    console.log(`[ShopifySync] No Shopify order ID provided for update`);
+    return;
+  }
+
+  console.log(`[ShopifySync] Processing order update for Shopify order ${shopify_order_id}`);
+
+  // Find the local order by Shopify order ID
+  const syncRecord = await env.DB.prepare(
+    `SELECT order_id FROM shopify_orders_sync
+     WHERE tenant_id = ? AND shopify_order_id = ?`
+  )
+    .bind(tenantId, shopify_order_id)
+    .first<{ order_id: string }>();
+
+  if (!syncRecord) {
+    console.log(`[ShopifySync] No local order found for Shopify order ${shopify_order_id}`);
+    return;
+  }
+
+  const orderId = syncRecord.order_id;
+
+  // Build update query dynamically
+  const updates: string[] = [];
+  const params: (string | number)[] = [];
+
+  if (cancelled) {
+    updates.push("status = ?");
+    params.push("cancelled");
+  } else if (status) {
+    updates.push("status = ?");
+    params.push(status);
+  }
+
+  if (notes !== undefined) {
+    updates.push("notes = ?");
+    params.push(notes);
+  }
+
+  if (tags !== undefined) {
+    updates.push("tags = ?");
+    params.push(JSON.stringify(tags));
+  }
+
+  if (updates.length === 0) {
+    console.log(`[ShopifySync] No updates to apply for order ${orderId}`);
+    return;
+  }
+
+  // Add updated_at timestamp
+  updates.push("updated_at = ?");
+  params.push(new Date().toISOString());
+
+  // Add where clause params
+  params.push(orderId);
+  params.push(tenantId);
+
+  // Execute update
+  await env.DB.prepare(
+    `UPDATE orders SET ${updates.join(", ")} WHERE id = ? AND tenant_id = ?`
+  )
+    .bind(...params)
+    .run();
+
+  // Update sync record timestamp
+  await env.DB.prepare(
+    `UPDATE shopify_orders_sync SET last_sync_at = ? WHERE order_id = ?`
+  )
+    .bind(new Date().toISOString(), orderId)
+    .run();
+
+  console.log(`[ShopifySync] Updated order ${orderId} from Shopify order ${shopify_order_id}`);
+}
+
+// =============================================================================
 // QUEUE HANDLER
 // =============================================================================
 
@@ -550,8 +645,18 @@ export async function handleShopifySyncQueue(
         }
 
         case "order_updated": {
-          // Handle order update sync if needed
-          console.log(`[ShopifySync] Order update for tenant ${tenantId}`);
+          // Handle order update sync
+          const updatePayload = payload as {
+            shopify_order_id?: string;
+            status?: string;
+            cancelled?: boolean;
+            notes?: string;
+            tags?: string[];
+          };
+
+          if (updatePayload.shopify_order_id) {
+            await handleOrderUpdate(env, tenantId, updatePayload);
+          }
           break;
         }
 
@@ -586,9 +691,15 @@ export async function handleShopifySyncQueue(
       if (message.attempts < 3) {
         message.retry();
       } else {
-        // Give up after 3 attempts
-        console.error(
-          `[ShopifySync] Giving up on message after ${message.attempts} attempts`
+        // Send to dead letter queue after max retries
+        const errorObj = error instanceof Error ? error : new Error(String(error));
+        await sendToDeadLetter(
+          env,
+          "shopify-sync",
+          message.body,
+          errorObj,
+          message.attempts,
+          tenantId
         );
         message.ack();
       }

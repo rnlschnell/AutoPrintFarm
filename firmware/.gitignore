@@ -1,0 +1,13 @@
+# PlatformIO build artifacts
+.pio/
+.vscode/
+
+# Compiled files
+*.o
+*.obj
+*.elf
+*.bin
+
+# IDE
+.idea/
+*.sublime-*

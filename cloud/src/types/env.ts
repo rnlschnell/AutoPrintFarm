@@ -100,6 +100,16 @@ export interface ShopifySyncMessage {
   timestamp: number;
 }
 
+export interface DeadLetterMessage {
+  originalQueue: string;
+  originalMessage: unknown;
+  error: string;
+  stackTrace?: string;
+  attempts: number;
+  failedAt: string;
+  tenantId?: string;
+}
+
 /**
  * Environment bindings available to the Worker
  */
@@ -118,6 +128,7 @@ export interface Env {
   FILE_PROCESSING: Queue<FileProcessingMessage>;
   NOTIFICATIONS: Queue<NotificationMessage>;
   SHOPIFY_SYNC: Queue<ShopifySyncMessage>;
+  DEAD_LETTER: Queue<DeadLetterMessage>;
 
   // Durable Objects
   HUB_CONNECTIONS: DurableObjectNamespace;

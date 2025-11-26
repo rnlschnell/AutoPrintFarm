@@ -42,6 +42,7 @@ import {
   automation,
   analytics,
   materials,
+  admin,
 } from "./routes";
 
 // Re-export Durable Object classes (required by Cloudflare Workers)
@@ -138,6 +139,8 @@ apiV1.get("/", (c) => {
       cameras: "/api/v1/cameras",
       automation: "/api/v1/automation",
       analytics: "/api/v1/analytics",
+      // Admin routes (Phase 15)
+      admin: "/api/v1/admin",
     },
   });
 });
@@ -181,6 +184,9 @@ apiV1.route("/analytics", analytics);
 
 // Material inventory routes
 apiV1.route("/materials", materials);
+
+// Admin routes (Phase 15)
+apiV1.route("/admin", admin);
 
 // Mount API v1 at /api/v1
 app.route("/api/v1", apiV1);
@@ -305,10 +311,12 @@ app.onError(errorHandler);
 import { handleFileProcessingQueue } from "./queues/file-processing";
 import { handlePrintEventsQueue, type PrintEventMessage } from "./queues/print-events";
 import { handleShopifySyncQueue } from "./queues/shopify-sync";
-import type { Env, FileProcessingMessage, ShopifySyncMessage } from "./types/env";
+import { handleNotificationsQueue } from "./queues/notifications";
+import { handleDeadLetterQueue } from "./queues/dead-letter";
+import type { Env, FileProcessingMessage, ShopifySyncMessage, NotificationMessage, DeadLetterMessage } from "./types/env";
 
 // Union type for all queue message types
-type QueueMessage = FileProcessingMessage | PrintEventMessage | ShopifySyncMessage;
+type QueueMessage = FileProcessingMessage | PrintEventMessage | ShopifySyncMessage | NotificationMessage | DeadLetterMessage;
 
 // =============================================================================
 // EXPORT
@@ -339,6 +347,16 @@ export default {
     } else if (queueName === "shopify-sync") {
       await handleShopifySyncQueue(
         batch as MessageBatch<ShopifySyncMessage>,
+        env
+      );
+    } else if (queueName === "notifications") {
+      await handleNotificationsQueue(
+        batch as MessageBatch<NotificationMessage>,
+        env
+      );
+    } else if (queueName === "dead-letter") {
+      await handleDeadLetterQueue(
+        batch as MessageBatch<DeadLetterMessage>,
         env
       );
     } else {

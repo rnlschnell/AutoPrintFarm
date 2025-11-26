@@ -18,6 +18,7 @@
 #    wrangler queues create file-processing
 #    wrangler queues create notifications
 #    wrangler queues create shopify-sync
+#    wrangler queues create dead-letter
 
 name = "printfarm-api"
 main = "src/index.ts"
@@ -74,6 +75,10 @@ queue = "notifications"
 binding = "SHOPIFY_SYNC"
 queue = "shopify-sync"
 
+[[queues.producers]]
+binding = "DEAD_LETTER"
+queue = "dead-letter"
+
 # ============================================================================
 # Queue Consumer Bindings
 # ============================================================================
@@ -93,6 +98,18 @@ max_batch_timeout = 30
 [[queues.consumers]]
 queue = "shopify-sync"
 max_batch_size = 5
+max_batch_timeout = 60
+
+# Notifications queue consumer (Phase 15)
+[[queues.consumers]]
+queue = "notifications"
+max_batch_size = 10
+max_batch_timeout = 30
+
+# Dead letter queue consumer (Phase 15)
+[[queues.consumers]]
+queue = "dead-letter"
+max_batch_size = 10
 max_batch_timeout = 60
 
 # ============================================================================

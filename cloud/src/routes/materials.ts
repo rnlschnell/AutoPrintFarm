@@ -803,6 +803,167 @@ materials.delete(
   }
 );
 
+// Schema for consuming components
+const consumeComponentSchema = z.object({
+  quantity: z.number().int().min(1),
+  reason: z.enum(["assembly_completion", "manual_adjustment", "damaged", "other"]).optional().default("manual_adjustment"),
+  assembly_task_id: z.string().uuid().optional(),
+  notes: z.string().max(500).optional(),
+});
+
+/**
+ * POST /api/v1/materials/components/:id/consume
+ * Consume component inventory (decrement quantity)
+ * Used during assembly completion to track component usage
+ */
+materials.post(
+  "/components/:id/consume",
+  requireAuth(),
+  requireTenant(),
+  requireRoles(["owner", "admin", "operator"]),
+  async (c) => {
+    const tenantId = c.get("tenantId")!;
+    const id = c.req.param("id");
+
+    // Get existing component
+    const existing = await c.env.DB.prepare(
+      `SELECT * FROM accessories_inventory WHERE id = ? AND tenant_id = ?`
+    )
+      .bind(id, tenantId)
+      .first<{
+        id: string;
+        type: string;
+        remaining_units: number;
+        low_threshold: number | null;
+      }>();
+
+    if (!existing) {
+      throw new ApiError("Component not found", 404, "NOT_FOUND");
+    }
+
+    // Parse and validate request body
+    let body: z.infer<typeof consumeComponentSchema>;
+    try {
+      const rawBody = await c.req.json();
+      body = consumeComponentSchema.parse(rawBody);
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        const issues = error.errors.map(e => `${e.path.join('.')}: ${e.message}`).join(', ');
+        throw new ApiError(`Validation error: ${issues}`, 400, "VALIDATION_ERROR");
+      }
+      throw new ApiError("Invalid request body", 400, "INVALID_REQUEST");
+    }
+
+    // Check if there's sufficient quantity
+    if (existing.remaining_units < body.quantity) {
+      throw new ApiError(
+        `Insufficient quantity: requested ${body.quantity}, available ${existing.remaining_units}`,
+        400,
+        "INSUFFICIENT_QUANTITY"
+      );
+    }
+
+    // Calculate new quantity and status
+    const newRemaining = existing.remaining_units - body.quantity;
+    const newStatus = calculateStatus(newRemaining, existing.low_threshold);
+    const now = new Date().toISOString();
+
+    // Update the component
+    await c.env.DB.prepare(
+      `UPDATE accessories_inventory
+       SET remaining_units = ?, status = ?, updated_at = ?
+       WHERE id = ? AND tenant_id = ?`
+    )
+      .bind(newRemaining, newStatus, now, id, tenantId)
+      .run();
+
+    // Get updated record
+    const updated = await c.env.DB.prepare(
+      `SELECT * FROM accessories_inventory WHERE id = ?`
+    )
+      .bind(id)
+      .first();
+
+    return c.json({
+      success: true,
+      data: updated,
+      consumed: {
+        quantity: body.quantity,
+        reason: body.reason,
+        assembly_task_id: body.assembly_task_id,
+        notes: body.notes,
+        previous_quantity: existing.remaining_units,
+        new_quantity: newRemaining,
+      },
+    });
+  }
+);
+
+/**
+ * POST /api/v1/materials/components/check-availability
+ * Check if components are available for assembly
+ * Returns availability status for multiple components at once
+ */
+materials.post(
+  "/components/check-availability",
+  requireAuth(),
+  requireTenant(),
+  async (c) => {
+    const tenantId = c.get("tenantId")!;
+
+    // Parse request body - expects array of { component_type, quantity_needed }
+    let body: { components: Array<{ component_type: string; quantity_needed: number }> };
+    try {
+      body = await c.req.json();
+      if (!body.components || !Array.isArray(body.components)) {
+        throw new Error("components array required");
+      }
+    } catch {
+      throw new ApiError("Invalid request body: expected { components: [{ component_type, quantity_needed }] }", 400, "INVALID_REQUEST");
+    }
+
+    const results: Array<{
+      component_type: string;
+      quantity_needed: number;
+      quantity_available: number;
+      has_shortage: boolean;
+      shortage_amount: number;
+      component_id: string | null;
+    }> = [];
+
+    for (const component of body.components) {
+      // Find component by type
+      const existing = await c.env.DB.prepare(
+        `SELECT id, type, remaining_units FROM accessories_inventory
+         WHERE tenant_id = ? AND LOWER(type) = LOWER(?)
+         LIMIT 1`
+      )
+        .bind(tenantId, component.component_type)
+        .first<{ id: string; type: string; remaining_units: number }>();
+
+      const available = existing?.remaining_units || 0;
+      const shortage = Math.max(0, component.quantity_needed - available);
+
+      results.push({
+        component_type: component.component_type,
+        quantity_needed: component.quantity_needed,
+        quantity_available: available,
+        has_shortage: shortage > 0,
+        shortage_amount: shortage,
+        component_id: existing?.id || null,
+      });
+    }
+
+    const hasAnyShortage = results.some(r => r.has_shortage);
+
+    return c.json({
+      success: true,
+      has_shortage: hasAnyShortage,
+      components: results,
+    });
+  }
+);
+
 // =============================================================================
 // PRINTER PARTS INVENTORY
 // =============================================================================

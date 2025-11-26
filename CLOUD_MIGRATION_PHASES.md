@@ -967,10 +967,21 @@ This document breaks down the cloud migration into discrete, manageable phases. 
   - File versioning support
 
 ### Product Services
-- [ ] Update `useProductsNew.ts` (deferred - complex hook, needs additional work)
+- [x] Update `useProductsNew.ts`:
+  - Already uses cloud API (`/api/v1/products`, `/api/v1/skus`, `/api/v1/files`)
+  - CRUD operations for products, SKUs, and components
+  - Print file linking and unlinking
+  - Assembly components management
 
 ### Inventory Services
-- [ ] Update inventory hooks (deferred - complex aggregation logic)
+- [x] Update `useProductInventory.ts`:
+  - Uses cloud API (`/api/v1/products`, `/api/v1/skus`, `/api/v1/inventory`)
+  - Client-side data transformation and aggregation
+  - Stock updates via PUT endpoint
+- [x] Update `useMaterialInventory.ts`:
+  - Uses cloud API (`/api/v1/materials/*`)
+  - Added `consumeComponent()` method for assembly task completion
+  - Added `checkComponentAvailability()` method for pre-assembly validation
 
 ### Order Services
 - [x] Update `useOrders.ts`:
@@ -980,7 +991,10 @@ This document breaks down the cloud migration into discrete, manageable phases. 
   - Order statistics
 
 ### Task Services
-- [ ] Update `useWorklistTasks.ts` (deferred - complex multi-entity logic)
+- [x] Update `useWorklistTasks.ts`:
+  - Uses cloud API (`/api/v1/worklist`, `/api/v1/assembly`)
+  - Component inventory checking enabled via `/api/v1/materials/components/check-availability`
+  - Assembly task syncing and completion
 
 ### Context Providers
 - [x] Update `ColorPresetsContext.tsx` - uses `/api/v1/colors`
@@ -1013,6 +1027,13 @@ This document breaks down the cloud migration into discrete, manageable phases. 
 - `frontend/src/hooks/usePrintFiles.ts` - Cloud API
 - `frontend/src/hooks/useOrders.ts` - Cloud API
 - `frontend/src/hooks/useTenant.ts` - AuthContext wrapper
+- `frontend/src/hooks/useWorklistTasks.ts` - Enabled component inventory checking
+- `frontend/src/hooks/useMaterialInventory.ts` - Added consumeComponent and checkComponentAvailability methods
+- `cloud/src/routes/materials.ts` - Added component consume and check-availability endpoints
+
+**Deleted:**
+- `frontend/src/hooks/useFinishedGoods.ts` - Deprecated (replaced by useProductInventory)
+- `frontend/src/hooks/useAssemblyTasks.ts` - Deprecated (replaced by useWorklistTasks)
 
 ---
 

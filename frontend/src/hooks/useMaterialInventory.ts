@@ -241,6 +241,96 @@ export const useMaterialInventory = () => {
     }
   };
 
+  /**
+   * Consume a component from inventory (decrement quantity)
+   * Used during assembly completion
+   */
+  const consumeComponent = async (
+    componentId: string,
+    quantity: number,
+    options?: {
+      reason?: 'assembly_completion' | 'manual_adjustment' | 'damaged' | 'other';
+      assembly_task_id?: string;
+      notes?: string;
+    }
+  ) => {
+    try {
+      const response = await api.post<{
+        data: any;
+        consumed: {
+          quantity: number;
+          reason: string;
+          assembly_task_id?: string;
+          notes?: string;
+          previous_quantity: number;
+          new_quantity: number;
+        };
+      }>(`/api/v1/materials/components/${componentId}/consume`, {
+        quantity,
+        reason: options?.reason || 'assembly_completion',
+        assembly_task_id: options?.assembly_task_id,
+        notes: options?.notes,
+      });
+
+      // Update local state with new quantity
+      if (response.data) {
+        const updatedMaterial: MaterialInventoryItem = {
+          ...response.data,
+          color: response.data.color || '',
+          category: 'Components' as InventoryType,
+          remaining: response.data.remaining_units,
+          usageHistory: []
+        };
+
+        setMaterials(prev => prev.map(material =>
+          material.id === componentId ? updatedMaterial : material
+        ));
+      }
+
+      return response;
+    } catch (error: any) {
+      console.error('Error consuming component:', error);
+      throw error;
+    }
+  };
+
+  /**
+   * Check availability of multiple components at once
+   * Used to validate assembly before completion
+   */
+  const checkComponentAvailability = async (
+    components: Array<{ component_type: string; quantity_needed: number }>
+  ): Promise<{
+    has_shortage: boolean;
+    components: Array<{
+      component_type: string;
+      quantity_needed: number;
+      quantity_available: number;
+      has_shortage: boolean;
+      shortage_amount: number;
+      component_id: string | null;
+    }>;
+  }> => {
+    try {
+      const response = await api.post<{
+        has_shortage: boolean;
+        components: Array<{
+          component_type: string;
+          quantity_needed: number;
+          quantity_available: number;
+          has_shortage: boolean;
+          shortage_amount: number;
+          component_id: string | null;
+        }>;
+      }>('/api/v1/materials/components/check-availability', { components });
+
+      return response;
+    } catch (error: any) {
+      console.error('Error checking component availability:', error);
+      throw error;
+    }
+  };
+
   useEffect(() => {
     if (tenantId) {
       fetchMaterials();
@@ -253,6 +343,8 @@ export const useMaterialInventory = () => {
     addMaterial,
     updateMaterial,
     deleteMaterial,
+    consumeComponent,
+    checkComponentAvailability,
     refetch: fetchMaterials
   };
 };

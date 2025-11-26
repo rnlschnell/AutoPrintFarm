@@ -48,3 +48,6 @@ export { analytics } from "./analytics";
 
 // Material inventory routes
 export { materials } from "./materials";
+
+// Admin routes (Phase 15)
+export { admin } from "./admin";

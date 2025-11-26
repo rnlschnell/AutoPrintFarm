@@ -13,6 +13,7 @@ import type { Env, FileProcessingMessage } from "../types/env";
 import type { PrintFile } from "../types";
 import { downloadFileAsBuffer, uploadFile, thumbnailPath } from "../lib/r2";
 import { parse3MF, validate3MF, getFileExtension } from "../lib/threemf";
+import { sendToDeadLetter } from "../lib/dlq";
 
 // =============================================================================
 // QUEUE CONSUMER HANDLER
@@ -35,12 +36,19 @@ export async function handleFileProcessingQueue(
         error
       );
 
-      // Retry up to 3 times, then dead-letter
+      // Retry up to 3 times, then send to dead letter queue
       if (message.attempts < 3) {
         message.retry({ delaySeconds: Math.pow(2, message.attempts) * 10 });
       } else {
-        console.error(
-          `Max retries reached for file ${message.body.fileId}, acknowledging to prevent infinite loop`
+        // Send to dead letter queue after max retries
+        const errorObj = error instanceof Error ? error : new Error(String(error));
+        await sendToDeadLetter(
+          env,
+          "file-processing",
+          message.body,
+          errorObj,
+          message.attempts,
+          message.body.tenantId
         );
         message.ack();
       }

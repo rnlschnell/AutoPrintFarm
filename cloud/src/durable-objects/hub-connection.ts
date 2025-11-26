@@ -153,12 +153,31 @@ export class HubConnection {
       .first<{ id: string; tenant_id: string | null; secret_hash: string }>();
 
     if (!hub) {
-      return new Response("Hub not found", { status: 404 });
+      // Hub not registered - tell ESP32 to register first
+      return new Response(
+        JSON.stringify({
+          error: "HUB_NOT_REGISTERED",
+          message: "Hub must register via POST /api/v1/hubs/register before connecting",
+        }),
+        {
+          status: 401,
+          headers: { "Content-Type": "application/json" },
+        }
+      );
     }
 
     // Hub must be claimed (have a tenant_id) to connect
     if (!hub.tenant_id) {
-      return new Response("Hub not claimed", { status: 403 });
+      return new Response(
+        JSON.stringify({
+          error: "HUB_NOT_CLAIMED",
+          message: "Hub is registered but not claimed by any tenant",
+        }),
+        {
+          status: 403,
+          headers: { "Content-Type": "application/json" },
+        }
+      );
     }
 
     // Create WebSocket pair
@@ -773,6 +792,10 @@ export class HubConnection {
           status: status.status,
           progress_percentage: status.progress_percentage,
           remaining_time_seconds: status.remaining_time_seconds,
+          current_layer: status.current_layer,
+          total_layers: status.total_layers,
+          temperatures: status.temperatures,
+          error_message: status.error_message,
         }),
       });
     } catch (error) {
