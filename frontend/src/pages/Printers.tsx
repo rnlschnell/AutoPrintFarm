@@ -2,9 +2,8 @@ import { useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
-import { MoreHorizontal, Clock, Palette, Plus, GripVertical, LayoutGrid, List, Package, Settings, Thermometer, Pencil, Square, Layers2, Check, ArrowRight, X, Wrench, Wifi, WifiOff } from "lucide-react";
-import { useDashboardWebSocket, type DashboardPrinterStatus } from "@/hooks/useDashboardWebSocket";
-import { useHubs } from "@/hooks/useHubs";
+import { MoreHorizontal, Clock, Palette, Plus, GripVertical, LayoutGrid, List, Package, Settings, Thermometer, Pencil, Square, Layers2, Check, ArrowRight, X, Wrench } from "lucide-react";
+import { usePrinterWebSocket, type LivePrinterData } from "@/hooks/useWebSocket";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -87,8 +86,7 @@ const getStatusBadge = (status: string) => {
 
 interface PrinterCardProps {
   printer: Printer;
-  liveData?: DashboardPrinterStatus;
-  isWebSocketConnected?: boolean;
+  liveData?: LivePrinterData;
   onViewDetails: (printer: Printer) => void;
   onStartMaintenance: (printer: Printer) => void;
   onCompleteMaintenance: (printer: Printer) => void;
@@ -99,8 +97,11 @@ interface PrinterCardProps {
   isDragging?: boolean;
 }
 
-const PrinterCard = ({ printer, liveData, isWebSocketConnected, onViewDetails, onStartMaintenance, onCompleteMaintenance, onStartCalibration, onEditFilament, onToggleCleared, updatePrinter, isDragging = false }: PrinterCardProps) => {
+const PrinterCard = ({ printer, liveData, onViewDetails, onStartMaintenance, onCompleteMaintenance, onStartCalibration, onEditFilament, onToggleCleared, updatePrinter, isDragging = false }: PrinterCardProps) => {
   const [clearedClickCount, setClearedClickCount] = useState(0);
+
+  // DEBUG: Log what printer prop the component receives
+  console.log(`[PrinterCard] Rendering ${printer.name} (${printer.id.substring(0, 8)}):`, { color: printer.currentColor, hex: printer.currentColorHex });
 
   const {
     attributes,
@@ -117,11 +118,9 @@ const PrinterCard = ({ printer, liveData, isWebSocketConnected, onViewDetails, o
   };
 
   // Separate connection status from print job status
-  // With the new WebSocket, we check if we have live data to determine connection
-  const hasLiveData = !!liveData;
-  const isConnected = hasLiveData || (printer.connected ?? false);
+  const isConnected = liveData?.is_connected ?? (printer.connected ?? false);
   const connectionStatus = isConnected ? 'connected' : 'offline';
-
+  
   // Get print job status - what the printer is currently doing or last job state
   const printJobStatus = liveData ? liveData.status : (printer.status === 'offline' ? 'idle' : printer.status);
   
@@ -141,19 +140,16 @@ const PrinterCard = ({ printer, liveData, isWebSocketConnected, onViewDetails, o
   const getTemperatures = () => {
     if (liveData?.temperatures) {
       return {
-        hotend: Math.round(liveData.temperatures.nozzle ?? 0),
-        hotendTarget: liveData.temperatures.nozzle ? Math.round(liveData.temperatures.nozzle) : undefined,
-        bed: Math.round(liveData.temperatures.bed ?? 0),
-        bedTarget: liveData.temperatures.bed ? Math.round(liveData.temperatures.bed) : undefined,
-        chamber: liveData.temperatures.chamber ? Math.round(liveData.temperatures.chamber) : undefined
+        hotend: Math.round(liveData.temperatures.nozzle.current),
+        bed: Math.round(liveData.temperatures.bed.current)
       };
     }
-
+    
     // Fallback to mock data based on connection and print status
     if (!isConnected) {
       return { hotend: 0, bed: 0 };
     }
-
+    
     switch (printJobStatus) {
       case 'printing':
         return { hotend: 215, bed: 60 };
@@ -175,29 +171,24 @@ const PrinterCard = ({ printer, liveData, isWebSocketConnected, onViewDetails, o
 
   // Get progress from live data only - no mock data
   const getProgress = () => {
-    if (liveData?.progress_percentage !== undefined && printJobStatus === 'printing') {
-      return liveData.progress_percentage;
+    if (liveData?.progress && printJobStatus === 'printing') {
+      return liveData.progress.percentage;
     }
-
+    
     return 0; // No progress when not printing or no live data available
   };
 
   const progress = getProgress();
-
-  // Get layer info from live data
-  const currentLayer = liveData?.current_layer;
-  const totalLayers = liveData?.total_layers;
-  const remainingTime = liveData?.remaining_time_seconds;
   
   // Get the display text for the progress area
   const getProgressText = () => {
     if (!isConnected) {
       return 'Offline';
     }
-
+    
     switch (printJobStatus) {
       case 'printing':
-        if (liveData?.progress_percentage !== undefined) {
+        if (liveData?.progress) {
           return `${progress}% complete`;
         } else {
           return 'Printing...'; // Show we're printing but don't have progress data yet
@@ -256,25 +247,14 @@ const PrinterCard = ({ printer, liveData, isWebSocketConnected, onViewDetails, o
         >
           <GripVertical className="h-4 w-4 text-white" />
         </div>
-
-        <h3
+        
+        <h3 
           className="font-semibold text-white text-center flex-1 truncate px-4 cursor-pointer hover:text-white/80 transition-colors"
           onClick={() => onViewDetails(printer)}
         >
           {printer.name}
         </h3>
-
-        {/* WebSocket connection indicator */}
-        <div className="flex items-center gap-2">
-          {isWebSocketConnected !== undefined && (
-            <div
-              className={`p-1 rounded ${isWebSocketConnected ? 'text-green-400' : 'text-red-400'}`}
-              title={isWebSocketConnected ? 'Live data connected' : 'Live data disconnected'}
-            >
-              {isWebSocketConnected ? <Wifi className="h-4 w-4" /> : <WifiOff className="h-4 w-4" />}
-            </div>
-          )}
-
+        
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button size="sm" variant="ghost" className="h-8 w-8 p-0 hover:bg-white/20 text-white">
@@ -294,7 +274,6 @@ const PrinterCard = ({ printer, liveData, isWebSocketConnected, onViewDetails, o
             </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
-        </div>
       </div>
 
       {/* Main Content */}
@@ -328,7 +307,7 @@ const PrinterCard = ({ printer, liveData, isWebSocketConnected, onViewDetails, o
               )}
               {printJobStatus === 'printing' && (
                 <div className="text-right space-y-1">
-                  <div className="text-xs text-muted-foreground">{formatLayerProgress(currentLayer, totalLayers)}</div>
+                  <div className="text-xs text-muted-foreground">{formatLayerProgress(liveData?.progress?.current_layer, liveData?.progress?.total_layers)}</div>
                 </div>
               )}
             </div>
@@ -340,8 +319,8 @@ const PrinterCard = ({ printer, liveData, isWebSocketConnected, onViewDetails, o
             />
             <div className="flex items-center justify-between text-xs text-muted-foreground">
               <span>{getProgressText()}</span>
-              {printJobStatus === 'printing' && remainingTime !== undefined && (
-                <span>{formatTime(remainingTime)} left</span>
+              {printJobStatus === 'printing' && (
+                <span>{formatTime(liveData?.progress?.remaining_time)} left</span>
               )}
             </div>
           </div>
@@ -432,15 +411,14 @@ const PrinterCard = ({ printer, liveData, isWebSocketConnected, onViewDetails, o
 
 interface PrinterRowProps {
   printer: Printer;
-  liveData?: DashboardPrinterStatus;
-  isWebSocketConnected?: boolean;
+  liveData?: LivePrinterData;
   onViewDetails: (printer: Printer) => void;
   onStartMaintenance: (printer: Printer) => void;
   onStartCalibration: (printer: Printer) => void;
   updatePrinter: (id: string, updates: Partial<Printer>) => Promise<Printer>;
 }
 
-const PrinterRow = ({ printer, liveData, isWebSocketConnected, onViewDetails, onStartMaintenance, onStartCalibration, updatePrinter }: PrinterRowProps) => {
+const PrinterRow = ({ printer, liveData, onViewDetails, onStartMaintenance, onStartCalibration, updatePrinter }: PrinterRowProps) => {
   const {
     attributes,
     listeners,
@@ -455,11 +433,9 @@ const PrinterRow = ({ printer, liveData, isWebSocketConnected, onViewDetails, on
   };
 
   // Separate connection status from print job status (same logic as card view)
-  const hasLiveData = !!liveData;
-  const isConnected = hasLiveData || (printer.connected ?? false);
+  const isConnected = liveData?.is_connected ?? (printer.connected ?? false);
   const connectionStatus = isConnected ? 'connected' : 'offline';
   const printJobStatus = liveData ? liveData.status : (printer.status === 'offline' ? 'idle' : printer.status);
-  const remainingTime = liveData?.remaining_time_seconds;
 
   // Direct computation - no memoization needed for simple string concatenation
   const printerColor = printer.currentColorHex && printer.currentColor
@@ -484,8 +460,8 @@ const PrinterRow = ({ printer, liveData, isWebSocketConnected, onViewDetails, on
         </div>
       </TableCell>
       <TableCell>{getStatusBadge(connectionStatus === 'connected' ? 'Connected' : 'Offline')}</TableCell>
-      <TableCell className="truncate max-w-32">{printJobStatus === 'printing' ? 'Printing...' : 'N/A'}</TableCell>
-      <TableCell>{printJobStatus === 'printing' && remainingTime !== undefined ? formatTime(remainingTime) : 'N/A'}</TableCell>
+      <TableCell className="truncate max-w-32">{liveData?.current_job?.filename || 'N/A'}</TableCell>
+      <TableCell>{printJobStatus === 'printing' ? formatTime(liveData?.progress?.remaining_time) : 'N/A'}</TableCell>
       <TableCell>
         {printerColor ? (
           <div className="flex items-center gap-2">
@@ -525,8 +501,7 @@ const PrinterRow = ({ printer, liveData, isWebSocketConnected, onViewDetails, on
 
 const Printers = () => {
   const { printers, loading, addPrinter, updatePrinter, updatePrintersOrder, toggleCleared, refetch } = usePrinters();
-  const { printerStatuses, isConnected: isWebSocketConnected, isReconnecting } = useDashboardWebSocket();
-  const { hubs, loading: hubsLoading } = useHubs();
+  const { data: liveData, isConnected, isReconnecting } = usePrinterWebSocket();
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [viewMode, setViewMode] = useState('grid');
   const [selectedPrinter, setSelectedPrinter] = useState<Printer | null>(null);
@@ -544,8 +519,7 @@ const Printers = () => {
     model: '',
     serialNumber: '',
     ipAddress: '',
-    accessCode: '',
-    hubId: ''
+    accessCode: ''
   });
   const { toast } = useToast();
 
@@ -607,8 +581,7 @@ const Printers = () => {
         model: '',
         serialNumber: '',
         ipAddress: '',
-        accessCode: '',
-        hubId: ''
+        accessCode: ''
       });
       setIsAddModalOpen(false);
     } catch (error) {
@@ -652,20 +625,17 @@ const Printers = () => {
   const activePrinter = printers.find(printer => printer.id === activeId);
 
   // Helper function to get live data for a specific printer
-  // The printerStatuses map uses printer_id as the key
-  const getLiveDataForPrinter = (printerIntegerId: number | undefined): DashboardPrinterStatus | undefined => {
-    if (!printerIntegerId) return undefined;
-    return printerStatuses.get(printerIntegerId.toString());
+  const getLiveDataForPrinter = (printerIntegerId: number | undefined) => {
+    return printerIntegerId ? liveData?.find(data => data.printer_id === printerIntegerId.toString()) : undefined;
   };
 
   // Filter printers based on status
-  const filteredPrinters = statusFilter === 'all'
-    ? printers
+  const filteredPrinters = statusFilter === 'all' 
+    ? printers 
     : printers.filter(printer => {
         // Get live data for this printer to check current status
         const printerLiveData = getLiveDataForPrinter(printer.printerId);
-        const hasLiveData = !!printerLiveData;
-        const printerIsConnected = hasLiveData || (printer.connected ?? false);
+        const printerIsConnected = printerLiveData?.is_connected ?? (printer.connected ?? false);
         const printerJobStatus = printerLiveData ? printerLiveData.status : (printer.status === 'offline' ? 'idle' : printer.status);
         
         switch (statusFilter) {
@@ -800,29 +770,6 @@ const Printers = () => {
                     className="col-span-3"
                   />
                 </div>
-                <div className="grid grid-cols-4 items-center gap-4">
-                  <Label htmlFor="hub" className="text-right">
-                    Hub
-                  </Label>
-                  <Select
-                    value={newPrinter.hubId}
-                    onValueChange={(value) => setNewPrinter({ ...newPrinter, hubId: value })}
-                  >
-                    <SelectTrigger className="col-span-3">
-                      <SelectValue placeholder={hubsLoading ? "Loading hubs..." : "Select hub (optional)"} />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {hubs.map((hub) => (
-                        <SelectItem key={hub.id} value={hub.id}>
-                          <div className="flex items-center gap-2">
-                            <div className={`w-2 h-2 rounded-full ${hub.liveStatus?.is_online ? 'bg-green-500' : 'bg-red-500'}`} />
-                            {hub.name || hub.id}
-                          </div>
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
               </div>
               <DialogFooter>
                 <Button type="submit" onClick={handleAddPrinter}>
@@ -898,7 +845,6 @@ const Printers = () => {
                   key={printer.id}
                   printer={printer}
                   liveData={getLiveDataForPrinter(printer.printerId)}
-                  isWebSocketConnected={isWebSocketConnected}
                   onViewDetails={handleViewDetails}
                   onStartMaintenance={handleStartMaintenance}
                   onCompleteMaintenance={handleCompleteMaintenance}
@@ -928,7 +874,6 @@ const Printers = () => {
                       key={printer.id}
                       printer={printer}
                       liveData={getLiveDataForPrinter(printer.printerId)}
-                      isWebSocketConnected={isWebSocketConnected}
                       onViewDetails={handleViewDetails}
                       onStartMaintenance={handleStartMaintenance}
                       onStartCalibration={handleStartCalibration}
@@ -945,13 +890,9 @@ const Printers = () => {
             viewMode === 'grid' ? (
               <PrinterCard
                 printer={activePrinter}
-                isWebSocketConnected={isWebSocketConnected}
                 onViewDetails={handleViewDetails}
                 onStartMaintenance={handleStartMaintenance}
-                onCompleteMaintenance={handleCompleteMaintenance}
-                onStartCalibration={handleStartCalibration}
                 onEditFilament={handleEditFilament}
-                updatePrinter={updatePrinter}
                 isDragging={false}
               />
             ) : (
