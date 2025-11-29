@@ -142,6 +142,7 @@ export class HubConnection {
     const hubId = pathParts[pathParts.length - 1];
 
     if (!hubId) {
+      console.log(`[HubConnection] ❌ WebSocket upgrade rejected: missing hub ID`);
       return new Response("Hub ID required", { status: 400 });
     }
 
@@ -153,11 +154,13 @@ export class HubConnection {
       .first<{ id: string; tenant_id: string | null; secret_hash: string }>();
 
     if (!hub) {
+      console.log(`[HubConnection] ❌ WebSocket upgrade rejected: hub ${hubId} not found in database`);
       return new Response("Hub not found", { status: 404 });
     }
 
     // Hub must be claimed (have a tenant_id) to connect
     if (!hub.tenant_id) {
+      console.log(`[HubConnection] ❌ WebSocket upgrade rejected: hub ${hubId} not claimed by any tenant`);
       return new Response("Hub not claimed", { status: 403 });
     }
 
@@ -184,7 +187,7 @@ export class HubConnection {
     // Set alarm for authentication timeout
     await this.state.storage.setAlarm(Date.now() + AUTH_TIMEOUT_MS);
 
-    console.log(`[HubConnection] WebSocket upgrade for hub ${hubId}`);
+    console.log(`[HubConnection] ✅ WebSocket upgrade accepted for hub ${hubId} (tenant: ${hub.tenant_id})`);
 
     return new Response(null, {
       status: 101,
@@ -216,7 +219,7 @@ export class HubConnection {
       return;
     }
 
-    console.log(`[HubConnection] Received message: ${data.type}`);
+    console.log(`[HubConnection] 📨 Received message: ${data.type} from hub ${this.session?.hubId || 'unknown'}`);
 
     // Route to appropriate handler
     switch (data.type) {
@@ -245,7 +248,7 @@ export class HubConnection {
    * Called when WebSocket is closed (hibernation API)
    */
   async webSocketClose(_ws: WebSocket, code: number, reason: string, wasClean: boolean): Promise<void> {
-    console.log(`[HubConnection] WebSocket closed: code=${code}, reason=${reason}, clean=${wasClean}`);
+    console.log(`[HubConnection] 🔌 WebSocket closed for hub ${this.session?.hubId || 'unknown'}: code=${code}, reason=${reason || 'none'}, clean=${wasClean}`);
 
     await this.handleDisconnect();
   }
@@ -264,19 +267,18 @@ export class HubConnection {
    */
   async alarm(): Promise<void> {
     const hubId = await this.state.storage.get<string>("hubId");
-    console.log(`[HubConnection] Alarm triggered for hub ${hubId}`);
 
     // Check if we have an active WebSocket
     const websockets = this.state.getWebSockets();
     if (websockets.length === 0) {
-      console.log("[HubConnection] No active WebSockets, cleaning up");
+      console.log(`[HubConnection] 🧹 Hub ${hubId}: no active WebSockets, cleaning up`);
       await this.handleDisconnect();
       return;
     }
 
     // Check if authenticated
     if (this.session && !this.session.authenticated) {
-      console.log("[HubConnection] Auth timeout - hub did not authenticate");
+      console.log(`[HubConnection] ⏰ Hub ${hubId}: auth timeout - hub did not send hub_hello within ${AUTH_TIMEOUT_MS}ms`);
       for (const ws of websockets) {
         this.sendError(ws, "AUTH_TIMEOUT", "Authentication timeout");
         ws.close(4001, "Authentication timeout");
@@ -289,7 +291,7 @@ export class HubConnection {
     if (this.session) {
       const timeSinceLastMessage = Date.now() - this.session.lastMessageAt;
       if (timeSinceLastMessage > HEARTBEAT_TIMEOUT_MS) {
-        console.log(`[HubConnection] Heartbeat timeout for hub ${hubId}`);
+        console.log(`[HubConnection] 💔 Hub ${hubId}: heartbeat timeout (no activity for ${Math.round(timeSinceLastMessage / 1000)}s)`);
         for (const ws of websockets) {
           ws.close(4002, "Heartbeat timeout");
         }
@@ -298,7 +300,7 @@ export class HubConnection {
       }
     }
 
-    // Schedule next heartbeat check
+    // Schedule next heartbeat check (silently - this is normal operation)
     await this.state.storage.setAlarm(Date.now() + HEARTBEAT_INTERVAL_MS);
   }
 
@@ -333,7 +335,13 @@ export class HubConnection {
       if (message.mac_address) this.session.macAddress = message.mac_address;
     }
 
-    // Update hub in database
+    // Persist session data to storage (survives hibernation)
+    await this.state.storage.put("sessionAuthenticated", true);
+    await this.state.storage.put("sessionConnectedAt", this.session?.connectedAt || Date.now());
+    await this.state.storage.put("sessionFirmwareVersion", message.firmware_version || null);
+    await this.state.storage.put("sessionLastMessageAt", Date.now());
+
+    // Update hub in database and fetch the hub name
     const now = new Date().toISOString();
     await this.env.DB.prepare(
       `UPDATE hubs SET
@@ -355,11 +363,19 @@ export class HubConnection {
       )
       .run();
 
-    // Send welcome response
+    // Fetch the hub name from database to include in welcome message
+    const hub = await this.env.DB.prepare(
+      "SELECT name FROM hubs WHERE id = ?"
+    )
+      .bind(storedHubId)
+      .first<{ name: string | null }>();
+
+    // Send welcome response with hub name
     ws.send(
       JSON.stringify({
         type: "hub_welcome",
         hub_id: storedHubId,
+        hub_name: hub?.name || null,
         tenant_id: this.session?.tenantId,
         server_time: Date.now(),
       })
@@ -371,7 +387,7 @@ export class HubConnection {
     // Broadcast hub online status to dashboard
     await this.broadcastHubStatus(true);
 
-    console.log(`[HubConnection] Hub ${storedHubId} authenticated successfully`);
+    console.log(`[HubConnection] ✅ Hub ${storedHubId} authenticated successfully (firmware: ${message.firmware_version || 'unknown'})`);
   }
 
   /**
@@ -521,7 +537,10 @@ export class HubConnection {
 
     if (!hubId) return;
 
-    console.log(`[HubConnection] Hub ${hubId} disconnected`);
+    const sessionDuration = this.session?.connectedAt
+      ? Math.round((Date.now() - this.session.connectedAt) / 1000)
+      : 0;
+    console.log(`[HubConnection] 📴 Hub ${hubId} disconnected (session duration: ${sessionDuration}s)`);
 
     const now = new Date().toISOString();
 
@@ -546,8 +565,12 @@ export class HubConnection {
     }
     this.pendingCommands.clear();
 
-    // Clear session
+    // Clear session (both in-memory and storage)
     this.session = null;
+    await this.state.storage.delete("sessionAuthenticated");
+    await this.state.storage.delete("sessionConnectedAt");
+    await this.state.storage.delete("sessionLastMessageAt");
+    await this.state.storage.delete("sessionFirmwareVersion");
 
     // Broadcast hub offline status
     if (tenantId) {
@@ -596,6 +619,10 @@ export class HubConnection {
         { status: 503 }
       );
     }
+
+    // After hibernation wake-up, this.session may be null even though
+    // the session data is persisted in storage. Restore it if needed.
+    await this.ensureSessionRestored();
 
     if (!this.session?.authenticated) {
       return Response.json(
@@ -661,16 +688,27 @@ export class HubConnection {
     const tenantId = await this.state.storage.get<string>("tenantId");
     const websockets = this.state.getWebSockets();
 
+    // Read session data from storage (survives hibernation)
+    // In-memory this.session may be null after hibernation wake-up
+    const sessionAuthenticated = await this.state.storage.get<boolean>("sessionAuthenticated") || false;
+    const sessionConnectedAt = await this.state.storage.get<number>("sessionConnectedAt");
+    const sessionLastMessageAt = await this.state.storage.get<number>("sessionLastMessageAt");
+    const sessionFirmwareVersion = await this.state.storage.get<string | null>("sessionFirmwareVersion");
+
+    const isConnected = websockets.length > 0;
+    // Only consider authenticated if both connected AND was authenticated
+    const isAuthenticated = isConnected && sessionAuthenticated;
+
     return Response.json({
       success: true,
       data: {
         hub_id: hubId,
         tenant_id: tenantId,
-        connected: websockets.length > 0,
-        authenticated: this.session?.authenticated || false,
-        connected_at: this.session?.connectedAt,
-        last_message_at: this.session?.lastMessageAt,
-        firmware_version: this.session?.firmwareVersion,
+        connected: isConnected,
+        authenticated: isAuthenticated,
+        connected_at: sessionConnectedAt,
+        last_message_at: sessionLastMessageAt,
+        firmware_version: sessionFirmwareVersion,
         pending_commands: this.pendingCommands.size,
       },
     });
@@ -679,6 +717,47 @@ export class HubConnection {
   // ===========================================================================
   // HELPER METHODS
   // ===========================================================================
+
+  /**
+   * Restore session state from storage after hibernation wake-up.
+   *
+   * When a Durable Object hibernates, the in-memory this.session is lost.
+   * This method restores it from persistent storage if there's an active
+   * WebSocket connection with valid session data.
+   */
+  private async ensureSessionRestored(): Promise<void> {
+    // If session is already in memory, nothing to do
+    if (this.session) {
+      return;
+    }
+
+    // Check if we have persisted session data
+    const sessionAuthenticated = await this.state.storage.get<boolean>("sessionAuthenticated");
+    if (!sessionAuthenticated) {
+      return; // No valid session in storage
+    }
+
+    // Restore session from storage
+    const hubId = await this.state.storage.get<string>("hubId");
+    const tenantId = await this.state.storage.get<string>("tenantId");
+    const sessionConnectedAt = await this.state.storage.get<number>("sessionConnectedAt");
+    const sessionLastMessageAt = await this.state.storage.get<number>("sessionLastMessageAt");
+    const sessionFirmwareVersion = await this.state.storage.get<string | null>("sessionFirmwareVersion");
+
+    if (hubId && tenantId) {
+      this.session = {
+        hubId,
+        tenantId,
+        authenticated: true,
+        connectedAt: sessionConnectedAt || Date.now(),
+        lastMessageAt: sessionLastMessageAt || Date.now(),
+      };
+      if (sessionFirmwareVersion) {
+        this.session.firmwareVersion = sessionFirmwareVersion;
+      }
+      console.log(`[HubConnection] 🔄 Session restored from storage for hub ${hubId}`);
+    }
+  }
 
   /**
    * Send error message to WebSocket

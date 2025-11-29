@@ -1,196 +1,110 @@
 #include <Arduino.h>
 #include "config.h"
 #include "provisioning/CredentialStore.h"
-#include "provisioning/WiFiManager.h"
+#include "provisioning/HubConfigStore.h"
 #include "provisioning/BLEProvisioning.h"
-#include "provisioning/PrinterConfigStore.h"
-#include "PrinterManager.h"
-#include "tunnel/TunnelConfigStore.h"
-#include "tunnel/TunnelClient.h"
+#include "cloud/CloudClient.h"
 
-// Global instances
+// =============================================================================
+// Global Objects
+// =============================================================================
+
 CredentialStore credentialStore;
-WiFiManager wifiManager(credentialStore);
-BLEProvisioning bleProvisioning(wifiManager);
-PrinterConfigStore printerConfigStore;
-PrinterManager printerManager(printerConfigStore);
-TunnelConfigStore tunnelConfigStore;
-TunnelClient tunnelClient(tunnelConfigStore, printerManager);
+HubConfigStore hubConfigStore;
+BLEProvisioning bleProvisioning(credentialStore, hubConfigStore);
+CloudClient cloudClient(hubConfigStore);
 
-// State tracking
-bool wifiConnected = false;
-bool printersInitialized = false;
-bool tunnelInitialized = false;
+// Track if BLE was stopped after WiFi connect
+// NOTE: Currently always keeping BLE active until we add a physical button for pairing mode
+bool bleStoppedAfterConnect = false;
 
-void initializePrinters() {
-    if (printersInitialized) return;
-
-    DEBUG_PRINTLN("[Main] Initializing printer connections...");
-
-    // Load configured printers from NVS
-    printerManager.loadPrinters();
-
-    if (printerManager.getActiveCount() > 0) {
-        DEBUG_PRINTF("[Main] Found %d configured printer(s)\n", printerManager.getActiveCount());
-
-        // Connect to all configured printers
-        printerManager.connectAll();
-    } else {
-        DEBUG_PRINTLN("[Main] No printers configured yet.");
-        DEBUG_PRINTLN("[Main] Printers will be added via the cloud dashboard.");
-    }
-
-    printersInitialized = true;
-}
-
-void initializeTunnel() {
-    if (tunnelInitialized) return;
-
-    DEBUG_PRINTLN("[Main] Initializing cloud tunnel...");
-    DEBUG_PRINTF("[Main] Hub ID: %s\n", tunnelConfigStore.getHubId().c_str());
-    DEBUG_PRINTF("[Main] Cloud URL: %s\n", tunnelConfigStore.getCloudUrl().c_str());
-
-    // Connect to cloud
-    if (tunnelClient.connect()) {
-        DEBUG_PRINTLN("[Main] Cloud tunnel connection initiated");
-    } else {
-        DEBUG_PRINTLN("[Main] Cloud tunnel connection failed - will retry");
-    }
-
-    tunnelInitialized = true;
-}
-
-void onWiFiStateChange(WiFiState newState) {
-    switch (newState) {
-        case WiFiState::CONNECTED:
-            DEBUG_PRINTLN("[Main] WiFi connected!");
-            DEBUG_PRINTF("[Main] IP Address: %s\n", wifiManager.getIPAddress().c_str());
-            wifiConnected = true;
-
-            // Initialize printers now that WiFi is available
-            initializePrinters();
-
-            // Initialize cloud tunnel
-            initializeTunnel();
-            break;
-
-        case WiFiState::DISCONNECTED:
-            DEBUG_PRINTLN("[Main] WiFi disconnected");
-            wifiConnected = false;
-
-            // Disconnect tunnel when WiFi drops
-            tunnelClient.disconnect();
-            tunnelInitialized = false;
-
-            // Disconnect printers when WiFi drops
-            if (printersInitialized) {
-                printerManager.disconnectAll();
-            }
-            break;
-
-        case WiFiState::CONNECTING:
-            DEBUG_PRINTLN("[Main] WiFi connecting...");
-            break;
-
-        case WiFiState::FAILED:
-            DEBUG_PRINTLN("[Main] WiFi connection failed");
-            wifiConnected = false;
-            break;
-    }
-}
+// =============================================================================
+// Setup
+// =============================================================================
 
 void setup() {
     // Initialize serial
-    Serial.begin(SERIAL_BAUD_RATE);
-    delay(2000);  // Give time for USB CDC to connect
+    Serial.begin(115200);
+    delay(1000);  // Give serial time to initialize
 
     Serial.println();
-    Serial.println("========================================");
-    Serial.println("   AutoPrintFarm-Hub Starting...");
-    Serial.println("========================================");
+    Serial.println("================================================");
+    Serial.println("       AutoPrintFarm Hub - Starting Up");
+    Serial.println("================================================");
     Serial.println();
 
-    // Initialize NVS storage FIRST - critical for first boot after flash
-    // This ensures the NVS partition is properly initialized before any read/write
-    DEBUG_PRINTLN("[Main] Initializing NVS storage...");
+    // Initialize credential store (NVS)
+    Serial.println("[Main] Initializing credential store...");
     if (!credentialStore.begin()) {
-        DEBUG_PRINTLN("[Main] WARNING: CredentialStore NVS init failed!");
-    }
-    if (!printerConfigStore.begin()) {
-        DEBUG_PRINTLN("[Main] WARNING: PrinterConfigStore NVS init failed!");
-    }
-    if (!tunnelConfigStore.begin()) {
-        DEBUG_PRINTLN("[Main] WARNING: TunnelConfigStore NVS init failed!");
+        Serial.println("[Main] ERROR: Failed to initialize credential store!");
     }
 
-    // IMPORTANT: Start BLE FIRST before WiFi for proper coexistence
-    // NimBLE must initialize the Bluetooth controller before WiFi takes over the radio
-    DEBUG_PRINTLN("[Main] Starting BLE provisioning...");
-    bleProvisioning.begin(DEVICE_NAME);
+    // Initialize hub config store (NVS)
+    Serial.println("[Main] Initializing hub config store...");
+    if (!hubConfigStore.begin()) {
+        Serial.println("[Main] ERROR: Failed to initialize hub config store!");
+    }
 
-    // Give BLE time to fully initialize and start advertising
-    delay(500);
-    DEBUG_PRINTF("[Main] BLE running: %s\n", bleProvisioning.isRunning() ? "YES" : "NO");
+    // Initialize BLE provisioning
+    Serial.println("[Main] Starting BLE provisioning...");
+    bleProvisioning.begin(BLE_DEVICE_NAME);
 
-    // Initialize PrinterManager
-    printerManager.begin();
+    // Initialize cloud client
+    Serial.println("[Main] Initializing cloud client...");
+    cloudClient.begin();
 
-    // Initialize TunnelClient
-    tunnelClient.begin();
-
-    // Link BLE provisioning to PrinterManager for printer configuration via BLE
-    // Note: With cloud architecture, printers are primarily configured via cloud
-    bleProvisioning.setPrinterManager(&printerManager);
-
-    // Link BLE provisioning to TunnelConfigStore and TunnelClient for cloud configuration via BLE
-    bleProvisioning.setTunnelConfigStore(&tunnelConfigStore);
-    bleProvisioning.setTunnelClient(&tunnelClient);
-
-    // Initialize WiFi manager after BLE is running
-    wifiManager.begin();
-    wifiManager.setStateChangeCallback(onWiFiStateChange);
-
-    // Check for stored credentials and attempt connection
+    // Auto-connect to WiFi if credentials are stored
     if (credentialStore.hasCredentials()) {
-        DEBUG_PRINTF("[Main] Found stored credentials for: %s\n",
-                     credentialStore.getStoredSSID().c_str());
-        DEBUG_PRINTLN("[Main] Attempting WiFi connection...");
-
-        if (wifiManager.connectWithStoredCredentials()) {
-            DEBUG_PRINTLN("[Main] WiFi connected successfully!");
-        } else {
-            DEBUG_PRINTLN("[Main] WiFi connection failed. Use BLE to reconfigure.");
-        }
+        Serial.println("[Main] Found stored WiFi credentials, attempting auto-connect...");
+        bleProvisioning.autoConnect();
     } else {
-        DEBUG_PRINTLN("[Main] No stored WiFi credentials.");
-        DEBUG_PRINTLN("[Main] Use BLE to configure WiFi:");
-        DEBUG_PRINTF("[Main] - Device name: %s\n", DEVICE_NAME);
-        DEBUG_PRINTLN("[Main] - Connect via Web Bluetooth in Chrome/Edge");
+        Serial.println("[Main] No WiFi credentials stored. Use BLE provisioning to configure.");
     }
 
-    DEBUG_PRINTLN();
-    DEBUG_PRINTLN("[Main] Setup complete!");
-    DEBUG_PRINTLN("========================================");
-    DEBUG_PRINTLN();
+    Serial.println();
+    Serial.println("[Main] Setup complete!");
+    Serial.println("================================================");
+    Serial.println();
 }
 
-void loop() {
-    // Poll WiFi manager for state changes
-    wifiManager.poll();
+// =============================================================================
+// Main Loop
+// =============================================================================
 
-    // Poll BLE provisioning for incoming commands
+void loop() {
+    // Poll BLE provisioning (handles WiFi connection state machine)
     bleProvisioning.poll();
 
-    // Poll when WiFi is connected
-    if (wifiConnected) {
-        // Poll printer manager
-        if (printersInitialized) {
-            printerManager.poll();
-        }
+    // Handle cloud connection based on WiFi and hub config state
+    if (bleProvisioning.isWiFiConnected() && hubConfigStore.hasHubConfig()) {
+        // WiFi connected and hub configured - manage cloud connection
+        // NOTE: BLE stays active until we add a physical button for pairing mode
 
-        // Poll cloud tunnel
-        if (tunnelInitialized) {
-            tunnelClient.poll();
+        // Start cloud connection if offline (unless cloud was disabled via disconnect command)
+        if (cloudClient.getState() == CloudState::OFFLINE && !cloudClient.isCloudDisabled()) {
+            Serial.println("[Main] Starting cloud connection...");
+            cloudClient.connect();
+        }
+    }
+
+    // Always poll cloud client (handles state machine, reconnection, heartbeat)
+    cloudClient.poll();
+
+    // Print status periodically (every 10 seconds)
+    static unsigned long lastStatusPrint = 0;
+    if (millis() - lastStatusPrint > 10000) {
+        lastStatusPrint = millis();
+
+        if (bleProvisioning.isWiFiConnected()) {
+            Serial.printf("[Status] WiFi: Connected | SSID: %s | IP: %s | RSSI: %d dBm | Cloud: %s%s\n",
+                          bleProvisioning.getConnectedSSID().c_str(),
+                          bleProvisioning.getIPAddress().c_str(),
+                          bleProvisioning.getRSSI(),
+                          CloudClient::stateToString(cloudClient.getState()),
+                          cloudClient.isCloudDisabled() ? " (DISABLED)" : "");
+        } else {
+            Serial.printf("[Status] WiFi: Not connected | State: %d\n",
+                          static_cast<uint8_t>(bleProvisioning.getState()));
         }
     }
 

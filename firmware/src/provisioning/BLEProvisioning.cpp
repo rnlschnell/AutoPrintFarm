@@ -1,457 +1,420 @@
 #include "BLEProvisioning.h"
-#include "../PrinterManager.h"
-#include "../tunnel/TunnelConfigStore.h"
-#include "../tunnel/TunnelClient.h"
-#include "PrinterConfigStore.h"
-#include <ArduinoJson.h>
+#include "../config.h"
 
-// Static pointer for callbacks to access the instance
-static BLEProvisioning* _instance = nullptr;
-
-// Server callbacks for connect/disconnect events
-class BLEProvisioning::ServerCallbacks : public NimBLEServerCallbacks {
-    void onConnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo) override {
-        Serial.printf("[BLE] Client connected: %s\n", connInfo.getAddress().toString().c_str());
-    }
-
-    void onDisconnect(NimBLEServer* pServer, NimBLEConnInfo& connInfo, int reason) override {
-        Serial.printf("[BLE] Client disconnected, reason: %d\n", reason);
-        NimBLEDevice::startAdvertising();
-    }
-};
-
-// Credentials characteristic callback - receives JSON {"ssid":"...","password":"..."}
-class BLEProvisioning::CredentialsCallbacks : public NimBLECharacteristicCallbacks {
-    void onWrite(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo) override {
-        if (!_instance) return;
-
-        std::string value = pCharacteristic->getValue();
-        Serial.printf("[BLE] Credentials received: %d bytes\n", value.length());
-
-        // Parse JSON
-        JsonDocument doc;
-        DeserializationError error = deserializeJson(doc, value.c_str());
-
-        if (error) {
-            Serial.printf("[BLE] JSON parse error: %s\n", error.c_str());
-            _instance->updateStatus(STATUS_FAILED);
-            return;
-        }
-
-        // Check for clear command
-        if (doc["clear"] | false) {
-            Serial.println("[BLE] Clearing WiFi credentials");
-            _instance->_wifiManager.disconnect();
-            _instance->_wifiManager.clearStoredCredentials();
-            _instance->updateStatus(STATUS_IDLE);
-            return;
-        }
-
-        // Extract SSID and password
-        const char* ssid = doc["ssid"] | "";
-        const char* password = doc["password"] | "";
-
-        if (strlen(ssid) == 0) {
-            Serial.println("[BLE] Error: SSID is empty");
-            _instance->updateStatus(STATUS_FAILED);
-            return;
-        }
-
-        _instance->_pendingSSID = ssid;
-        _instance->_pendingPassword = password;
-        _instance->_connectRequested = true;
-
-        Serial.printf("[BLE] Will connect to: %s\n", ssid);
-    }
-};
-
-// Printer config characteristic callback
-// Accepts JSON:
-// - Add printer: {"action":"add","type":"bambu","name":"...","ip":"...","accessCode":"...","serial":"..."}
-// - Remove printer: {"action":"remove","slot":0}
-// - List printers: {"action":"list"}
-class BLEProvisioning::PrinterConfigCallbacks : public NimBLECharacteristicCallbacks {
-    void onWrite(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo) override {
-        if (!_instance) return;
-
-        std::string value = pCharacteristic->getValue();
-        Serial.printf("[BLE] Printer config received: %d bytes\n", value.length());
-
-        // Store the raw JSON for deferred processing
-        _instance->_pendingPrinterConfig = String(value.c_str());
-        _instance->_printerConfigRequested = true;
-    }
-};
-
-// Cloud config characteristic callback
-// Accepts JSON: {"tenant_id":"...","claim_token":"...","api_url":"..."}
-// This allows the mobile app to configure the hub's cloud connection
-class BLEProvisioning::CloudConfigCallbacks : public NimBLECharacteristicCallbacks {
-    void onWrite(NimBLECharacteristic* pCharacteristic, NimBLEConnInfo& connInfo) override {
-        if (!_instance) return;
-
-        std::string value = pCharacteristic->getValue();
-        Serial.printf("[BLE] Cloud config received: %d bytes\n", value.length());
-
-        // Store the raw JSON for deferred processing
-        _instance->_pendingCloudConfig = String(value.c_str());
-        _instance->_cloudConfigRequested = true;
-    }
-};
-
-BLEProvisioning::BLEProvisioning(WiFiManager& wifiManager)
-    : _wifiManager(wifiManager)
-    , _printerManager(nullptr)
-    , _tunnelConfigStore(nullptr)
-    , _tunnelClient(nullptr)
-    , _running(false)
+BLEProvisioning::BLEProvisioning(CredentialStore& credentialStore, HubConfigStore& hubConfigStore)
+    : _credentialStore(credentialStore)
+    , _hubConfigStore(hubConfigStore)
     , _pServer(nullptr)
     , _pService(nullptr)
-    , _pCredentialsChar(nullptr)
+    , _pSsidChar(nullptr)
+    , _pPasswordChar(nullptr)
+    , _pCommandChar(nullptr)
     , _pStatusChar(nullptr)
-    , _pPrinterConfigChar(nullptr)
-    , _pPrinterStatusChar(nullptr)
-    , _pCloudConfigChar(nullptr)
-    , _connectRequested(false)
-    , _printerConfigRequested(false)
-    , _cloudConfigRequested(false)
-{
-    _instance = this;
-}
-
-void BLEProvisioning::setPrinterManager(PrinterManager* printerManager) {
-    _printerManager = printerManager;
-}
-
-void BLEProvisioning::setTunnelConfigStore(TunnelConfigStore* tunnelConfigStore) {
-    _tunnelConfigStore = tunnelConfigStore;
-}
-
-void BLEProvisioning::setTunnelClient(TunnelClient* tunnelClient) {
-    _tunnelClient = tunnelClient;
+    , _pHubIdChar(nullptr)
+    , _pTenantIdChar(nullptr)
+    , _state(ProvisioningState::IDLE)
+    , _bleClientConnected(false)
+    , _bleInitialized(false)
+    , _wifiConnectStartTime(0)
+    , _wifiConnecting(false)
+    , _needsAdvertisingRestart(false)
+    , _disconnectTime(0) {
 }
 
 void BLEProvisioning::begin(const char* deviceName) {
-    Serial.printf("[BLE] Initializing with name: %s\n", deviceName);
+    Serial.printf("[BLE] Initializing as '%s'\n", deviceName);
+    setupBLE(deviceName);
+    startAdvertising();
 
-    // Initialize BLE
+    // Set initial state based on credentials
+    if (!_credentialStore.hasCredentials()) {
+        updateState(ProvisioningState::NO_CREDENTIALS);
+    }
+}
+
+void BLEProvisioning::stop() {
+    if (_bleInitialized) {
+        NimBLEDevice::deinit(true);
+        _bleInitialized = false;
+        Serial.println("[BLE] Stopped");
+    }
+}
+
+void BLEProvisioning::stopAdvertising() {
+    if (_bleInitialized) {
+        NimBLEAdvertising* pAdvertising = NimBLEDevice::getAdvertising();
+        if (pAdvertising->isAdvertising()) {
+            pAdvertising->stop();
+            Serial.println("[BLE] Advertising stopped");
+        }
+    }
+}
+
+void BLEProvisioning::restartAdvertising() {
+    if (_bleInitialized) {
+        startAdvertising();
+    }
+}
+
+void BLEProvisioning::setupBLE(const char* deviceName) {
+    // Initialize NimBLE
     NimBLEDevice::init(deviceName);
 
-    // Print BLE address for debugging
-    Serial.printf("[BLE] Address: %s\n", NimBLEDevice::getAddress().toString().c_str());
+    // Disable security/bonding - this prevents Windows from trying to pair
+    // and avoids issues with stale pairing state
+    NimBLEDevice::setSecurityAuth(false, false, false);  // no bonding, no MITM, no SC
+    NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
 
     // Set power level
     NimBLEDevice::setPower(ESP_PWR_LVL_P9);
 
     // Create server
     _pServer = NimBLEDevice::createServer();
-    _pServer->setCallbacks(new ServerCallbacks());
+    _pServer->setCallbacks(this);
 
-    // Create service
-    _pService = _pServer->createService(PROV_SERVICE_UUID);
+    // Create WiFi provisioning service
+    _pService = _pServer->createService(SERVICE_UUID_WIFI_PROV);
 
-    // Credentials characteristic - write only, receives JSON
-    _pCredentialsChar = _pService->createCharacteristic(
-        CREDENTIALS_CHAR_UUID,
+    // SSID characteristic - Read/Write
+    _pSsidChar = _pService->createCharacteristic(
+        CHAR_UUID_SSID,
+        NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE
+    );
+    _pSsidChar->setCallbacks(this);
+
+    // Password characteristic - Write only (security: can't read back)
+    _pPasswordChar = _pService->createCharacteristic(
+        CHAR_UUID_PASSWORD,
         NIMBLE_PROPERTY::WRITE
     );
-    _pCredentialsChar->setCallbacks(new CredentialsCallbacks());
+    _pPasswordChar->setCallbacks(this);
 
-    // Status characteristic - read and notify
+    // Command characteristic - Write only
+    _pCommandChar = _pService->createCharacteristic(
+        CHAR_UUID_COMMAND,
+        NIMBLE_PROPERTY::WRITE
+    );
+    _pCommandChar->setCallbacks(this);
+
+    // Status characteristic - Read/Notify
     _pStatusChar = _pService->createCharacteristic(
-        STATUS_CHAR_UUID,
+        CHAR_UUID_STATUS,
         NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY
     );
-    uint8_t initialStatus = _wifiManager.isConnected() ? STATUS_CONNECTED : STATUS_IDLE;
-    _pStatusChar->setValue(&initialStatus, 1);
+    _pStatusChar->setCallbacks(this);
 
-    // Printer config characteristic - write only, receives JSON
-    _pPrinterConfigChar = _pService->createCharacteristic(
-        PRINTER_CONFIG_CHAR_UUID,
-        NIMBLE_PROPERTY::WRITE
+    // Hub ID characteristic - Read/Write
+    _pHubIdChar = _pService->createCharacteristic(
+        CHAR_UUID_HUB_ID,
+        NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE
     );
-    _pPrinterConfigChar->setCallbacks(new PrinterConfigCallbacks());
+    _pHubIdChar->setCallbacks(this);
 
-    // Printer status characteristic - read and notify, returns JSON
-    _pPrinterStatusChar = _pService->createCharacteristic(
-        PRINTER_STATUS_CHAR_UUID,
-        NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY
+    // Tenant ID characteristic - Read/Write
+    _pTenantIdChar = _pService->createCharacteristic(
+        CHAR_UUID_TENANT_ID,
+        NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE
     );
-    _pPrinterStatusChar->setValue("{}");
+    _pTenantIdChar->setCallbacks(this);
 
-    // Cloud config characteristic - write only, receives JSON
-    // {"tenant_id":"...","claim_token":"...","api_url":"..."}
-    _pCloudConfigChar = _pService->createCharacteristic(
-        CLOUD_CONFIG_CHAR_UUID,
-        NIMBLE_PROPERTY::WRITE
-    );
-    _pCloudConfigChar->setCallbacks(new CloudConfigCallbacks());
+    // Initialize other characteristics with empty/default values
+    _pSsidChar->setValue("");
+    _pStatusChar->setValue((uint8_t)ProvisioningState::IDLE);
 
-    // Start service
+    // Load hub config from NVS and set characteristic values
+    String storedHubId = _hubConfigStore.getStoredHubId();
+    String storedTenantId = _hubConfigStore.getStoredTenantId();
+    Serial.printf("[BLE] Stored Hub ID from NVS: \"%s\" (length: %d)\n", storedHubId.c_str(), storedHubId.length());
+    Serial.printf("[BLE] Stored Tenant ID from NVS: \"%s\" (length: %d)\n", storedTenantId.c_str(), storedTenantId.length());
+
+    // Always set the characteristic value (even if empty) to avoid garbage
+    // Use std::string for proper NimBLE compatibility
+    _pHubIdChar->setValue(std::string(storedHubId.c_str()));
+    _pTenantIdChar->setValue(std::string(storedTenantId.c_str()));
+
+    if (storedHubId.length() > 0) {
+        Serial.printf("[BLE] Set Hub ID characteristic to: %s\n", storedHubId.c_str());
+    }
+    if (storedTenantId.length() > 0) {
+        Serial.printf("[BLE] Set Tenant ID characteristic to: %s\n", storedTenantId.c_str());
+    }
+
+    // Start the service FIRST
     _pService->start();
 
-    // Configure advertising - split data to fit in 31-byte limit
+    // Configure advertising
+    NimBLEAdvertising* pAdvertising = NimBLEDevice::getAdvertising();
+    pAdvertising->addServiceUUID(SERVICE_UUID_WIFI_PROV);
+    pAdvertising->setScanResponse(true);  // Enable scan response to fit full device name
+
+    _bleInitialized = true;
+    Serial.println("[BLE] Service started");
+}
+
+void BLEProvisioning::startAdvertising() {
     NimBLEAdvertising* pAdvertising = NimBLEDevice::getAdvertising();
 
-    NimBLEAdvertisementData advData;
-    advData.setFlags(BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP);
-    advData.setCompleteServices(NimBLEUUID(PROV_SERVICE_UUID));
-    pAdvertising->setAdvertisementData(advData);
-
-    NimBLEAdvertisementData scanData;
-    scanData.setName(deviceName);
-    pAdvertising->setScanResponseData(scanData);
-
-    // Start advertising
-    bool started = pAdvertising->start();
-    _running = true;
-
-    Serial.printf("[BLE] Advertising: %s\n", started ? "OK" : "FAILED");
-}
-
-void BLEProvisioning::stop() {
-    if (_running) {
-        NimBLEDevice::stopAdvertising();
-        NimBLEDevice::deinit(true);
-        _running = false;
-        Serial.println("[BLE] Stopped");
-    }
-}
-
-bool BLEProvisioning::isClientConnected() const {
-    return _pServer != nullptr && _pServer->getConnectedCount() > 0;
-}
-
-void BLEProvisioning::updateStatus(uint8_t status) {
-    if (_pStatusChar) {
-        _pStatusChar->setValue(&status, 1);
-        _pStatusChar->notify();
-        Serial.printf("[BLE] Status: 0x%02X\n", status);
-    }
-}
-
-void BLEProvisioning::updatePrinterStatus() {
-    if (!_pPrinterStatusChar || !_printerManager) return;
-
-    // Build JSON response with all printer statuses
-    JsonDocument doc;
-    JsonArray printers = doc["printers"].to<JsonArray>();
-
-    for (uint8_t i = 0; i < MAX_PRINTERS; i++) {
-        PrinterStatus status;
-        if (_printerManager->getPrinterStatus(i, status)) {
-            JsonObject printer = printers.add<JsonObject>();
-            printer["slot"] = i;
-            printer["name"] = _printerManager->getPrinter(i)->getPrinterName();
-            printer["type"] = status.printerType;
-            printer["connected"] = status.connected;
-            printer["state"] = PrinterStatus::stateToString(status.state);
-            printer["nozzleTemp"] = status.nozzleTemp;
-            printer["nozzleTarget"] = status.nozzleTarget;
-            printer["bedTemp"] = status.bedTemp;
-            printer["bedTarget"] = status.bedTarget;
-        }
+    // Always stop first to avoid "already advertising" issues
+    if (pAdvertising->isAdvertising()) {
+        pAdvertising->stop();
+        delay(50);
     }
 
-    String jsonStr;
-    serializeJson(doc, jsonStr);
-
-    _pPrinterStatusChar->setValue(jsonStr.c_str());
-    _pPrinterStatusChar->notify();
-}
-
-void BLEProvisioning::performConnect() {
-    if (_pendingSSID.length() == 0) {
-        Serial.println("[BLE] No SSID to connect to");
-        updateStatus(STATUS_FAILED);
-        return;
-    }
-
-    updateStatus(STATUS_CONNECTING);
-
-    bool success = _wifiManager.connect(_pendingSSID, _pendingPassword, true);
-
-    if (success) {
-        updateStatus(STATUS_CONNECTED);
-        Serial.printf("[BLE] Connected! IP: %s\n", _wifiManager.getIPAddress().c_str());
-    } else {
-        updateStatus(STATUS_FAILED);
-    }
-
-    // Clear password from memory
-    _pendingPassword = "";
-}
-
-void BLEProvisioning::processPrinterConfig() {
-    if (!_printerManager) {
-        Serial.println("[BLE] PrinterManager not set, cannot process printer config");
-        return;
-    }
-
-    // Parse JSON
-    JsonDocument doc;
-    DeserializationError error = deserializeJson(doc, _pendingPrinterConfig);
-
-    if (error) {
-        Serial.printf("[BLE] Printer config JSON parse error: %s\n", error.c_str());
-        return;
-    }
-
-    const char* action = doc["action"] | "";
-
-    if (strcmp(action, "add") == 0) {
-        // Add a new printer
-        PrinterConfig config;
-        config.type = doc["type"] | "bambu";
-        config.name = doc["name"] | "Printer";
-        config.ip = doc["ip"] | "";
-        config.accessCode = doc["accessCode"] | "";
-        config.serial = doc["serial"] | "";
-        config.port = doc["port"] | 0;
-        config.apiKey = doc["apiKey"] | "";
-
-        if (config.ip.length() == 0) {
-            Serial.println("[BLE] Printer IP is required");
-            return;
-        }
-
-        // For Bambu, validate required fields
-        if (config.type == "bambu") {
-            if (config.accessCode.length() == 0 || config.serial.length() == 0) {
-                Serial.println("[BLE] Bambu printer requires accessCode and serial");
-                return;
-            }
-        }
-
-        int8_t slot = _printerManager->addPrinter(config);
-        if (slot >= 0) {
-            Serial.printf("[BLE] Printer added to slot %d\n", slot);
-            updatePrinterStatus();
-        } else {
-            Serial.println("[BLE] Failed to add printer");
-        }
-
-    } else if (strcmp(action, "remove") == 0) {
-        // Remove a printer
-        uint8_t slot = doc["slot"] | 0;
-        _printerManager->removePrinter(slot);
-        Serial.printf("[BLE] Printer removed from slot %d\n", slot);
-        updatePrinterStatus();
-
-    } else if (strcmp(action, "list") == 0) {
-        // Just update and notify the status
-        updatePrinterStatus();
-        Serial.println("[BLE] Printer list requested");
-
-    } else if (strcmp(action, "light") == 0) {
-        // Control printer light
-        uint8_t slot = doc["slot"] | 0;
-        bool on = doc["on"] | true;
-
-        PrinterClient* printer = _printerManager->getPrinter(slot);
-        if (printer && printer->isConnected()) {
-            if (printer->setLight(on)) {
-                Serial.printf("[BLE] Light %s for printer in slot %d\n", on ? "ON" : "OFF", slot);
-            } else {
-                Serial.printf("[BLE] Failed to set light for slot %d\n", slot);
-            }
-        } else {
-            Serial.printf("[BLE] Printer in slot %d not connected\n", slot);
-        }
-
-    } else {
-        Serial.printf("[BLE] Unknown printer config action: %s\n", action);
-    }
-
-    // Clear the pending config
-    _pendingPrinterConfig = "";
+    pAdvertising->start();
+    Serial.println("[BLE] Advertising started");
 }
 
 void BLEProvisioning::poll() {
-    // Process WiFi connect request (deferred from callback)
-    if (_connectRequested) {
-        _connectRequested = false;
-        performConnect();
+    // Handle BLE advertising restart (deferred from onDisconnect callback)
+    if (_needsAdvertisingRestart && (millis() - _disconnectTime > 200)) {
+        _needsAdvertisingRestart = false;
+        Serial.println("[BLE] Restarting advertising after disconnect");
+        startAdvertising();
     }
 
-    // Process printer config request (deferred from callback)
-    if (_printerConfigRequested) {
-        _printerConfigRequested = false;
-        processPrinterConfig();
-    }
+    // Handle WiFi connection state machine
+    if (_wifiConnecting) {
+        wl_status_t status = WiFi.status();
 
-    // Process cloud config request (deferred from callback)
-    if (_cloudConfigRequested) {
-        _cloudConfigRequested = false;
-        processCloudConfig();
-    }
-
-    // Sync status with WiFi state
-    static bool lastConnected = false;
-    bool nowConnected = _wifiManager.isConnected();
-
-    if (nowConnected != lastConnected) {
-        updateStatus(nowConnected ? STATUS_CONNECTED : STATUS_IDLE);
-        lastConnected = nowConnected;
-    }
-
-    // Periodically update printer status if client is connected
-    static unsigned long lastPrinterStatusUpdate = 0;
-    if (isClientConnected() && _printerManager) {
-        unsigned long now = millis();
-        if (now - lastPrinterStatusUpdate > 5000) {  // Every 5 seconds
-            lastPrinterStatusUpdate = now;
-            updatePrinterStatus();
+        if (status == WL_CONNECTED) {
+            // Success!
+            _wifiConnecting = false;
+            Serial.printf("[WiFi] Connected! IP: %s\n", WiFi.localIP().toString().c_str());
+            updateState(ProvisioningState::CONNECTED);
         }
+        else if (status == WL_CONNECT_FAILED ||
+                 status == WL_NO_SSID_AVAIL ||
+                 (millis() - _wifiConnectStartTime > WIFI_CONNECT_TIMEOUT_MS)) {
+            // Failed or timeout
+            _wifiConnecting = false;
+            WiFi.disconnect();
+            Serial.println("[WiFi] Connection failed");
+            updateState(ProvisioningState::FAILED);
+        }
+    }
+
+    // Check if WiFi was disconnected externally
+    if (_state == ProvisioningState::CONNECTED && WiFi.status() != WL_CONNECTED) {
+        Serial.println("[WiFi] Connection lost");
+        updateState(ProvisioningState::DISCONNECTED);
     }
 }
 
-void BLEProvisioning::processCloudConfig() {
-    if (!_tunnelConfigStore) {
-        Serial.println("[BLE] TunnelConfigStore not set, cannot process cloud config");
+void BLEProvisioning::autoConnect() {
+    if (!_credentialStore.hasCredentials()) {
+        Serial.println("[WiFi] No stored credentials for auto-connect");
         return;
     }
 
-    // Parse JSON
-    JsonDocument doc;
-    DeserializationError error = deserializeJson(doc, _pendingCloudConfig);
+    String ssid, password;
+    if (_credentialStore.loadCredentials(ssid, password)) {
+        Serial.printf("[WiFi] Auto-connecting to: %s\n", ssid.c_str());
+        _pendingSsid = ssid;
+        _pendingPassword = password;
+        connectToWiFi();
+    }
+}
 
-    if (error) {
-        Serial.printf("[BLE] Cloud config JSON parse error: %s\n", error.c_str());
+void BLEProvisioning::connectToWiFi() {
+    if (_pendingSsid.length() == 0) {
+        Serial.println("[WiFi] No SSID to connect to");
+        updateState(ProvisioningState::NO_CREDENTIALS);
         return;
     }
 
-    const char* tenantId = doc["tenant_id"] | "";
-    const char* claimToken = doc["claim_token"] | "";
-    const char* apiUrl = doc["api_url"] | "";
-
-    Serial.printf("[BLE] Cloud config - tenant: %s, api_url: %s\n", tenantId, apiUrl);
-
-    if (strlen(tenantId) == 0 || strlen(apiUrl) == 0) {
-        Serial.println("[BLE] Error: tenant_id and api_url are required");
-        return;
+    // Save credentials if they're new
+    String storedSsid = _credentialStore.getStoredSSID();
+    if (storedSsid != _pendingSsid || !_credentialStore.hasCredentials()) {
+        _credentialStore.saveCredentials(_pendingSsid, _pendingPassword);
     }
 
-    // Save the cloud configuration
-    bool success = _tunnelConfigStore->setCloudConfig(
-        String(tenantId),
-        String(claimToken),
-        String(apiUrl)
-    );
+    // Disconnect if already connected
+    if (WiFi.status() == WL_CONNECTED) {
+        WiFi.disconnect();
+        delay(100);
+    }
 
-    if (success) {
-        Serial.println("[BLE] Cloud config saved successfully");
+    // Start connection
+    Serial.printf("[WiFi] Connecting to: %s\n", _pendingSsid.c_str());
+    updateState(ProvisioningState::CONNECTING);
 
-        // If we have a tunnel client and WiFi is connected, trigger reconnect
-        if (_tunnelClient && _wifiManager.isConnected()) {
-            Serial.println("[BLE] Triggering tunnel reconnect with new config...");
-            _tunnelClient->disconnect();
-            // The main loop will handle reconnection
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(_pendingSsid.c_str(), _pendingPassword.c_str());
+
+    _wifiConnectStartTime = millis();
+    _wifiConnecting = true;
+}
+
+void BLEProvisioning::disconnectWiFi() {
+    Serial.println("[WiFi] Disconnecting");
+    WiFi.disconnect();
+    _wifiConnecting = false;
+    updateState(ProvisioningState::DISCONNECTED);
+}
+
+void BLEProvisioning::handleCommand(uint8_t cmd) {
+    Serial.printf("[BLE] Command received: 0x%02X\n", cmd);
+
+    switch (cmd) {
+        case CMD_CONNECT:
+            // Save hub config if provided (before connecting to WiFi)
+            Serial.printf("[BLE] CMD_CONNECT - Pending Hub ID: \"%s\" (len: %d)\n", _pendingHubId.c_str(), _pendingHubId.length());
+            Serial.printf("[BLE] CMD_CONNECT - Pending Tenant ID: \"%s\" (len: %d)\n", _pendingTenantId.c_str(), _pendingTenantId.length());
+            if (_pendingHubId.length() > 0 && _pendingTenantId.length() > 0) {
+                if (_hubConfigStore.saveHubConfig(_pendingHubId, _pendingTenantId)) {
+                    Serial.printf("[BLE] Hub config saved to NVS - Hub ID: %s\n", _pendingHubId.c_str());
+                    // Update characteristic values
+                    _pHubIdChar->setValue(_pendingHubId.c_str());
+                    _pTenantIdChar->setValue(_pendingTenantId.c_str());
+                } else {
+                    Serial.println("[BLE] ERROR: Failed to save hub config to NVS!");
+                }
+                _pendingHubId = "";
+                _pendingTenantId = "";
+            } else {
+                Serial.println("[BLE] No pending hub config to save");
+            }
+
+            // Use pending credentials if set, otherwise try stored
+            if (_pendingSsid.length() == 0) {
+                String ssid, password;
+                if (_credentialStore.loadCredentials(ssid, password)) {
+                    _pendingSsid = ssid;
+                    _pendingPassword = password;
+                }
+            }
+            connectToWiFi();
+            break;
+
+        case CMD_DISCONNECT:
+            disconnectWiFi();
+            break;
+
+        case CMD_CLEAR:
+            _credentialStore.clearCredentials();
+            _pendingSsid = "";
+            _pendingPassword = "";
+            disconnectWiFi();
+            updateState(ProvisioningState::NO_CREDENTIALS);
+            break;
+
+        default:
+            Serial.printf("[BLE] Unknown command: 0x%02X\n", cmd);
+            break;
+    }
+}
+
+void BLEProvisioning::updateState(ProvisioningState newState) {
+    if (_state != newState) {
+        _state = newState;
+        Serial.printf("[BLE] State changed to: %d\n", static_cast<uint8_t>(_state));
+        notifyStatus();
+    }
+}
+
+void BLEProvisioning::notifyStatus() {
+    if (_pStatusChar && _bleClientConnected) {
+        uint8_t status = static_cast<uint8_t>(_state);
+        _pStatusChar->setValue(&status, 1);
+        _pStatusChar->notify();
+        Serial.printf("[BLE] Status notified: %d\n", status);
+    }
+}
+
+bool BLEProvisioning::isWiFiConnected() const {
+    return WiFi.status() == WL_CONNECTED;
+}
+
+String BLEProvisioning::getConnectedSSID() const {
+    if (isWiFiConnected()) {
+        return WiFi.SSID();
+    }
+    return "";
+}
+
+String BLEProvisioning::getIPAddress() const {
+    if (isWiFiConnected()) {
+        return WiFi.localIP().toString();
+    }
+    return "";
+}
+
+int BLEProvisioning::getRSSI() const {
+    if (isWiFiConnected()) {
+        return WiFi.RSSI();
+    }
+    return 0;
+}
+
+// =============================================================================
+// NimBLE Callbacks (NimBLE 1.4.x signatures)
+// =============================================================================
+
+void BLEProvisioning::onConnect(NimBLEServer* pServer) {
+    _bleClientConnected = true;
+    Serial.println("[BLE] Client connected");
+    Serial.printf("[BLE] Connected clients: %d\n", pServer->getConnectedCount());
+}
+
+void BLEProvisioning::onDisconnect(NimBLEServer* pServer) {
+    _bleClientConnected = false;
+    Serial.println("[BLE] Client disconnected");
+
+    // Set flag to restart advertising from main loop
+    // (avoid calling BLE functions from callback context)
+    _needsAdvertisingRestart = true;
+    _disconnectTime = millis();
+}
+
+void BLEProvisioning::onWrite(NimBLECharacteristic* pCharacteristic) {
+    std::string uuid = pCharacteristic->getUUID().toString();
+    std::string value = pCharacteristic->getValue();
+
+    if (uuid == CHAR_UUID_SSID) {
+        _pendingSsid = String(value.c_str());
+        Serial.printf("[BLE] SSID received: %s\n", _pendingSsid.c_str());
+    }
+    else if (uuid == CHAR_UUID_PASSWORD) {
+        _pendingPassword = String(value.c_str());
+        Serial.println("[BLE] Password received: ****");
+    }
+    else if (uuid == CHAR_UUID_COMMAND) {
+        if (value.length() > 0) {
+            handleCommand(value[0]);
         }
-    } else {
-        Serial.println("[BLE] Failed to save cloud config");
     }
+    else if (uuid == CHAR_UUID_HUB_ID) {
+        _pendingHubId = String(value.c_str());
+        Serial.printf("[BLE] Hub ID received: %s\n", _pendingHubId.c_str());
+    }
+    else if (uuid == CHAR_UUID_TENANT_ID) {
+        _pendingTenantId = String(value.c_str());
+        Serial.printf("[BLE] Tenant ID received: %s\n", _pendingTenantId.c_str());
+    }
+}
 
-    // Clear the pending config
-    _pendingCloudConfig = "";
+void BLEProvisioning::onRead(NimBLECharacteristic* pCharacteristic) {
+    std::string uuid = pCharacteristic->getUUID().toString();
+
+    if (uuid == CHAR_UUID_SSID) {
+        // Return stored SSID or pending SSID
+        String ssid = _pendingSsid.length() > 0 ? _pendingSsid : _credentialStore.getStoredSSID();
+        pCharacteristic->setValue(std::string(ssid.c_str()));
+    }
+    else if (uuid == CHAR_UUID_STATUS) {
+        uint8_t status = static_cast<uint8_t>(_state);
+        pCharacteristic->setValue(&status, 1);
+    }
+    else if (uuid == CHAR_UUID_HUB_ID) {
+        // Return stored Hub ID
+        String hubId = _hubConfigStore.getStoredHubId();
+        Serial.printf("[BLE] onRead Hub ID: \"%s\" (len: %d)\n", hubId.c_str(), hubId.length());
+        pCharacteristic->setValue(std::string(hubId.c_str()));
+    }
+    else if (uuid == CHAR_UUID_TENANT_ID) {
+        // Return stored Tenant ID
+        String tenantId = _hubConfigStore.getStoredTenantId();
+        Serial.printf("[BLE] onRead Tenant ID: \"%s\" (len: %d)\n", tenantId.c_str(), tenantId.length());
+        pCharacteristic->setValue(std::string(tenantId.c_str()));
+    }
 }

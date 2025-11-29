@@ -8,9 +8,10 @@ interface SimpleProtectedRouteProps {
 }
 
 const SimpleProtectedRoute = ({ children }: SimpleProtectedRouteProps) => {
-  const { user, loading } = useAuth();
+  const { user, loading, isInitialized } = useAuth();
 
-  if (loading) {
+  // Show loading while auth is being checked OR while tenant context is initializing
+  if (loading || (user && !isInitialized)) {
     return (
       <div className="min-h-screen flex items-center justify-center">
         <div className="flex items-center gap-2">

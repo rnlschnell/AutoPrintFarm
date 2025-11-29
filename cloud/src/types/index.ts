@@ -1140,7 +1140,9 @@ export type CloudToHubMessage =
   | ConfigurePrinterMessage
   | PrintCommandMessage
   | PrinterCommandMessage
-  | DiscoverPrintersMessage;
+  | DiscoverPrintersMessage
+  | HubCommandMessage
+  | HubConfigMessage;
 
 export interface ConfigurePrinterMessage {
   type: "configure_printer";
@@ -1175,6 +1177,20 @@ export interface PrinterCommandMessage {
 export interface DiscoverPrintersMessage {
   type: "discover_printers";
   command_id: string;
+}
+
+export interface HubCommandMessage {
+  type: "hub_command";
+  command_id: string;
+  action: "disconnect" | "gpio_set";
+  gpio_pin?: number;      // For gpio_set
+  gpio_state?: boolean;   // For gpio_set: true = HIGH, false = LOW
+}
+
+export interface HubConfigMessage {
+  type: "hub_config";
+  command_id: string;
+  hub_name?: string | undefined;
 }
 
 /** Dashboard WebSocket messages */

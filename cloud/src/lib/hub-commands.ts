@@ -11,6 +11,8 @@ import type {
   PrintCommandMessage,
   PrinterCommandMessage,
   DiscoverPrintersMessage,
+  HubCommandMessage,
+  HubConfigMessage,
   PrinterConnectionType,
 } from "../types";
 import { generateId } from "./crypto";
@@ -57,7 +59,7 @@ export interface PrinterConfig {
 export async function sendHubCommand(
   env: Env,
   hubId: string,
-  command: ConfigurePrinterMessage | PrintCommandMessage | PrinterCommandMessage | DiscoverPrintersMessage,
+  command: ConfigurePrinterMessage | PrintCommandMessage | PrinterCommandMessage | DiscoverPrintersMessage | HubCommandMessage | HubConfigMessage,
   options: { waitForAck?: boolean; timeout?: number } = {}
 ): Promise<CommandResponse> {
   // Get the Durable Object stub
@@ -205,6 +207,41 @@ export function buildDiscoverPrintersCommand(): DiscoverPrintersMessage {
   };
 }
 
+/**
+ * Build a hub_command to disconnect the hub from cloud
+ */
+export function buildHubDisconnectCommand(): HubCommandMessage {
+  return {
+    type: "hub_command",
+    command_id: generateId(),
+    action: "disconnect",
+  };
+}
+
+/**
+ * Build a hub_command to set GPIO pin state
+ */
+export function buildGpioSetCommand(pin: number, state: boolean): HubCommandMessage {
+  return {
+    type: "hub_command",
+    command_id: generateId(),
+    action: "gpio_set",
+    gpio_pin: pin,
+    gpio_state: state,
+  };
+}
+
+/**
+ * Build a hub_config message to update hub configuration
+ */
+export function buildHubConfigCommand(config: { hub_name?: string }): HubConfigMessage {
+  return {
+    type: "hub_config",
+    command_id: generateId(),
+    hub_name: config.hub_name,
+  };
+}
+
 // =============================================================================
 // HIGH-LEVEL OPERATIONS
 // =============================================================================
@@ -288,4 +325,40 @@ export async function isHubOnline(env: Env, hubId: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * Disconnect a hub from cloud (hub will need restart to reconnect)
+ */
+export async function disconnectHub(
+  env: Env,
+  hubId: string
+): Promise<CommandResponse> {
+  const command = buildHubDisconnectCommand();
+  return sendHubCommand(env, hubId, command, { waitForAck: true, timeout: 5000 });
+}
+
+/**
+ * Set GPIO pin state on a hub
+ */
+export async function setHubGpio(
+  env: Env,
+  hubId: string,
+  pin: number,
+  state: boolean
+): Promise<CommandResponse> {
+  const command = buildGpioSetCommand(pin, state);
+  return sendHubCommand(env, hubId, command, { waitForAck: true, timeout: 5000 });
+}
+
+/**
+ * Update hub configuration (name, etc.)
+ */
+export async function updateHubConfig(
+  env: Env,
+  hubId: string,
+  config: { hub_name?: string }
+): Promise<CommandResponse> {
+  const command = buildHubConfigCommand(config);
+  return sendHubCommand(env, hubId, command, { waitForAck: true, timeout: 5000 });
 }

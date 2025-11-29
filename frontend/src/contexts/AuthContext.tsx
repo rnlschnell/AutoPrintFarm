@@ -268,6 +268,9 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
 
   /**
    * Get initial session on mount
+   * Note: We intentionally use an empty dependency array here.
+   * This effect should only run once on mount to check for existing session.
+   * Sign-in and sign-up handle their own initialization.
    */
   useEffect(() => {
     const getInitialSession = async () => {
@@ -284,7 +287,8 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     };
 
     getInitialSession();
-  }, [initializeAuth]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   /**
    * Sign in with email and password

@@ -3,51 +3,60 @@
 
 #include <Arduino.h>
 #include <Preferences.h>
-#include <nvs_flash.h>
 
-// Retry configuration for NVS operations
-#define CRED_NVS_RETRY_COUNT 3
-#define CRED_NVS_RETRY_DELAY_MS 100
-
+/**
+ * CredentialStore - NVS-based storage for WiFi credentials
+ *
+ * Stores SSID and password securely in ESP32's non-volatile storage.
+ * Credentials persist across reboots and power cycles.
+ */
 class CredentialStore {
 public:
     CredentialStore();
 
-    // Initialize NVS storage. Should be called early in setup().
-    // Note: If PrinterConfigStore::begin() is called first, this will reuse that initialization.
+    /**
+     * Initialize the credential store
+     * Must be called before any other methods
+     * @return true if initialization successful
+     */
     bool begin();
 
-    // Check if NVS has been successfully initialized
-    bool isInitialized() const { return _initialized; }
-
-    // Save WiFi credentials to NVS (with retry logic)
+    /**
+     * Save WiFi credentials to NVS
+     * @param ssid WiFi network name (max 32 chars)
+     * @param password WiFi password (max 64 chars)
+     * @return true if saved successfully
+     */
     bool saveCredentials(const String& ssid, const String& password);
 
-    // Load WiFi credentials from NVS
+    /**
+     * Load stored credentials from NVS
+     * @param ssid Output: stored SSID
+     * @param password Output: stored password
+     * @return true if credentials exist and were loaded
+     */
     bool loadCredentials(String& ssid, String& password);
 
-    // Check if credentials exist
+    /**
+     * Check if valid credentials are stored
+     * @return true if credentials exist
+     */
     bool hasCredentials();
 
-    // Clear stored credentials
+    /**
+     * Clear all stored credentials
+     */
     void clearCredentials();
 
-    // Get the stored SSID (without password)
+    /**
+     * Get the stored SSID (for display purposes)
+     * @return stored SSID or empty string if none
+     */
     String getStoredSSID();
 
 private:
     Preferences _preferences;
-    bool _initialized = false;
-    static const char* NAMESPACE;
-    static const char* KEY_SSID;
-    static const char* KEY_PASSWORD;
-    static const char* KEY_CONFIGURED;
-
-    // Internal save with retry logic
-    bool saveCredentialsWithRetry(const String& ssid, const String& password);
-
-    // Log NVS error codes for debugging
-    void logNvsError(esp_err_t err, const char* operation);
+    bool _initialized;
 };
 
 #endif // CREDENTIAL_STORE_H

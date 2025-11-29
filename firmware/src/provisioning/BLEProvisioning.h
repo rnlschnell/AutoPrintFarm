@@ -3,111 +3,148 @@
 
 #include <Arduino.h>
 #include <NimBLEDevice.h>
-#include "WiFiManager.h"
+#include <WiFi.h>
+#include "CredentialStore.h"
+#include "HubConfigStore.h"
 
-// Forward declarations
-class PrinterManager;
-class TunnelConfigStore;
-class TunnelClient;
+/**
+ * WiFi provisioning states
+ */
+enum class ProvisioningState : uint8_t {
+    IDLE           = 0x00,  // Not connected, no operation in progress
+    CONNECTING     = 0x01,  // WiFi connection in progress
+    CONNECTED      = 0x02,  // Successfully connected to WiFi
+    FAILED         = 0x03,  // Connection failed
+    DISCONNECTED   = 0x04,  // Explicitly disconnected
+    NO_CREDENTIALS = 0x05   // No SSID/password stored
+};
 
-// BLE UUIDs for WiFi provisioning service
-#define PROV_SERVICE_UUID        "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
-#define CREDENTIALS_CHAR_UUID    "beb5483e-36e1-4688-b7f5-ea07361b26a8"  // Write JSON {"ssid":"...","password":"..."}
-#define STATUS_CHAR_UUID         "beb5483e-36e1-4688-b7f5-ea07361b26ab"  // Read/Notify status
-
-// Printer configuration characteristic UUIDs
-#define PRINTER_CONFIG_CHAR_UUID "beb5483e-36e1-4688-b7f5-ea07361b26ac"  // Write printer config JSON
-#define PRINTER_STATUS_CHAR_UUID "beb5483e-36e1-4688-b7f5-ea07361b26ad"  // Read/Notify printer status JSON
-
-// Cloud configuration characteristic UUID - receives tenant/claim config from app
-// Write JSON {"tenant_id":"...","claim_token":"...","api_url":"..."}
-#define CLOUD_CONFIG_CHAR_UUID   "beb5483e-36e1-4688-b7f5-ea07361b26ae"
-
-// Status codes
-#define STATUS_IDLE         0x00
-#define STATUS_CONNECTING   0x02
-#define STATUS_CONNECTED    0x03
-#define STATUS_FAILED       0x04
-
-// Special credential values
-#define CREDENTIALS_CLEAR   "{\"clear\":true}"
-
-class BLEProvisioning {
+/**
+ * BLEProvisioning - BLE-based WiFi provisioning service
+ *
+ * Exposes a BLE GATT service that allows a web browser (via Web Bluetooth)
+ * to configure WiFi credentials on the ESP32.
+ */
+class BLEProvisioning : public NimBLEServerCallbacks,
+                        public NimBLECharacteristicCallbacks {
 public:
-    BLEProvisioning(WiFiManager& wifiManager);
+    /**
+     * Constructor
+     * @param credentialStore Reference to credential storage
+     * @param hubConfigStore Reference to hub config storage
+     */
+    BLEProvisioning(CredentialStore& credentialStore, HubConfigStore& hubConfigStore);
 
-    // Initialize BLE and start advertising
-    void begin(const char* deviceName = "AutoPrintFarm-Hub");
+    /**
+     * Initialize BLE and start advertising
+     * @param deviceName Name shown in BLE scan (default: "AutoPrintFarm Hub")
+     */
+    void begin(const char* deviceName = "AutoPrintFarm Hub");
 
-    // Stop BLE (to save power if needed)
+    /**
+     * Stop BLE advertising and deinit
+     */
     void stop();
 
-    // Check if BLE is running
-    bool isRunning() const { return _running; }
+    /**
+     * Stop BLE advertising only (keeps BLE stack running)
+     * Call this after WiFi is connected to save power
+     */
+    void stopAdvertising();
 
-    // Check if a client is connected
-    bool isClientConnected() const;
+    /**
+     * Restart BLE advertising
+     * Call this if WiFi is lost and re-provisioning is needed
+     */
+    void restartAdvertising();
 
-    // Update status characteristic and notify connected client
-    void updateStatus(uint8_t status);
-
-    // Set printer manager reference for printer configuration
-    void setPrinterManager(PrinterManager* printerManager);
-
-    // Set tunnel config store reference for cloud configuration
-    void setTunnelConfigStore(TunnelConfigStore* tunnelConfigStore);
-
-    // Set tunnel client reference for reconnection after cloud config
-    void setTunnelClient(TunnelClient* tunnelClient);
-
-    // Update printer status characteristic
-    void updatePrinterStatus();
-
-    // Poll for processing (call in loop)
+    /**
+     * Must be called in main loop - handles WiFi connection state machine
+     */
     void poll();
 
-private:
-    WiFiManager& _wifiManager;
-    PrinterManager* _printerManager;
-    TunnelConfigStore* _tunnelConfigStore;
-    TunnelClient* _tunnelClient;
-    bool _running;
+    /**
+     * Get current provisioning state
+     */
+    ProvisioningState getState() const { return _state; }
 
+    /**
+     * Check if WiFi is connected
+     */
+    bool isWiFiConnected() const;
+
+    /**
+     * Get connected WiFi SSID
+     */
+    String getConnectedSSID() const;
+
+    /**
+     * Get IP address (empty string if not connected)
+     */
+    String getIPAddress() const;
+
+    /**
+     * Get WiFi signal strength
+     */
+    int getRSSI() const;
+
+    /**
+     * Attempt auto-connect with stored credentials
+     * Called on boot if credentials exist
+     */
+    void autoConnect();
+
+    // NimBLEServerCallbacks (NimBLE 1.4.x signatures)
+    void onConnect(NimBLEServer* pServer) override;
+    void onDisconnect(NimBLEServer* pServer) override;
+
+    // NimBLECharacteristicCallbacks (NimBLE 1.4.x signatures)
+    void onWrite(NimBLECharacteristic* pCharacteristic) override;
+    void onRead(NimBLECharacteristic* pCharacteristic) override;
+
+private:
+    CredentialStore& _credentialStore;
+    HubConfigStore& _hubConfigStore;
+
+    // BLE objects
     NimBLEServer* _pServer;
     NimBLEService* _pService;
-    NimBLECharacteristic* _pCredentialsChar;
+    NimBLECharacteristic* _pSsidChar;
+    NimBLECharacteristic* _pPasswordChar;
+    NimBLECharacteristic* _pCommandChar;
     NimBLECharacteristic* _pStatusChar;
-    NimBLECharacteristic* _pPrinterConfigChar;
-    NimBLECharacteristic* _pPrinterStatusChar;
-    NimBLECharacteristic* _pCloudConfigChar;
+    NimBLECharacteristic* _pHubIdChar;
+    NimBLECharacteristic* _pTenantIdChar;
 
-    String _pendingSSID;
+    // State
+    ProvisioningState _state;
+    bool _bleClientConnected;
+    bool _bleInitialized;
+
+    // Pending credentials (received via BLE, not yet saved)
+    String _pendingSsid;
     String _pendingPassword;
-    bool _connectRequested;
 
-    // Pending printer config action
-    String _pendingPrinterAction;
-    String _pendingPrinterConfig;
-    bool _printerConfigRequested;
+    // Pending hub config (received via BLE, saved on CMD_CONNECT)
+    String _pendingHubId;
+    String _pendingTenantId;
 
-    // Pending cloud config
-    String _pendingCloudConfig;
-    bool _cloudConfigRequested;
+    // WiFi connection timing
+    unsigned long _wifiConnectStartTime;
+    bool _wifiConnecting;
 
-    void performConnect();
-    void processPrinterConfig();
-    void processCloudConfig();
+    // BLE reconnection handling
+    bool _needsAdvertisingRestart;
+    unsigned long _disconnectTime;
 
-    // Callback classes
-    class ServerCallbacks;
-    class CredentialsCallbacks;
-    class PrinterConfigCallbacks;
-    class CloudConfigCallbacks;
-
-    friend class ServerCallbacks;
-    friend class CredentialsCallbacks;
-    friend class PrinterConfigCallbacks;
-    friend class CloudConfigCallbacks;
+    // Internal methods
+    void setupBLE(const char* deviceName);
+    void startAdvertising();
+    void handleCommand(uint8_t cmd);
+    void connectToWiFi();
+    void disconnectWiFi();
+    void updateState(ProvisioningState newState);
+    void notifyStatus();
 };
 
 #endif // BLE_PROVISIONING_H

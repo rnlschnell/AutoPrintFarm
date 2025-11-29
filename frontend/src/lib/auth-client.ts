@@ -110,6 +110,7 @@ function transformAuthSession(data: { session?: BetterAuthSession; user?: Better
       id: data.session.id,
       userId: data.session.userId,
       expiresAt: data.session.expiresAt,
+      token: data.session.token,
       user: data.user ? transformUser(data.user) : null as unknown as User,
     } : null,
     user: data.user ? transformUser(data.user) : null,
