@@ -183,11 +183,11 @@ export function buildPrintCommand(
 }
 
 /**
- * Build a printer_command for control actions (pause/resume/stop/clear_bed)
+ * Build a printer_command for control actions (pause/resume/stop/clear_bed/light_on/light_off)
  */
 export function buildPrinterControlCommand(
   printerId: string,
-  action: "pause" | "resume" | "stop" | "clear_bed"
+  action: "pause" | "resume" | "stop" | "clear_bed" | "light_on" | "light_off"
 ): PrinterCommandMessage {
   return {
     type: "printer_command",
@@ -275,13 +275,13 @@ export async function removePrinterFromHub(
 }
 
 /**
- * Send a control command to a printer (pause/resume/stop/clear_bed)
+ * Send a control command to a printer (pause/resume/stop/clear_bed/light_on/light_off)
  */
 export async function sendPrinterControl(
   env: Env,
   hubId: string,
   printerSerialNumber: string,
-  action: "pause" | "resume" | "stop" | "clear_bed",
+  action: "pause" | "resume" | "stop" | "clear_bed" | "light_on" | "light_off",
   waitForAck = true
 ): Promise<CommandResponse> {
   const command = buildPrinterControlCommand(printerSerialNumber, action);

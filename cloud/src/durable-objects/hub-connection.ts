@@ -203,6 +203,9 @@ export class HubConnection {
    * Called when a WebSocket message is received (hibernation API)
    */
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    // Restore session from storage if needed (after hibernation wake-up)
+    await this.ensureSessionRestored();
+
     // Update last message timestamp
     if (this.session) {
       this.session.lastMessageAt = Date.now();
@@ -401,24 +404,44 @@ export class HubConnection {
 
     const { printer_id, status, progress_percentage, remaining_time_seconds, current_layer, error_message } = message;
 
+    // Debug logging for printer status
+    console.log(`[HubConnection] Received printer_status from hub:`, JSON.stringify({
+      printer_id,
+      status,
+      is_connected: message.is_connected,
+      temperatures: message.temperatures,
+      progress_percentage,
+    }));
+
     const now = new Date().toISOString();
 
-    // Update printer status in database
     // Note: printer_id from hub is the serial_number
+    // Look up the printer to get its numeric printer_id for the frontend
+    const printer = await this.env.DB.prepare(
+      `SELECT id, printer_id FROM printers WHERE serial_number = ? AND tenant_id = ?`
+    )
+      .bind(printer_id, this.session.tenantId)
+      .first<{ id: string; printer_id: number | null }>();
+
+    if (!printer) {
+      console.warn(`[HubConnection] Received status for unknown printer serial: ${printer_id}`);
+      return;
+    }
+
+    // Update printer status in database
     await this.env.DB.prepare(
       `UPDATE printers SET
         status = ?,
         is_connected = 1,
         connection_error = ?,
         updated_at = ?
-      WHERE serial_number = ? AND tenant_id = ?`
+      WHERE id = ?`
     )
       .bind(
         status,
         error_message || null,
         now,
-        printer_id,
-        this.session.tenantId
+        printer.id
       )
       .run();
 
@@ -429,8 +452,8 @@ export class HubConnection {
       .bind(now, this.session.hubId)
       .run();
 
-    // Broadcast to dashboard
-    await this.broadcastPrinterStatus(message);
+    // Broadcast to dashboard using the numeric printer_id for frontend matching
+    await this.broadcastPrinterStatus(message, printer.printer_id);
 
     // If there's an active print job for this printer, update it too
     if (progress_percentage !== undefined) {
@@ -835,9 +858,17 @@ export class HubConnection {
 
   /**
    * Broadcast printer status to DashboardBroadcast DO
+   * @param status The printer status message from the hub
+   * @param numericPrinterId The numeric printer_id used by the frontend for matching
    */
-  private async broadcastPrinterStatus(status: PrinterStatusMessage): Promise<void> {
+  private async broadcastPrinterStatus(status: PrinterStatusMessage, numericPrinterId: number | null): Promise<void> {
     if (!this.session) return;
+
+    // Frontend expects printer_id to be the numeric printer_id, not serial_number
+    if (numericPrinterId === null) {
+      console.warn(`[HubConnection] Cannot broadcast status - printer has no numeric ID`);
+      return;
+    }
 
     try {
       const doId = this.env.DASHBOARD_BROADCASTS.idFromName(this.session.tenantId);
@@ -848,10 +879,22 @@ export class HubConnection {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           type: "printer_status",
-          printer_id: status.printer_id,
+          printer_id: numericPrinterId.toString(), // Use numeric ID for frontend matching
           status: status.status,
+          is_connected: status.is_connected,
           progress_percentage: status.progress_percentage,
           remaining_time_seconds: status.remaining_time_seconds,
+          current_layer: status.current_layer,
+          total_layers: status.total_layers,
+          temperatures: status.temperatures
+            ? {
+                nozzle: status.temperatures.nozzle,
+                nozzle_target: status.temperatures.nozzle_target,
+                bed: status.temperatures.bed,
+                bed_target: status.temperatures.bed_target,
+                chamber: status.temperatures.chamber,
+              }
+            : undefined,
         }),
       });
     } catch (error) {

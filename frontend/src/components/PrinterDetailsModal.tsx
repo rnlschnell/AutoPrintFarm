@@ -15,6 +15,7 @@ import CameraViewModal from "@/components/CameraViewModal";
 import PrintControlButtons from "@/components/PrintControlButtons";
 import { useState, useMemo, useEffect } from "react";
 import { useToast } from "@/hooks/use-toast";
+import { useAuth } from "@/contexts/AuthContext";
 import { usePrinters, type Printer } from "@/hooks/usePrinters";
 import { usePrinterWebSocket, type LivePrinterData } from "@/hooks/useWebSocket";
 import { formatTime, formatLayerProgress } from "@/lib/utils";
@@ -26,6 +27,7 @@ interface PrinterDetailsModalProps {
 }
 
 const PrinterDetailsModal = ({ printer, isOpen, onClose }: PrinterDetailsModalProps) => {
+  const { tenantId } = useAuth();
   const [isEditing, setIsEditing] = useState(false);
   const [editedName, setEditedName] = useState("");
   const [editedModel, setEditedModel] = useState("");
@@ -47,6 +49,7 @@ const PrinterDetailsModal = ({ printer, isOpen, onClose }: PrinterDetailsModalPr
   const [isNozzleSelectorOpen, setIsNozzleSelectorOpen] = useState(false);
   const [clearedClickCount, setClearedClickCount] = useState(0);
   const [isReconnecting, setIsReconnecting] = useState(false);
+  const [lightOn, setLightOn] = useState(false);
   const { toast } = useToast();
   const { updatePrinter, deletePrinter, printers, toggleCleared } = usePrinters();
   const { data: liveData } = usePrinterWebSocket();
@@ -131,27 +134,37 @@ const PrinterDetailsModal = ({ printer, isOpen, onClose }: PrinterDetailsModalPr
   };
 
   const handleLightToggle = async () => {
-    if (!currentPrinter?.id || isLightToggling) return;
+    if (!currentPrinter?.id || isLightToggling || !tenantId) return;
 
     setIsLightToggling(true);
     try {
-      // Use separate on/off endpoints instead of toggle
-      const endpoint = isLightOn ? 'off' : 'on';
-      const response = await fetch(`/api/printers/${currentPrinter.printerId}/light/${endpoint}`, {
+      const newState = !lightOn;
+      const response = await fetch(`/api/v1/printers/${currentPrinter.id}/light`, {
         method: 'POST',
+        credentials: 'include',
         headers: {
           'Content-Type': 'application/json',
+          'X-Tenant-ID': tenantId,
         },
+        body: JSON.stringify({ state: newState }),
       });
 
       if (!response.ok) {
-        throw new Error(`Failed to turn light ${endpoint}`);
+        const errorData = await response.json().catch(() => ({}));
+        console.error('Light control error:', errorData);
+        throw new Error(errorData?.error?.message || `Failed to turn light ${newState ? 'on' : 'off'}`);
       }
+
+      setLightOn(newState);
+      toast({
+        title: "Light Control",
+        description: `Light turned ${newState ? 'on' : 'off'}`,
+      });
     } catch (error) {
       console.error('Error controlling light:', error);
       toast({
         title: "Error",
-        description: "Failed to control printer light",
+        description: error instanceof Error ? error.message : "Failed to control printer light",
         variant: "destructive",
       });
     } finally {
@@ -454,7 +467,6 @@ const PrinterDetailsModal = ({ printer, isOpen, onClose }: PrinterDetailsModalPr
 
   // Get current status: if we have live data, printer is connected, otherwise offline
   const currentStatus = printerLiveData ? printerLiveData.status : 'offline';
-  const isLightOn = printerLiveData?.light_on || false;
   
   const getCurrentTemperatures = () => {
     if (printerLiveData?.temperatures) {
@@ -876,10 +888,10 @@ const PrinterDetailsModal = ({ printer, isOpen, onClose }: PrinterDetailsModalPr
                       <Button
                         variant="outline"
                         size="icon"
-                        className={`h-8 w-8 ${isLightOn ? 'bg-yellow-100 text-yellow-600 hover:bg-yellow-200' : ''}`}
+                        className={`h-8 w-8 ${lightOn ? 'bg-yellow-100 text-yellow-600 hover:bg-yellow-200' : ''}`}
                         onClick={handleLightToggle}
                         disabled={isLightToggling}
-                        title={`Light is ${isLightOn ? 'ON' : 'OFF'} - Click to toggle`}
+                        title={`Light is ${lightOn ? 'ON' : 'OFF'} - Click to toggle`}
                       >
                         <Lightbulb className="h-4 w-4" />
                       </Button>

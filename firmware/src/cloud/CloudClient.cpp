@@ -8,6 +8,7 @@
 
 CloudClient::CloudClient(HubConfigStore& hubConfigStore)
     : _hubConfigStore(hubConfigStore)
+    , _mqttClient(nullptr)
     , _state(CloudState::OFFLINE)
     , _lastActivityTime(0)
     , _lastPingTime(0)
@@ -319,21 +320,105 @@ void CloudClient::handleHubConfig(JsonDocument& doc) {
 }
 
 void CloudClient::handleConfigurePrinter(JsonDocument& doc) {
-    // TODO: Implement printer configuration
     const char* action = doc["action"];
     const char* commandId = doc["command_id"];
 
     Serial.print("[Cloud] Configure printer: action=");
     Serial.println(action ? action : "null");
 
-    // For now, just acknowledge the command
-    // In the future, this will integrate with PrinterManager
+    if (!_mqttClient) {
+        Serial.println("[Cloud] MQTT client not initialized");
+        if (commandId) {
+            sendCommandAck(commandId, false, "MQTT client not initialized");
+        }
+        return;
+    }
+
+    if (!action) {
+        if (commandId) {
+            sendCommandAck(commandId, false, "Missing action");
+        }
+        return;
+    }
+
+    bool success = false;
+    String error = "";
+
+    // Extract printer configuration from message
+    JsonObject printer = doc["printer"];
+    if (printer.isNull()) {
+        if (commandId) {
+            sendCommandAck(commandId, false, "Missing printer object");
+        }
+        return;
+    }
+
+    PrinterConfig config;
+    memset(&config, 0, sizeof(PrinterConfig));
+
+    // Copy printer fields
+    const char* id = printer["id"];
+    const char* serial = printer["serial_number"];
+    const char* ip = printer["ip_address"];
+    const char* accessCode = printer["access_code"];
+
+    if (id) strlcpy(config.id, id, sizeof(config.id));
+    if (serial) strlcpy(config.serial_number, serial, sizeof(config.serial_number));
+    if (ip) strlcpy(config.ip_address, ip, sizeof(config.ip_address));
+    if (accessCode) strlcpy(config.access_code, accessCode, sizeof(config.access_code));
+    config.active = true;
+
+    Serial.printf("[Cloud] Printer config: id=%s, serial=%s, ip=%s\n",
+                  config.id, config.serial_number, config.ip_address);
+
+    if (strcmp(action, "add") == 0) {
+        // Validate required fields for add
+        if (strlen(config.serial_number) == 0) {
+            error = "Missing serial_number";
+        } else if (strlen(config.ip_address) == 0) {
+            error = "Missing ip_address";
+        } else if (strlen(config.access_code) == 0) {
+            error = "Missing access_code";
+        } else {
+            success = _mqttClient->addPrinter(config);
+            if (!success) {
+                error = "Failed to add printer (max 5 or duplicate)";
+            }
+        }
+    }
+    else if (strcmp(action, "remove") == 0) {
+        if (strlen(config.serial_number) == 0) {
+            error = "Missing serial_number";
+        } else {
+            success = _mqttClient->removePrinter(config.serial_number);
+            if (!success) {
+                error = "Printer not found";
+            }
+        }
+    }
+    else if (strcmp(action, "update") == 0) {
+        if (strlen(config.serial_number) == 0) {
+            error = "Missing serial_number";
+        } else {
+            success = _mqttClient->updatePrinter(config);
+            if (!success) {
+                error = "Failed to update printer";
+            }
+        }
+    }
+    else {
+        error = "Unknown action: " + String(action);
+    }
+
+    // Send acknowledgment
+    if (commandId) {
+        sendCommandAck(commandId, success, error);
+    }
 }
 
 void CloudClient::handlePrinterCommand(JsonDocument& doc) {
-    // TODO: Implement printer control commands
     const char* action = doc["action"];
-    const char* printerId = doc["printer_id"];
+    const char* printerId = doc["printer_id"];  // This is the serial number
     const char* commandId = doc["command_id"];
 
     Serial.print("[Cloud] Printer command: action=");
@@ -341,7 +426,46 @@ void CloudClient::handlePrinterCommand(JsonDocument& doc) {
     Serial.print(", printer=");
     Serial.println(printerId ? printerId : "null");
 
-    // For now, just acknowledge the command
+    if (!_mqttClient) {
+        Serial.println("[Cloud] MQTT client not initialized");
+        if (commandId) {
+            sendCommandAck(commandId, false, "MQTT client not initialized");
+        }
+        return;
+    }
+
+    if (!action || !printerId) {
+        if (commandId) {
+            sendCommandAck(commandId, false, "Missing action or printer_id");
+        }
+        return;
+    }
+
+    bool success = false;
+    String error = "";
+
+    // Handle light control commands
+    if (strcmp(action, "light_on") == 0) {
+        success = _mqttClient->setLight(printerId, true);
+        if (!success) {
+            error = "Failed to turn light on";
+        }
+    }
+    else if (strcmp(action, "light_off") == 0) {
+        success = _mqttClient->setLight(printerId, false);
+        if (!success) {
+            error = "Failed to turn light off";
+        }
+    }
+    else {
+        // TODO: Implement other commands (pause/resume/stop)
+        error = "Command not yet implemented: " + String(action);
+    }
+
+    // Send acknowledgment
+    if (commandId) {
+        sendCommandAck(commandId, success, error);
+    }
 }
 
 void CloudClient::handlePrintCommand(JsonDocument& doc) {
@@ -576,4 +700,47 @@ void CloudClient::handleHeartbeat() {
         _wsClient.close();
         transitionTo(CloudState::RECONNECTING);
     }
+}
+
+// =============================================================================
+// Printer Integration
+// =============================================================================
+
+void CloudClient::setMqttClient(BambuMqttClient* mqttClient) {
+    _mqttClient = mqttClient;
+    Serial.println("[Cloud] MQTT client linked");
+}
+
+void CloudClient::sendPrinterStatus(const PrinterStatus& status) {
+    if (_state != CloudState::CONNECTED) {
+        return;  // Can't send if not connected
+    }
+
+    JsonDocument doc;
+    doc["type"] = HubMessages::PRINTER_STATUS;
+    doc["printer_id"] = status.serial_number;  // Use serial as identifier
+    doc["status"] = status.status;
+    doc["is_connected"] = status.is_connected;
+    doc["progress_percentage"] = status.progress_percent;
+    doc["remaining_time_seconds"] = status.remaining_time_seconds;
+    doc["current_layer"] = status.current_layer;
+    doc["total_layers"] = status.total_layers;
+
+    // Temperature data
+    JsonObject temps = doc["temperatures"].to<JsonObject>();
+    temps["nozzle"] = status.nozzle_temp;
+    temps["nozzle_target"] = status.nozzle_target;
+    temps["bed"] = status.bed_temp;
+    temps["bed_target"] = status.bed_target;
+    temps["chamber"] = status.chamber_temp;
+
+    String json;
+    serializeJson(doc, json);
+
+    Serial.printf("[Cloud] Sending printer_status for %s: %s, nozzle=%.1f/%.1f, bed=%.1f/%.1f\n",
+                  status.serial_number, status.status,
+                  status.nozzle_temp, status.nozzle_target,
+                  status.bed_temp, status.bed_target);
+
+    sendMessage(json);
 }

@@ -5,6 +5,7 @@
 #include <ArduinoWebsockets.h>
 #include <ArduinoJson.h>
 #include "../provisioning/HubConfigStore.h"
+#include "../printers/BambuMqttClient.h"
 
 // =============================================================================
 // CloudClient State Machine
@@ -76,23 +77,25 @@ public:
     static const char* stateToString(CloudState state);
 
     // =========================================================================
-    // Future: Outgoing messages (for printer integration)
+    // Printer Integration
     // =========================================================================
 
-    // void sendPrinterStatus(const String& printerId, ...);
-    // void sendCommandAck(const String& commandId, bool success, const String& error = "");
-    // void sendPrinterDiscovered(...);
+    /**
+     * Set the MQTT client for printer communication
+     * @param mqttClient Pointer to BambuMqttClient instance
+     */
+    void setMqttClient(BambuMqttClient* mqttClient);
 
-    // =========================================================================
-    // Future: Command callback registration
-    // =========================================================================
-
-    // typedef void (*CommandCallback)(const String& type, JsonDocument& doc);
-    // void setCommandCallback(CommandCallback cb);
+    /**
+     * Send printer status to cloud
+     * Called by the MQTT client callback when printer status is received
+     */
+    void sendPrinterStatus(const PrinterStatus& status);
 
 private:
     HubConfigStore& _hubConfigStore;
     websockets::WebsocketsClient _wsClient;
+    BambuMqttClient* _mqttClient;
 
     // State machine
     CloudState _state;

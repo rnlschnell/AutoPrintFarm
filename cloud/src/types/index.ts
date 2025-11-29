@@ -1096,13 +1096,16 @@ export interface PrinterStatusMessage {
   type: "printer_status";
   printer_id: string;
   status: PrinterStatus;
+  is_connected?: boolean;
   progress_percentage?: number;
   remaining_time_seconds?: number;
   current_layer?: number;
   total_layers?: number;
   temperatures?: {
     nozzle?: number;
+    nozzle_target?: number;
     bed?: number;
+    bed_target?: number;
     chamber?: number;
   };
   error_code?: string;
@@ -1171,7 +1174,7 @@ export interface PrinterCommandMessage {
   type: "printer_command";
   command_id: string;
   printer_id: string;
-  action: "pause" | "resume" | "stop" | "clear_bed";
+  action: "pause" | "resume" | "stop" | "clear_bed" | "light_on" | "light_off";
 }
 
 export interface DiscoverPrintersMessage {
@@ -1226,8 +1229,18 @@ export interface DashboardPrinterStatusMessage {
   type: "printer_status";
   printer_id: string;
   status: PrinterStatus;
+  is_connected?: boolean;
   progress_percentage?: number;
   remaining_time_seconds?: number;
+  current_layer?: number;
+  total_layers?: number;
+  temperatures?: {
+    nozzle?: number;
+    nozzle_target?: number;
+    bed?: number;
+    bed_target?: number;
+    chamber?: number;
+  };
 }
 
 export interface DashboardJobUpdateMessage {

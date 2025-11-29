@@ -104,4 +104,33 @@
 #define FIRMWARE_VERSION "1.0.0"
 #define HARDWARE_VERSION "ESP32-S3"
 
+// =============================================================================
+// MQTT Configuration (Bambu Lab Printers)
+// =============================================================================
+
+// Bambu Lab MQTT connection settings
+#define MQTT_BAMBU_PORT 8883           // MQTT over TLS
+#define MQTT_BAMBU_USER "bblp"         // Bambu Lab default username
+
+// Connection management
+#define MQTT_RECONNECT_INTERVAL_MS 5000   // Retry connection every 5 seconds
+#define MQTT_KEEPALIVE_SECONDS 30         // MQTT keepalive interval
+
+// Status update throttling
+#define MQTT_STATUS_THROTTLE_MS 5000      // Send status updates every 5 seconds
+
+// Maximum printers per hub
+#define MAX_PRINTERS 5
+
+// NVS Configuration for Printer Storage
+#define NVS_NAMESPACE_PRINTERS "printers"
+#define NVS_KEY_PRINTER_PREFIX "printer_"
+#define NVS_KEY_PRINTER_COUNT  "count"
+
+// Printer config field lengths
+#define MAX_PRINTER_ID_LENGTH      37     // UUID (36) + null
+#define MAX_SERIAL_NUMBER_LENGTH   32
+#define MAX_IP_ADDRESS_LENGTH      16
+#define MAX_ACCESS_CODE_LENGTH     16
+
 #endif // CONFIG_H

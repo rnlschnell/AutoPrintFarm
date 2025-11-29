@@ -1,9 +1,12 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { MoreHorizontal, Clock, Palette, Plus, GripVertical, LayoutGrid, List, Package, Settings, Thermometer, Pencil, Square, Layers2, Check, ArrowRight, X, Wrench } from "lucide-react";
-import { usePrinterWebSocket, type LivePrinterData } from "@/hooks/useWebSocket";
+import { useDashboardWebSocket, type LivePrinterData } from "@/hooks/useWebSocket";
+import { useAuth } from "@/contexts/AuthContext";
+import { api } from "@/lib/api-client";
+import type { Hub } from "@/types/api";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -136,30 +139,17 @@ const PrinterCard = ({ printer, liveData, onViewDetails, onStartMaintenance, onC
     }
   };
 
-  // Get temperatures from live data or fallback to mock data
-  const getTemperatures = () => {
+  // Get temperatures from live data - returns null if no live data yet
+  const getTemperatures = (): { hotend: number | null; bed: number | null } => {
     if (liveData?.temperatures) {
       return {
         hotend: Math.round(liveData.temperatures.nozzle.current),
         bed: Math.round(liveData.temperatures.bed.current)
       };
     }
-    
-    // Fallback to mock data based on connection and print status
-    if (!isConnected) {
-      return { hotend: 0, bed: 0 };
-    }
-    
-    switch (printJobStatus) {
-      case 'printing':
-        return { hotend: 215, bed: 60 };
-      case 'idle':
-        return { hotend: 25, bed: 25 };
-      case 'maintenance':
-        return { hotend: 180, bed: 0 };
-      default:
-        return { hotend: 25, bed: 25 }; // Connected but status unknown
-    }
+
+    // No live data yet - return null to show placeholder
+    return { hotend: null, bed: null };
   };
 
   const temperatures = getTemperatures();
@@ -331,11 +321,11 @@ const PrinterCard = ({ printer, liveData, onViewDetails, onStartMaintenance, onC
           <div className="flex items-center gap-4 text-sm">
             <div className="flex items-center gap-1">
               <span className="text-muted-foreground">Hotend:</span>
-              <span className="font-medium">{temperatures.hotend}°C</span>
+              <span className="font-medium">{temperatures.hotend !== null ? `${temperatures.hotend}°C` : '-'}</span>
             </div>
             <div className="flex items-center gap-1">
               <span className="text-muted-foreground">Bed:</span>
-              <span className="font-medium">{temperatures.bed}°C</span>
+              <span className="font-medium">{temperatures.bed !== null ? `${temperatures.bed}°C` : '-'}</span>
             </div>
           </div>
         </div>
@@ -501,7 +491,8 @@ const PrinterRow = ({ printer, liveData, onViewDetails, onStartMaintenance, onSt
 
 const Printers = () => {
   const { printers, loading, addPrinter, updatePrinter, updatePrintersOrder, toggleCleared, refetch } = usePrinters();
-  const { data: liveData, isConnected, isReconnecting } = usePrinterWebSocket();
+  const { tenantId, session } = useAuth();
+  const { data: liveData, isConnected, isReconnecting } = useDashboardWebSocket(tenantId || '', session?.token || '');
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [viewMode, setViewMode] = useState('grid');
   const [selectedPrinter, setSelectedPrinter] = useState<Printer | null>(null);
@@ -519,9 +510,24 @@ const Printers = () => {
     model: '',
     serialNumber: '',
     ipAddress: '',
-    accessCode: ''
+    accessCode: '',
+    hubId: ''
   });
+  const [hubs, setHubs] = useState<Hub[]>([]);
   const { toast } = useToast();
+
+  // Fetch available hubs for the dropdown
+  useEffect(() => {
+    const fetchHubs = async () => {
+      try {
+        const response = await api.get<Hub[]>('/api/v1/hubs');
+        setHubs(response || []);
+      } catch (error) {
+        console.error('Failed to fetch hubs:', error);
+      }
+    };
+    fetchHubs();
+  }, []);
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -561,10 +567,10 @@ const Printers = () => {
   };
 
   const handleAddPrinter = async () => {
-    if (!newPrinter.name || !newPrinter.manufacturer || !newPrinter.model) {
+    if (!newPrinter.name || !newPrinter.manufacturer || !newPrinter.model || !newPrinter.hubId) {
       toast({
         title: "Error",
-        description: "Please fill in the required fields.",
+        description: "Please fill in the required fields (Name, Manufacturer, Model, and Hub).",
         variant: "destructive",
       });
       return;
@@ -581,7 +587,8 @@ const Printers = () => {
         model: '',
         serialNumber: '',
         ipAddress: '',
-        accessCode: ''
+        accessCode: '',
+        hubId: ''
       });
       setIsAddModalOpen(false);
     } catch (error) {
@@ -769,6 +776,26 @@ const Printers = () => {
                     onChange={(e) => setNewPrinter({ ...newPrinter, accessCode: e.target.value })}
                     className="col-span-3"
                   />
+                </div>
+                <div className="grid grid-cols-4 items-center gap-4">
+                  <Label htmlFor="hub" className="text-right">
+                    Hub *
+                  </Label>
+                  <Select
+                    value={newPrinter.hubId}
+                    onValueChange={(value) => setNewPrinter({ ...newPrinter, hubId: value })}
+                  >
+                    <SelectTrigger className="col-span-3">
+                      <SelectValue placeholder="Select hub" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {hubs.map((hub) => (
+                        <SelectItem key={hub.id} value={hub.id}>
+                          {hub.name || `Hub ${hub.id.slice(0, 8)}`}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 </div>
               </div>
               <DialogFooter>

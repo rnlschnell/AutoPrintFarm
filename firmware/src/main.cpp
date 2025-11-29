@@ -4,6 +4,7 @@
 #include "provisioning/HubConfigStore.h"
 #include "provisioning/BLEProvisioning.h"
 #include "cloud/CloudClient.h"
+#include "printers/BambuMqttClient.h"
 
 // =============================================================================
 // Global Objects
@@ -13,10 +14,23 @@ CredentialStore credentialStore;
 HubConfigStore hubConfigStore;
 BLEProvisioning bleProvisioning(credentialStore, hubConfigStore);
 CloudClient cloudClient(hubConfigStore);
+BambuMqttClient bambuMqtt;
 
 // Track if BLE was stopped after WiFi connect
 // NOTE: Currently always keeping BLE active until we add a physical button for pairing mode
 bool bleStoppedAfterConnect = false;
+
+// =============================================================================
+// Printer Status Callback
+// =============================================================================
+
+/**
+ * Called by BambuMqttClient when printer status is received
+ * Forwards status to cloud via CloudClient
+ */
+void onPrinterStatus(const PrinterStatus& status) {
+    cloudClient.sendPrinterStatus(status);
+}
 
 // =============================================================================
 // Setup
@@ -52,6 +66,12 @@ void setup() {
     // Initialize cloud client
     Serial.println("[Main] Initializing cloud client...");
     cloudClient.begin();
+
+    // Initialize Bambu MQTT client for printer communication
+    Serial.println("[Main] Initializing Bambu MQTT client...");
+    bambuMqtt.begin();
+    bambuMqtt.setStatusCallback(onPrinterStatus);
+    cloudClient.setMqttClient(&bambuMqtt);
 
     // Auto-connect to WiFi if credentials are stored
     if (credentialStore.hasCredentials()) {
@@ -90,18 +110,25 @@ void loop() {
     // Always poll cloud client (handles state machine, reconnection, heartbeat)
     cloudClient.poll();
 
+    // Poll Bambu MQTT client for printer connections (only when WiFi connected)
+    if (bleProvisioning.isWiFiConnected()) {
+        bambuMqtt.poll();
+    }
+
     // Print status periodically (every 10 seconds)
     static unsigned long lastStatusPrint = 0;
     if (millis() - lastStatusPrint > 10000) {
         lastStatusPrint = millis();
 
         if (bleProvisioning.isWiFiConnected()) {
-            Serial.printf("[Status] WiFi: Connected | SSID: %s | IP: %s | RSSI: %d dBm | Cloud: %s%s\n",
+            Serial.printf("[Status] WiFi: Connected | SSID: %s | IP: %s | RSSI: %d dBm | Cloud: %s%s | Printers: %d/%d connected\n",
                           bleProvisioning.getConnectedSSID().c_str(),
                           bleProvisioning.getIPAddress().c_str(),
                           bleProvisioning.getRSSI(),
                           CloudClient::stateToString(cloudClient.getState()),
-                          cloudClient.isCloudDisabled() ? " (DISABLED)" : "");
+                          cloudClient.isCloudDisabled() ? " (DISABLED)" : "",
+                          bambuMqtt.getConnectedCount(),
+                          bambuMqtt.getConfiguredCount());
         } else {
             Serial.printf("[Status] WiFi: Not connected | State: %d\n",
                           static_cast<uint8_t>(bleProvisioning.getState()));

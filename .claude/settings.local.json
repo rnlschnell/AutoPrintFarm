@@ -1,13 +1,19 @@
 {
   "permissions": {
     "allow": [
-      "Bash(dir \"C:\\Users\\nlsch\\AutoPrintFarm-Hub\" /B)",
-      "Bash(del \"C:\\Users\\nlsch\\AutoPrintFarm\\frontend\\src\\hooks\\useFinishedGoods.ts\")",
-      "Bash(npx wrangler:*)",
-      "Bash(pio device monitor:*)",
-      "Bash(xargs:*)",
+      "Bash(del \"C:\\Users\\nlsch\\AutoPrintFarm\\frontend\\src\\hooks\\useWebSocket.ts\")",
+      "Bash(npx wrangler d1 execute:*)",
+      "Bash(git ls-tree:*)",
+      "Bash(git checkout:*)",
+      "Bash(find:*)",
+      "Bash(netstat:*)",
+      "Bash(findstr:*)",
       "Bash(npx tsc:*)",
-      "Bash(npm run dev:*)"
+      "Bash(pio run:*)",
+      "Bash(pio device monitor:*)",
+      "Bash(npm run dev:*)",
+      "Bash(git add:*)",
+      "WebSearch"
     ],
     "deny": [],
     "ask": []

@@ -348,6 +348,56 @@ printers.post(
       .bind(printerId)
       .first<Printer>();
 
+    // Auto-connect: If hub_id is assigned and printer has connection credentials, try to connect
+    let autoConnectResult: { attempted: boolean; success?: boolean; error?: string } = { attempted: false };
+
+    if (body.hub_id && printer && body.serial_number && body.ip_address && body.access_code) {
+      try {
+        const hubOnline = await isHubOnline(c.env, body.hub_id);
+        if (hubOnline) {
+          // Decrypt access code to send to hub
+          const accessCode = await decryptAccessCode(
+            encryptedAccessCode,
+            c.env.ENCRYPTION_KEY
+          );
+
+          const printerConfig: Parameters<typeof addPrinterToHub>[2] = {
+            id: printerId,
+            serial_number: body.serial_number,
+            connection_type: body.connection_type as PrinterConnectionType,
+          };
+          if (accessCode) printerConfig.access_code = accessCode;
+          if (body.ip_address) printerConfig.ip_address = body.ip_address;
+
+          const result = await addPrinterToHub(
+            c.env,
+            body.hub_id,
+            printerConfig,
+            false // don't wait for acknowledgment - let it connect async
+          );
+
+          autoConnectResult = {
+            attempted: true,
+            success: result.success,
+            ...(result.error ? { error: result.error } : {})
+          };
+
+          if (result.success) {
+            // Mark printer as connection initiated
+            await c.env.DB.prepare(
+              `UPDATE printers SET last_connection_attempt = ?, updated_at = ? WHERE id = ?`
+            )
+              .bind(now, now, printerId)
+              .run();
+          }
+        }
+      } catch (error) {
+        // Don't fail printer creation if auto-connect fails
+        console.error("[Printers] Auto-connect failed:", error);
+        autoConnectResult = { attempted: true, success: false, error: "Auto-connect failed" };
+      }
+    }
+
     return c.json(
       {
         success: true,
@@ -355,6 +405,7 @@ printers.post(
           ...printer,
           access_code: printer?.access_code ? "[ENCRYPTED]" : null,
         },
+        auto_connect: autoConnectResult,
       },
       201
     );
@@ -508,12 +559,62 @@ printers.put(
       .bind(printerId)
       .first<Printer>();
 
+    // Auto-connect: If hub_id is being assigned and printer has connection credentials
+    let autoConnectResult: { attempted: boolean; success?: boolean; error?: string } = { attempted: false };
+
+    if (body.hub_id && printer && printer.serial_number && printer.ip_address && printer.access_code) {
+      try {
+        const hubOnline = await isHubOnline(c.env, body.hub_id);
+        if (hubOnline) {
+          // Decrypt access code to send to hub
+          const accessCode = await decryptAccessCode(
+            printer.access_code,
+            c.env.ENCRYPTION_KEY
+          );
+
+          const printerConfig: Parameters<typeof addPrinterToHub>[2] = {
+            id: printerId,
+            serial_number: printer.serial_number,
+            connection_type: printer.connection_type as PrinterConnectionType,
+          };
+          if (accessCode) printerConfig.access_code = accessCode;
+          if (printer.ip_address) printerConfig.ip_address = printer.ip_address;
+
+          const result = await addPrinterToHub(
+            c.env,
+            body.hub_id,
+            printerConfig,
+            false // don't wait for acknowledgment - let it connect async
+          );
+
+          autoConnectResult = {
+            attempted: true,
+            success: result.success,
+            ...(result.error ? { error: result.error } : {})
+          };
+
+          if (result.success) {
+            const now = new Date().toISOString();
+            await c.env.DB.prepare(
+              `UPDATE printers SET last_connection_attempt = ?, updated_at = ? WHERE id = ?`
+            )
+              .bind(now, now, printerId)
+              .run();
+          }
+        }
+      } catch (error) {
+        console.error("[Printers] Auto-connect on update failed:", error);
+        autoConnectResult = { attempted: true, success: false, error: "Auto-connect failed" };
+      }
+    }
+
     return c.json({
       success: true,
       data: {
         ...printer,
         access_code: printer?.access_code ? "[ENCRYPTED]" : null,
       },
+      auto_connect: autoConnectResult,
     });
   }
 );
@@ -1114,6 +1215,97 @@ printers.post(
         hub_id: printer.hub_id,
         action: body.action,
         status: newStatus,
+      },
+    });
+  }
+);
+
+// =============================================================================
+// LIGHT CONTROL
+// =============================================================================
+
+/**
+ * POST /api/v1/printers/:id/light
+ * Toggle printer light on/off
+ */
+printers.post(
+  "/:id/light",
+  requireAuth(),
+  requireTenant(),
+  requireRoles(["owner", "admin", "operator"]),
+  async (c) => {
+    const tenantId = c.get("tenantId")!;
+    const printerId = c.req.param("id");
+
+    // Parse request body
+    let action: "light_on" | "light_off";
+    try {
+      const body = await c.req.json();
+      if (body.state === true || body.state === "on") {
+        action = "light_on";
+      } else if (body.state === false || body.state === "off") {
+        action = "light_off";
+      } else {
+        throw new ApiError("Invalid state - must be true/false or 'on'/'off'", 400, "INVALID_STATE");
+      }
+    } catch (error) {
+      if (error instanceof ApiError) throw error;
+      throw new ApiError("Invalid request body", 400, "INVALID_REQUEST");
+    }
+
+    // Get printer
+    const printer = await c.env.DB.prepare(
+      "SELECT * FROM printers WHERE id = ? AND tenant_id = ?"
+    )
+      .bind(printerId, tenantId)
+      .first<Printer>();
+
+    if (!printer) {
+      throw new ApiError("Printer not found", 404, "PRINTER_NOT_FOUND");
+    }
+
+    if (!printer.hub_id) {
+      throw new ApiError(
+        "Printer is not assigned to a hub",
+        400,
+        "NO_HUB_ASSIGNED"
+      );
+    }
+
+    // Check if hub is online
+    const hubOnline = await isHubOnline(c.env, printer.hub_id);
+    if (!hubOnline) {
+      throw new ApiError(
+        "Hub is offline or not connected",
+        503,
+        "HUB_OFFLINE"
+      );
+    }
+
+    // Send light command to hub
+    const result = await sendPrinterControl(
+      c.env,
+      printer.hub_id,
+      printer.serial_number || printer.id,
+      action,
+      false // don't wait for ack - light command is fire and forget
+    );
+
+    if (!result.success) {
+      throw new ApiError(
+        result.error || "Failed to control light",
+        500,
+        "COMMAND_FAILED"
+      );
+    }
+
+    return c.json({
+      success: true,
+      message: `Light ${action === "light_on" ? "on" : "off"} command sent`,
+      data: {
+        command_id: result.command_id,
+        printer_id: printerId,
+        state: action === "light_on",
       },
     });
   }

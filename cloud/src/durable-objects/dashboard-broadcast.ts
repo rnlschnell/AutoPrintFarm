@@ -44,6 +44,16 @@ interface ClientSession {
   subscribedPrinters: Set<string>; // Printer IDs the client wants updates for
 }
 
+// Serializable version for WebSocket attachment (survives hibernation)
+interface SerializableSession {
+  userId: string;
+  userEmail: string;
+  userName: string;
+  tenantId: string;
+  authenticatedAt: number;
+  subscribedPrinters: string[]; // Array, not Set (must be JSON-serializable)
+}
+
 interface StoredSession {
   id: string;
   user_id: string;
@@ -181,6 +191,9 @@ export class DashboardBroadcast {
    * Called when a WebSocket message is received (hibernation API)
    */
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    // Restore sessions from attachments if needed (after hibernation wake-up)
+    this.ensureSessionsRestored();
+
     // Parse message
     let data: DashboardClientMessage;
     try {
@@ -329,12 +342,11 @@ export class DashboardBroadcast {
         subscribedPrinters: new Set(),
       };
 
-      // Store session
+      // Store session in memory for quick access
       this.clientSessions.set(ws, clientSession);
 
-      // Update WebSocket tags to mark as authenticated
-      // Note: Hibernation API doesn't support updating tags, so we track in memory
-      // The alarm will check our clientSessions map to determine auth status
+      // Persist session to WebSocket attachment (survives hibernation)
+      this.attachSessionToWebSocket(ws, clientSession);
 
       // Send success response
       const response: DashboardServerMessage = {
@@ -371,6 +383,8 @@ export class DashboardBroadcast {
         session.subscribedPrinters.clear(); // Empty set = subscribe to all
         console.log(`[DashboardBroadcast] Client subscribed to all printers`);
       }
+      // Persist subscription change to WebSocket attachment
+      this.attachSessionToWebSocket(ws, session);
       return;
     }
 
@@ -387,6 +401,9 @@ export class DashboardBroadcast {
       }
       console.log(`[DashboardBroadcast] Client subscribed to ${printers.length} printers`);
     }
+
+    // Persist subscription change to WebSocket attachment
+    this.attachSessionToWebSocket(ws, session);
   }
 
   // ===========================================================================
@@ -416,6 +433,9 @@ export class DashboardBroadcast {
    * Broadcast a message to all relevant clients
    */
   private async broadcastToClients(message: BroadcastMessage): Promise<number> {
+    // Restore sessions from attachments if needed (after hibernation wake-up)
+    this.ensureSessionsRestored();
+
     const websockets = this.state.getWebSockets();
     let broadcastCount = 0;
 
@@ -524,6 +544,58 @@ export class DashboardBroadcast {
   // ===========================================================================
   // HELPER METHODS
   // ===========================================================================
+
+  /**
+   * Restore client sessions from WebSocket attachments after hibernation wake-up.
+   *
+   * When a Durable Object hibernates, the in-memory clientSessions Map is lost.
+   * This method restores it from WebSocket attachments which survive hibernation.
+   */
+  private ensureSessionsRestored(): void {
+    const websockets = this.state.getWebSockets();
+    for (const ws of websockets) {
+      // Skip if we already have this session in memory
+      if (this.clientSessions.has(ws)) {
+        continue;
+      }
+
+      // Try to restore from WebSocket attachment
+      try {
+        const attachment = ws.deserializeAttachment() as SerializableSession | null;
+        if (attachment && attachment.userId) {
+          // Restore session with Set instead of Array
+          const clientSession: ClientSession = {
+            userId: attachment.userId,
+            userEmail: attachment.userEmail,
+            userName: attachment.userName,
+            tenantId: attachment.tenantId,
+            authenticatedAt: attachment.authenticatedAt,
+            subscribedPrinters: new Set(attachment.subscribedPrinters || []),
+          };
+          this.clientSessions.set(ws, clientSession);
+          console.log(`[DashboardBroadcast] Session restored from attachment for user ${attachment.userEmail}`);
+        }
+      } catch (error) {
+        // Attachment may not exist or be invalid - this is fine for unauthenticated connections
+        console.log(`[DashboardBroadcast] No valid session attachment found for WebSocket`);
+      }
+    }
+  }
+
+  /**
+   * Serialize and attach session to WebSocket (survives hibernation)
+   */
+  private attachSessionToWebSocket(ws: WebSocket, session: ClientSession): void {
+    const serializableSession: SerializableSession = {
+      userId: session.userId,
+      userEmail: session.userEmail,
+      userName: session.userName,
+      tenantId: session.tenantId,
+      authenticatedAt: session.authenticatedAt,
+      subscribedPrinters: Array.from(session.subscribedPrinters),
+    };
+    ws.serializeAttachment(serializableSession);
+  }
 
   /**
    * Send error message to WebSocket
