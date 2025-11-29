@@ -1,4 +1,4 @@
-import { Menu, Search, Settings, LogOut, ArrowLeft, Bluetooth } from 'lucide-react';
+import { Menu, Search, Settings, LogOut, ArrowLeft, Bluetooth, HardDrive } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { ThemeToggle } from './ThemeToggle';
@@ -48,6 +48,15 @@ const Header = ({
         </h2>
       </div>
       <div className="flex items-center gap-2">
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={() => navigate('/hub-management')}
+          title="Hub Management"
+        >
+          <HardDrive className="h-5 w-5" />
+          <span className="sr-only">Hub Management</span>
+        </Button>
         <ThemeToggle />
         <DropdownMenu>
           <DropdownMenuTrigger asChild>

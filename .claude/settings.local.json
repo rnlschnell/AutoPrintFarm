@@ -13,7 +13,8 @@
       "Bash(pio device monitor:*)",
       "Bash(npm run dev:*)",
       "Bash(git add:*)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(git push:*)"
     ],
     "deny": [],
     "ask": []
