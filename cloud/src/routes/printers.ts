@@ -145,6 +145,35 @@ async function getNextPrinterId(
   return result?.next_id || 1;
 }
 
+const MAX_PRINTERS_PER_HUB = 5;
+
+/**
+ * Find the best available hub for a new printer.
+ * Strategy: Fill up hubs before moving to the next (most printers < 5, online only)
+ * Returns null if no hubs have capacity.
+ */
+async function findBestAvailableHub(
+  db: D1Database,
+  tenantId: string
+): Promise<{ id: string; printer_count: number } | null> {
+  const hub = await db
+    .prepare(
+      `SELECT h.id,
+        (SELECT COUNT(*) FROM printers WHERE hub_id = h.id) as printer_count
+      FROM hubs h
+      WHERE h.tenant_id = ?
+        AND h.is_online = 1
+      GROUP BY h.id
+      HAVING printer_count < ?
+      ORDER BY printer_count DESC
+      LIMIT 1`
+    )
+    .bind(tenantId, MAX_PRINTERS_PER_HUB)
+    .first<{ id: string; printer_count: number }>();
+
+  return hub ?? null;
+}
+
 // =============================================================================
 // LIST PRINTERS
 // =============================================================================
@@ -286,22 +315,18 @@ printers.post(
       );
     }
 
-    // If hub_id provided, validate it belongs to this tenant
-    if (body.hub_id) {
-      const hub = await c.env.DB.prepare(
-        "SELECT id FROM hubs WHERE id = ? AND tenant_id = ?"
-      )
-        .bind(body.hub_id, tenantId)
-        .first();
-
-      if (!hub) {
-        throw new ApiError(
-          "Hub not found or does not belong to this tenant",
-          404,
-          "HUB_NOT_FOUND"
-        );
-      }
+    // Auto-assign to best available hub (online, most filled but < 5 printers)
+    const bestHub = await findBestAvailableHub(c.env.DB, tenantId);
+    if (!bestHub) {
+      throw new ApiError(
+        "No hubs available with capacity. All hubs are either offline or at maximum capacity (5 printers).",
+        503,
+        "NO_AVAILABLE_HUB"
+      );
     }
+
+    // Use auto-assigned hub (ignore any hub_id from request body)
+    const assignedHubId = bestHub.id;
 
     const printerId = generateId();
     const printerNumericId = await getNextPrinterId(c.env.DB, tenantId);
@@ -324,7 +349,7 @@ printers.post(
       .bind(
         printerId,
         tenantId,
-        body.hub_id || null,
+        assignedHubId,
         body.name,
         body.model,
         body.manufacturer || null,
@@ -348,48 +373,46 @@ printers.post(
       .bind(printerId)
       .first<Printer>();
 
-    // Auto-connect: If hub_id is assigned and printer has connection credentials, try to connect
+    // Auto-connect: Hub is already assigned and online, try to connect if credentials provided
     let autoConnectResult: { attempted: boolean; success?: boolean; error?: string } = { attempted: false };
 
-    if (body.hub_id && printer && body.serial_number && body.ip_address && body.access_code) {
+    if (printer && body.serial_number && body.ip_address && body.access_code) {
       try {
-        const hubOnline = await isHubOnline(c.env, body.hub_id);
-        if (hubOnline) {
-          // Decrypt access code to send to hub
-          const accessCode = await decryptAccessCode(
-            encryptedAccessCode,
-            c.env.ENCRYPTION_KEY
-          );
+        // Hub is guaranteed online since we selected only online hubs
+        // Decrypt access code to send to hub
+        const accessCode = await decryptAccessCode(
+          encryptedAccessCode,
+          c.env.ENCRYPTION_KEY
+        );
 
-          const printerConfig: Parameters<typeof addPrinterToHub>[2] = {
-            id: printerId,
-            serial_number: body.serial_number,
-            connection_type: body.connection_type as PrinterConnectionType,
-          };
-          if (accessCode) printerConfig.access_code = accessCode;
-          if (body.ip_address) printerConfig.ip_address = body.ip_address;
+        const printerConfig: Parameters<typeof addPrinterToHub>[2] = {
+          id: printerId,
+          serial_number: body.serial_number,
+          connection_type: body.connection_type as PrinterConnectionType,
+        };
+        if (accessCode) printerConfig.access_code = accessCode;
+        if (body.ip_address) printerConfig.ip_address = body.ip_address;
 
-          const result = await addPrinterToHub(
-            c.env,
-            body.hub_id,
-            printerConfig,
-            false // don't wait for acknowledgment - let it connect async
-          );
+        const result = await addPrinterToHub(
+          c.env,
+          assignedHubId,
+          printerConfig,
+          false // don't wait for acknowledgment - let it connect async
+        );
 
-          autoConnectResult = {
-            attempted: true,
-            success: result.success,
-            ...(result.error ? { error: result.error } : {})
-          };
+        autoConnectResult = {
+          attempted: true,
+          success: result.success,
+          ...(result.error ? { error: result.error } : {})
+        };
 
-          if (result.success) {
-            // Mark printer as connection initiated
-            await c.env.DB.prepare(
-              `UPDATE printers SET last_connection_attempt = ?, updated_at = ? WHERE id = ?`
-            )
-              .bind(now, now, printerId)
-              .run();
-          }
+        if (result.success) {
+          // Mark printer as connection initiated
+          await c.env.DB.prepare(
+            `UPDATE printers SET last_connection_attempt = ?, updated_at = ? WHERE id = ?`
+          )
+            .bind(now, now, printerId)
+            .run();
         }
       } catch (error) {
         // Don't fail printer creation if auto-connect fails
@@ -404,6 +427,10 @@ printers.post(
         data: {
           ...printer,
           access_code: printer?.access_code ? "[ENCRYPTED]" : null,
+        },
+        assigned_hub: {
+          id: assignedHubId,
+          printer_count: bestHub.printer_count + 1, // Including this new printer
         },
         auto_connect: autoConnectResult,
       },

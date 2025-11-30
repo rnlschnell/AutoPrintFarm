@@ -346,7 +346,6 @@ export interface WorklistTask {
   task_type: TaskType;
   priority: TaskPriority;
   status: TaskStatus;
-  order_number: string | null;
   estimated_time_minutes: number | null;
   actual_time_minutes: number | null;
   started_at: Timestamp | null;

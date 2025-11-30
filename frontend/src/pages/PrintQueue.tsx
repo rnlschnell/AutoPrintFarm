@@ -280,20 +280,20 @@ const PrintQueue = () => {
             Create Job
           </Button>
           <div className="flex items-center gap-1 rounded-lg bg-muted p-1">
-            <Button 
-              variant={viewMode === 'table' ? 'secondary' : 'ghost'} 
-              size="sm" 
+            <Button
+              variant="ghost"
+              size="sm"
               onClick={() => setViewMode('table')}
-              className="h-8"
+              className={`h-8 ${viewMode === 'table' ? 'bg-white hover:bg-white' : ''}`}
             >
               <List className="h-4 w-4 mr-2" />
               Table
             </Button>
-            <Button 
-              variant={viewMode === 'kanban' ? 'secondary' : 'ghost'} 
-              size="sm" 
+            <Button
+              variant="ghost"
+              size="sm"
               onClick={() => setViewMode('kanban')}
-              className="h-8"
+              className={`h-8 ${viewMode === 'kanban' ? 'bg-white hover:bg-white' : ''}`}
             >
               <Kanban className="h-4 w-4 mr-2" />
               Kanban
@@ -307,7 +307,7 @@ const PrintQueue = () => {
           <CardContent className="pt-6">
             <Table>
               <TableHeader>
-                <TableRow>
+                <TableRow className="hover:bg-transparent">
                   <TableHead>Product</TableHead>
                   <TableHead>SKU</TableHead>
                   <TableHead className="hidden md:table-cell">Color</TableHead>

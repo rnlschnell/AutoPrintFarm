@@ -128,7 +128,7 @@ const Sidebar = ({ sidebarOpen, setSidebarOpen, collapsed, setCollapsed }: Sideb
         <div className="flex-1 overflow-y-auto overflow-x-hidden">
           <nav className={cn(
             "flex flex-col p-2",
-            collapsed ? "items-center gap-2 pt-3" : "gap-1"
+            collapsed ? "items-center gap-2" : "gap-1"
           )}>
             {navItems.map((item) => (
               <NavItem key={item.label} {...item} />

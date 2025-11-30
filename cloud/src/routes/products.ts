@@ -713,21 +713,6 @@ products.post(
       );
     }
 
-    // Check for duplicate color within product
-    const existingColor = await c.env.DB.prepare(
-      "SELECT id FROM product_skus WHERE product_id = ? AND color = ?"
-    )
-      .bind(productId, body.color)
-      .first();
-
-    if (existingColor) {
-      throw new ApiError(
-        "A SKU with this color already exists for this product",
-        409,
-        "DUPLICATE_COLOR"
-      );
-    }
-
     const skuId = generateId();
     const now = new Date().toISOString();
 

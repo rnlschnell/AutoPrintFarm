@@ -48,7 +48,6 @@ const createWorklistTaskSchema = z.object({
   assembly_task_id: z.string().optional(),
   printer_id: z.string().optional(),
   assigned_to: z.string().optional(),
-  order_number: z.string().max(100).optional(),
   estimated_time_minutes: z.number().int().min(0).optional(),
   due_date: z.string().optional(), // ISO8601 date string
   metadata: z.record(z.unknown()).optional(), // Will be JSON stringified
@@ -64,7 +63,6 @@ const updateWorklistTaskSchema = z.object({
   assembly_task_id: z.string().nullable().optional(),
   printer_id: z.string().nullable().optional(),
   assigned_to: z.string().nullable().optional(),
-  order_number: z.string().max(100).nullable().optional(),
   estimated_time_minutes: z.number().int().min(0).nullable().optional(),
   actual_time_minutes: z.number().int().min(0).nullable().optional(),
   started_at: z.string().nullable().optional(),
@@ -347,9 +345,9 @@ worklist.post(
         id, tenant_id, title, subtitle, description,
         task_type, priority, status,
         assembly_task_id, printer_id, assigned_to,
-        order_number, estimated_time_minutes, due_date,
+        estimated_time_minutes, due_date,
         metadata, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)`
     )
       .bind(
         taskId,
@@ -362,7 +360,6 @@ worklist.post(
         body.assembly_task_id || null,
         body.printer_id || null,
         body.assigned_to || null,
-        body.order_number || null,
         body.estimated_time_minutes || null,
         body.due_date || null,
         metadataJson,
@@ -490,7 +487,6 @@ const updateTaskHandler = async (c: Context<HonoEnv>) => {
     { key: "assembly_task_id", column: "assembly_task_id" },
     { key: "printer_id", column: "printer_id" },
     { key: "assigned_to", column: "assigned_to" },
-    { key: "order_number", column: "order_number" },
     { key: "estimated_time_minutes", column: "estimated_time_minutes" },
     { key: "actual_time_minutes", column: "actual_time_minutes" },
     { key: "started_at", column: "started_at" },

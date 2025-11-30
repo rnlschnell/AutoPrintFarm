@@ -475,7 +475,7 @@ const PrinterDetailsModal = ({ printer, isOpen, onClose }: PrinterDetailsModalPr
         bed: Math.round(printerLiveData.temperatures.bed.current)
       };
     }
-    return { nozzle: 210, bed: 60 }; // fallback values
+    return { nozzle: null, bed: null }; // no data available
   };
 
   const temperatures = getCurrentTemperatures();
@@ -722,7 +722,7 @@ const PrinterDetailsModal = ({ printer, isOpen, onClose }: PrinterDetailsModalPr
                               type="number"
                               value={nozzleTempInput}
                               onChange={(e) => setNozzleTempInput(e.target.value)}
-                              placeholder={temperatures.nozzle.toString()}
+                              placeholder={temperatures.nozzle?.toString() ?? ""}
                               className="h-8 w-20 text-sm"
                               min="0"
                               max="300"
@@ -738,7 +738,7 @@ const PrinterDetailsModal = ({ printer, isOpen, onClose }: PrinterDetailsModalPr
                             <span className="text-sm">°C</span>
                           </div>
                         ) : (
-                          <p className="text-lg font-medium">{temperatures.nozzle}°C</p>
+                          <p className="text-lg font-medium">{temperatures.nozzle !== null ? `${temperatures.nozzle}°C` : '-'}</p>
                         )}
                       </div>
                       {editingNozzleTemp ? (
@@ -773,7 +773,7 @@ const PrinterDetailsModal = ({ printer, isOpen, onClose }: PrinterDetailsModalPr
                           className="h-8 w-8"
                           onClick={() => {
                             setEditingNozzleTemp(true);
-                            setNozzleTempInput(temperatures.nozzle.toString());
+                            setNozzleTempInput(temperatures.nozzle?.toString() ?? "");
                           }}
                           title="Edit nozzle temperature"
                         >
@@ -791,7 +791,7 @@ const PrinterDetailsModal = ({ printer, isOpen, onClose }: PrinterDetailsModalPr
                               type="number"
                               value={bedTempInput}
                               onChange={(e) => setBedTempInput(e.target.value)}
-                              placeholder={temperatures.bed.toString()}
+                              placeholder={temperatures.bed?.toString() ?? ""}
                               className="h-8 w-20 text-sm"
                               min="0"
                               max="120"
@@ -807,7 +807,7 @@ const PrinterDetailsModal = ({ printer, isOpen, onClose }: PrinterDetailsModalPr
                             <span className="text-sm">°C</span>
                           </div>
                         ) : (
-                          <p className="text-lg font-medium">{temperatures.bed}°C</p>
+                          <p className="text-lg font-medium">{temperatures.bed !== null ? `${temperatures.bed}°C` : '-'}</p>
                         )}
                       </div>
                       {editingBedTemp ? (
@@ -842,7 +842,7 @@ const PrinterDetailsModal = ({ printer, isOpen, onClose }: PrinterDetailsModalPr
                           className="h-8 w-8"
                           onClick={() => {
                             setEditingBedTemp(true);
-                            setBedTempInput(temperatures.bed.toString());
+                            setBedTempInput(temperatures.bed?.toString() ?? "");
                           }}
                           title="Edit bed temperature"
                         >

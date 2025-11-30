@@ -617,7 +617,6 @@ export interface FrontendWorklistTask {
   taskType: string;
   priority: string;
   status: string;
-  orderNumber: string | null;
   estimatedTimeMinutes: number | null;
   actualTimeMinutes: number | null;
   startedAt: string | null;
@@ -641,7 +640,6 @@ export const transformWorklistTaskFromDb = (task: ApiWorklistTask): FrontendWork
     taskType: task.task_type,
     priority: task.priority,
     status: task.status,
-    orderNumber: task.order_number,
     estimatedTimeMinutes: task.estimated_time_minutes,
     actualTimeMinutes: task.actual_time_minutes,
     startedAt: task.started_at,
@@ -665,7 +663,6 @@ export const transformWorklistTaskToDb = (task: Partial<FrontendWorklistTask>): 
   if (task.taskType !== undefined) result.task_type = task.taskType;
   if (task.priority !== undefined) result.priority = task.priority;
   if (task.status !== undefined) result.status = task.status;
-  if (task.orderNumber !== undefined) result.order_number = task.orderNumber;
   if (task.estimatedTimeMinutes !== undefined) result.estimated_time_minutes = task.estimatedTimeMinutes;
   if (task.dueDate !== undefined) result.due_date = task.dueDate;
 

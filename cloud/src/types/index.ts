@@ -567,9 +567,6 @@ export interface WorklistTask {
   priority: TaskPriority;
   status: TaskStatus;
 
-  // Order reference
-  order_number: string | null;
-
   // Time tracking
   estimated_time_minutes: number | null;
   actual_time_minutes: number | null;

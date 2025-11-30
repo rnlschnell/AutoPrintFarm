@@ -360,13 +360,6 @@ const TaskDetailPage = () => {
               </div>
             )}
 
-            {task.order_number && (
-              <div>
-                <span className="text-sm font-medium text-muted-foreground">Order Number:</span>
-                <p className="text-lg">{task.order_number}</p>
-              </div>
-            )}
-
             {task.printer_id && (
               <div>
                 <span className="text-sm font-medium text-muted-foreground">Build Plate Needed:</span>

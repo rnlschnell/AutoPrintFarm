@@ -20,7 +20,6 @@ export interface WorklistTask {
   completed_at?: string;
   due_date?: string;
   printer_id?: string;
-  order_number?: string;
   assembly_task_id?: string;
   metadata?: any;
   created_at: string;

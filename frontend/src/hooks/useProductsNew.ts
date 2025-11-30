@@ -284,9 +284,10 @@ export const useProductsNew = () => {
 
       // Handle SKUs
       if (skus !== null && skus !== undefined && Array.isArray(skus)) {
-        console.log('Updating SKUs for product:', id);
+        console.log('Updating SKUs for product:', id, 'skus passed in:', skus);
 
         const currentSkus = await api.get<any[]>('/api/v1/skus', { params: { product_id: id } }) || [];
+        console.log('Current SKUs from DB:', currentSkus, 'colors:', currentSkus.map(s => s.color));
         const currentSkusMap = new Map(currentSkus.map(sku => [sku.id, sku]));
         const newSkusMap = new Map<string, any>();
         const skusToInsert: any[] = [];

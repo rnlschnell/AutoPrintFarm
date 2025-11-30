@@ -90,12 +90,11 @@ export const usePrinters = () => {
     }
 
     try {
-      // Send to Cloud API
+      // Send to Cloud API (hub is auto-assigned by backend)
       const response = await api.post<ApiPrinter>('/api/v1/printers', {
         name: printer.name,
         model: printer.model,
         manufacturer: printer.manufacturer,
-        hub_id: printer.hubId,
         ip_address: printer.ipAddress,
         access_code: printer.accessCode,
         serial_number: printer.serialNumber,

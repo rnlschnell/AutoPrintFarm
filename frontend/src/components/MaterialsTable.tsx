@@ -21,7 +21,7 @@ const getStatusBadge = (status: string) => {
     case 'in_stock':
       return <Badge className="bg-green-600 text-white hover:bg-green-700">In Stock</Badge>;
     case 'low':
-      return <Badge className="bg-yellow-500 text-black hover:bg-yellow-600">Low</Badge>;
+      return <Badge className="bg-yellow-500 text-white hover:bg-yellow-600">Low</Badge>;
     case 'out_of_stock':
       return <Badge variant="destructive">Out of Stock</Badge>;
     default:
@@ -39,7 +39,7 @@ const MaterialsTable = ({
   return (
     <Table>
       <TableHeader>
-        <TableRow>
+        <TableRow className="hover:bg-transparent">
           <TableHead className="cursor-pointer" onClick={() => onSort('type')}>
             <div className="flex items-center gap-1">
               Type

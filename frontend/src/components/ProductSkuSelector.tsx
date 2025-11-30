@@ -107,44 +107,17 @@ const ProductSkuSelector = ({ productId, value, onValueChange, disabled = false 
           )}
           {skus.map((sku) => (
             <SelectItem key={sku.id} value={sku.id}>
-              <div className="flex items-start gap-2 w-full">
-                <ColorSwatch 
-                  color={`${sku.color}|${sku.hex_code}`} 
-                  size="sm" 
-                  className="mt-0.5 flex-shrink-0"
+              <div className="flex items-center gap-2">
+                <ColorSwatch
+                  color={`${sku.color}|${sku.hex_code}`}
+                  size="sm"
                 />
-                <div className="flex-1 min-w-0">
-                  <div className="font-medium">
-                    {sku.sku}
-                  </div>
-                  <div className="text-xs text-muted-foreground">
-                    {sku.color} • {sku.filament_type}
-                  </div>
-                  <div className="flex items-center gap-3 text-xs text-muted-foreground mt-0.5">
-                    <span>Qty/Print: {sku.quantity}</span>
-                    <span>Stock: {sku.stock_level}</span>
-                    {sku.price && (
-                      <span>Price: ${(sku.price / 100).toFixed(2)}</span>
-                    )}
-                  </div>
-                </div>
+                <span>{sku.color} - {sku.sku}</span>
               </div>
             </SelectItem>
           ))}
         </SelectContent>
       </Select>
-      
-      {skus.length > 0 && (
-        <p className="text-xs text-muted-foreground">
-          {skus.length} variant{skus.length !== 1 ? 's' : ''} available
-        </p>
-      )}
-      
-      {skus.length === 0 && !loading && productId && (
-        <p className="text-xs text-orange-600">
-          No SKUs found for this product. Please add SKUs in the Products page.
-        </p>
-      )}
     </div>
   );
 };

@@ -28,11 +28,12 @@ const createSkuSchema = z.object({
   filament_type: z.string().max(50).optional(),
   hex_code: z
     .string()
-    .regex(/^#[0-9A-Fa-f]{6}$/, "Invalid hex color code")
-    .optional(),
+    .regex(/^(#[0-9A-Fa-f]{6})?$/, "Invalid hex color code")
+    .optional()
+    .transform((val) => (val === "" ? undefined : val)),
   quantity: z.number().int().min(1).default(1),
   stock_level: z.number().int().min(0).default(0),
-  price: z.number().int().min(0).optional(), // Price in cents
+  price: z.number().min(0).optional(), // Price in dollars (decimal)
   low_stock_threshold: z.number().int().min(0).default(0),
 });
 
@@ -42,12 +43,13 @@ const updateSkuSchema = z.object({
   filament_type: z.string().max(50).nullable().optional(),
   hex_code: z
     .string()
-    .regex(/^#[0-9A-Fa-f]{6}$/, "Invalid hex color code")
+    .regex(/^(#[0-9A-Fa-f]{6})?$/, "Invalid hex color code")
     .nullable()
-    .optional(),
+    .optional()
+    .transform((val) => (val === "" ? null : val)),
   quantity: z.number().int().min(1).optional(),
   stock_level: z.number().int().min(0).optional(),
-  price: z.number().int().min(0).nullable().optional(),
+  price: z.number().min(0).nullable().optional(), // Price in dollars (decimal)
   low_stock_threshold: z.number().int().min(0).optional(),
   is_active: z.boolean().optional(),
 });
@@ -182,21 +184,6 @@ skus.post(
         "A SKU with this code already exists",
         409,
         "DUPLICATE_SKU"
-      );
-    }
-
-    // Check for duplicate color within product
-    const existingColor = await c.env.DB.prepare(
-      "SELECT id FROM product_skus WHERE product_id = ? AND color = ?"
-    )
-      .bind(productId, body.color)
-      .first();
-
-    if (existingColor) {
-      throw new ApiError(
-        "A SKU with this color already exists for this product",
-        409,
-        "DUPLICATE_COLOR"
       );
     }
 
@@ -337,23 +324,6 @@ skus.put(
           "A SKU with this code already exists",
           409,
           "DUPLICATE_SKU"
-        );
-      }
-    }
-
-    // Check for duplicate color within product if changing
-    if (body.color) {
-      const duplicateColor = await c.env.DB.prepare(
-        "SELECT id FROM product_skus WHERE product_id = ? AND color = ? AND id != ?"
-      )
-        .bind(existing.product_id, body.color, skuId)
-        .first();
-
-      if (duplicateColor) {
-        throw new ApiError(
-          "A SKU with this color already exists for this product",
-          409,
-          "DUPLICATE_COLOR"
         );
       }
     }

@@ -173,6 +173,114 @@ files.post("/parse-metadata", async (c) => {
 });
 
 // =============================================================================
+// WIKI IMAGE UPLOAD
+// =============================================================================
+
+/**
+ * POST /api/v1/files/wiki-image
+ * Upload an image for wiki articles.
+ * Stores the image in R2 and returns the public URL.
+ */
+files.post(
+  "/wiki-image",
+  requireAuth(),
+  requireTenant(),
+  requireRoles(["owner", "admin", "operator"]),
+  async (c) => {
+    const tenantId = c.get("tenantId")!;
+
+    try {
+      // Parse multipart form data
+      const formData = await c.req.formData();
+      const file = formData.get("file");
+
+      if (!file || typeof file === "string") {
+        throw new ApiError("No file provided", 400, "NO_FILE");
+      }
+
+      // Cast to get proper typing
+      const fileBlob = file as unknown as { name: string; type: string; arrayBuffer(): Promise<ArrayBuffer> };
+
+      // Validate file type
+      const validTypes = ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"];
+      if (!validTypes.includes(fileBlob.type)) {
+        throw new ApiError(
+          "Invalid file type. Please upload a JPG, PNG, GIF, or WebP image.",
+          400,
+          "INVALID_FILE_TYPE"
+        );
+      }
+
+      // Validate file size (5MB max)
+      const arrayBuffer = await fileBlob.arrayBuffer();
+      const maxSize = 5 * 1024 * 1024; // 5MB
+      if (arrayBuffer.byteLength > maxSize) {
+        throw new ApiError(
+          "File too large. Please upload an image smaller than 5MB.",
+          400,
+          "FILE_TOO_LARGE"
+        );
+      }
+
+      // Generate unique filename
+      const imageId = generateId();
+      const extension = fileBlob.name.split(".").pop()?.toLowerCase() || "jpg";
+      const r2Key = `${tenantId}/images/wiki/${imageId}.${extension}`;
+
+      // Upload to R2
+      await uploadFile(c.env.R2, r2Key, arrayBuffer, {
+        contentType: fileBlob.type,
+        cacheControl: "public, max-age=31536000", // Cache for 1 year
+      });
+
+      // Generate the public URL
+      // For production, this would use a custom domain or R2 public URL
+      // For now, we return a relative URL that the frontend can use
+      const url = `/api/v1/files/wiki-image/${tenantId}/${imageId}.${extension}`;
+
+      return c.json({
+        success: true,
+        data: { url },
+      });
+    } catch (error) {
+      if (error instanceof ApiError) {
+        throw error;
+      }
+      console.error("Failed to upload wiki image:", error);
+      throw new ApiError(
+        `Failed to upload image: ${error instanceof Error ? error.message : "Unknown error"}`,
+        500,
+        "UPLOAD_ERROR"
+      );
+    }
+  }
+);
+
+/**
+ * GET /api/v1/files/wiki-image/:tenantId/:filename
+ * Serve a wiki image from R2 storage.
+ */
+files.get("/wiki-image/:tenantId/:filename", async (c) => {
+  const tenantId = c.req.param("tenantId");
+  const filename = c.req.param("filename");
+
+  const r2Key = `${tenantId}/images/wiki/${filename}`;
+
+  try {
+    const object = await downloadFile(c.env.R2, r2Key);
+
+    return new Response(object.body, {
+      headers: {
+        "Content-Type": object.httpMetadata?.contentType || "image/jpeg",
+        "Cache-Control": "public, max-age=31536000",
+      },
+    });
+  } catch (error) {
+    throw new ApiError("Image not found", 404, "IMAGE_NOT_FOUND");
+  }
+});
+
+// =============================================================================
 // LIST FILES
 // =============================================================================
 

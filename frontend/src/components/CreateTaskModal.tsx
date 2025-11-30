@@ -31,8 +31,7 @@ const CreateTaskModal = ({ isOpen, onClose, onTaskCreated }: CreateTaskModalProp
     assigned_to: '',
     estimated_time_minutes: '',
     due_date: undefined as Date | undefined,
-    printer_id: '',
-    order_number: ''
+    printer_id: ''
   });
 
   // Assembly-specific state
@@ -134,7 +133,6 @@ const CreateTaskModal = ({ isOpen, onClose, onTaskCreated }: CreateTaskModalProp
         estimated_time_minutes: taskData.estimated_time_minutes ? parseInt(taskData.estimated_time_minutes) : undefined,
         due_date: taskData.due_date ? taskData.due_date.toISOString() : undefined,
         printer_id: taskData.printer_id || undefined,
-        order_number: taskData.order_number.trim() || undefined,
       };
 
       onTaskCreated(newTask);
@@ -149,8 +147,7 @@ const CreateTaskModal = ({ isOpen, onClose, onTaskCreated }: CreateTaskModalProp
       assigned_to: '',
       estimated_time_minutes: '',
       due_date: undefined,
-      printer_id: '',
-      order_number: ''
+      printer_id: ''
     });
     setAssemblyData({
       productId: '',
@@ -203,143 +200,205 @@ const CreateTaskModal = ({ isOpen, onClose, onTaskCreated }: CreateTaskModalProp
           {/* Assembly-specific fields */}
           {taskData.task_type === 'assembly' && (
             <>
-              <ProductSelector
-                value={assemblyData.productId}
-                onValueChange={async (productId) => {
-                  // Fetch product name from cloud API
-                  try {
-                    const product = await api.get<{ name: string }>(`/api/v1/products/${productId}`);
+              <div className="grid grid-cols-2 gap-4">
+                <ProductSelector
+                  value={assemblyData.productId}
+                  onValueChange={async (productId) => {
+                    // Fetch product name from cloud API
+                    try {
+                      const product = await api.get<{ name: string }>(`/api/v1/products/${productId}`);
+                      setAssemblyData({
+                        ...assemblyData,
+                        productId,
+                        productName: product.name,
+                        skuId: '', // Reset SKU when product changes
+                        sku: ''
+                      });
+                    } catch (error) {
+                      console.error('Error fetching product:', error);
+                    }
+                  }}
+                />
+
+                <ProductSkuSelector
+                  productId={assemblyData.productId}
+                  value={assemblyData.skuId}
+                  onValueChange={(skuId, skuData) => {
                     setAssemblyData({
                       ...assemblyData,
-                      productId,
-                      productName: product.name,
-                      skuId: '', // Reset SKU when product changes
-                      sku: ''
+                      skuId,
+                      sku: skuData.sku
                     });
-                  } catch (error) {
-                    console.error('Error fetching product:', error);
-                  }
-                }}
-              />
-
-              <ProductSkuSelector
-                productId={assemblyData.productId}
-                value={assemblyData.skuId}
-                onValueChange={(skuId, skuData) => {
-                  setAssemblyData({
-                    ...assemblyData,
-                    skuId,
-                    sku: skuData.sku
-                  });
-                }}
-              />
-
-              <div className="space-y-2">
-                <Label htmlFor="quantity">Quantity to Assemble *</Label>
-                <Input
-                  id="quantity"
-                  type="number"
-                  min="1"
-                  value={assemblyData.quantity}
-                  onChange={(e) => setAssemblyData({ ...assemblyData, quantity: e.target.value })}
-                  placeholder="e.g. 5"
+                  }}
                 />
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label htmlFor="priority">Priority</Label>
+                  <Select value={taskData.priority} onValueChange={(value) => setTaskData({ ...taskData, priority: value })}>
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select priority" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {priorities.map((priority) => (
+                        <SelectItem key={priority.value} value={priority.value}>
+                          {priority.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="quantity">Quantity to Assemble *</Label>
+                  <Input
+                    id="quantity"
+                    type="number"
+                    min="1"
+                    value={assemblyData.quantity}
+                    onChange={(e) => setAssemblyData({ ...assemblyData, quantity: e.target.value })}
+                    placeholder="e.g. 5"
+                  />
+                </div>
               </div>
             </>
           )}
 
           {/* Generic task fields - Only for non-assembly tasks */}
           {taskData.task_type !== 'assembly' && taskData.task_type !== '' && (
+            <>
+              <div className="space-y-2">
+                <Label htmlFor="title">Title *</Label>
+                <Input
+                  id="title"
+                  value={taskData.title}
+                  onChange={(e) => setTaskData({ ...taskData, title: e.target.value })}
+                  placeholder="Enter task title"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label htmlFor="priority">Priority</Label>
+                  <Select value={taskData.priority} onValueChange={(value) => setTaskData({ ...taskData, priority: value })}>
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select priority" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {priorities.map((priority) => (
+                        <SelectItem key={priority.value} value={priority.value}>
+                          {priority.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="estimated_time">Estimated Time (minutes)</Label>
+                  <Input
+                    id="estimated_time"
+                    type="number"
+                    min="1"
+                    value={taskData.estimated_time_minutes}
+                    onChange={(e) => setTaskData({ ...taskData, estimated_time_minutes: e.target.value })}
+                    placeholder="e.g. 30"
+                  />
+                </div>
+              </div>
+            </>
+          )}
+
+          {/* Description - shown for all task types after type is selected */}
+          {taskData.task_type !== '' && (
             <div className="space-y-2">
-              <Label htmlFor="title">Title *</Label>
-              <Input
-                id="title"
-                value={taskData.title}
-                onChange={(e) => setTaskData({ ...taskData, title: e.target.value })}
-                placeholder="Enter task title"
+              <Label htmlFor="description">Description</Label>
+              <Textarea
+                id="description"
+                value={taskData.description}
+                onChange={(e) => setTaskData({ ...taskData, description: e.target.value })}
+                placeholder="Task description (optional)"
+                rows={3}
               />
             </div>
           )}
 
-          <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <Label htmlFor="priority">Priority</Label>
-              <Select value={taskData.priority} onValueChange={(value) => setTaskData({ ...taskData, priority: value })}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Select priority" />
-                </SelectTrigger>
-                <SelectContent>
-                  {priorities.map((priority) => (
-                    <SelectItem key={priority.value} value={priority.value}>
-                      {priority.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
+          {/* Due Date and Estimated Time for assembly tasks */}
+          {taskData.task_type === 'assembly' && (
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>Due Date</Label>
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <Button
+                      variant="outline"
+                      className={cn(
+                        "w-full justify-start text-left font-normal",
+                        !taskData.due_date && "text-muted-foreground"
+                      )}
+                    >
+                      <CalendarIcon className="mr-2 h-4 w-4" />
+                      {taskData.due_date ? format(taskData.due_date, "PPP") : <span>Pick a date</span>}
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-auto p-0" align="start">
+                    <Calendar
+                      mode="single"
+                      selected={taskData.due_date}
+                      onSelect={(date) => setTaskData({ ...taskData, due_date: date })}
+                      initialFocus
+                      className="p-3 pointer-events-auto"
+                    />
+                  </PopoverContent>
+                </Popover>
+              </div>
 
-            <div className="space-y-2">
-              <Label htmlFor="estimated_time">Estimated Time (minutes)</Label>
-              <Input
-                id="estimated_time"
-                type="number"
-                min="1"
-                value={taskData.estimated_time_minutes}
-                onChange={(e) => setTaskData({ ...taskData, estimated_time_minutes: e.target.value })}
-                placeholder="e.g. 30"
-              />
+              <div className="space-y-2">
+                <Label htmlFor="estimated_time">Estimated Time (minutes)</Label>
+                <Input
+                  id="estimated_time"
+                  type="number"
+                  min="1"
+                  value={taskData.estimated_time_minutes}
+                  onChange={(e) => setTaskData({ ...taskData, estimated_time_minutes: e.target.value })}
+                  placeholder="e.g. 30"
+                />
+              </div>
             </div>
-          </div>
+          )}
 
-          <div className="space-y-2">
-            <Label htmlFor="description">Description</Label>
-            <Textarea
-              id="description"
-              value={taskData.description}
-              onChange={(e) => setTaskData({ ...taskData, description: e.target.value })}
-              placeholder="Task description (optional)"
-              rows={3}
-            />
-          </div>
-
-          <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <Label>Due Date</Label>
-              <Popover>
-                <PopoverTrigger asChild>
-                  <Button
-                    variant="outline"
-                    className={cn(
-                      "w-full justify-start text-left font-normal",
-                      !taskData.due_date && "text-muted-foreground"
-                    )}
-                  >
-                    <CalendarIcon className="mr-2 h-4 w-4" />
-                    {taskData.due_date ? format(taskData.due_date, "PPP") : <span>Pick a date</span>}
-                  </Button>
-                </PopoverTrigger>
-                <PopoverContent className="w-auto p-0" align="start">
-                  <Calendar
-                    mode="single"
-                    selected={taskData.due_date}
-                    onSelect={(date) => setTaskData({ ...taskData, due_date: date })}
-                    initialFocus
-                    className="p-3 pointer-events-auto"
-                  />
-                </PopoverContent>
-              </Popover>
+          {/* Due Date for non-assembly tasks */}
+          {taskData.task_type !== 'assembly' && taskData.task_type !== '' && (
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>Due Date</Label>
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <Button
+                      variant="outline"
+                      className={cn(
+                        "w-full justify-start text-left font-normal",
+                        !taskData.due_date && "text-muted-foreground"
+                      )}
+                    >
+                      <CalendarIcon className="mr-2 h-4 w-4" />
+                      {taskData.due_date ? format(taskData.due_date, "PPP") : <span>Pick a date</span>}
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-auto p-0" align="start">
+                    <Calendar
+                      mode="single"
+                      selected={taskData.due_date}
+                      onSelect={(date) => setTaskData({ ...taskData, due_date: date })}
+                      initialFocus
+                      className="p-3 pointer-events-auto"
+                    />
+                  </PopoverContent>
+                </Popover>
+              </div>
             </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="order_number">Order Number</Label>
-              <Input
-                id="order_number"
-                value={taskData.order_number}
-                onChange={(e) => setTaskData({ ...taskData, order_number: e.target.value })}
-                placeholder="Order #123 (optional)"
-              />
-            </div>
-          </div>
+          )}
         </div>
 
         <DialogFooter>

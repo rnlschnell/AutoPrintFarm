@@ -6,7 +6,6 @@ import { MoreHorizontal, Clock, Palette, Plus, GripVertical, LayoutGrid, List, P
 import { useDashboardWebSocket, type LivePrinterData } from "@/hooks/useWebSocket";
 import { useAuth } from "@/contexts/AuthContext";
 import { api } from "@/lib/api-client";
-import type { Hub } from "@/types/api";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -510,24 +509,9 @@ const Printers = () => {
     model: '',
     serialNumber: '',
     ipAddress: '',
-    accessCode: '',
-    hubId: ''
+    accessCode: ''
   });
-  const [hubs, setHubs] = useState<Hub[]>([]);
   const { toast } = useToast();
-
-  // Fetch available hubs for the dropdown
-  useEffect(() => {
-    const fetchHubs = async () => {
-      try {
-        const response = await api.get<Hub[]>('/api/v1/hubs');
-        setHubs(response || []);
-      } catch (error) {
-        console.error('Failed to fetch hubs:', error);
-      }
-    };
-    fetchHubs();
-  }, []);
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -567,10 +551,10 @@ const Printers = () => {
   };
 
   const handleAddPrinter = async () => {
-    if (!newPrinter.name || !newPrinter.manufacturer || !newPrinter.model || !newPrinter.hubId) {
+    if (!newPrinter.name || !newPrinter.manufacturer || !newPrinter.model) {
       toast({
         title: "Error",
-        description: "Please fill in the required fields (Name, Manufacturer, Model, and Hub).",
+        description: "Please fill in the required fields (Name, Manufacturer, and Model).",
         variant: "destructive",
       });
       return;
@@ -587,8 +571,7 @@ const Printers = () => {
         model: '',
         serialNumber: '',
         ipAddress: '',
-        accessCode: '',
-        hubId: ''
+        accessCode: ''
       });
       setIsAddModalOpen(false);
     } catch (error) {
@@ -776,26 +759,6 @@ const Printers = () => {
                     onChange={(e) => setNewPrinter({ ...newPrinter, accessCode: e.target.value })}
                     className="col-span-3"
                   />
-                </div>
-                <div className="grid grid-cols-4 items-center gap-4">
-                  <Label htmlFor="hub" className="text-right">
-                    Hub *
-                  </Label>
-                  <Select
-                    value={newPrinter.hubId}
-                    onValueChange={(value) => setNewPrinter({ ...newPrinter, hubId: value })}
-                  >
-                    <SelectTrigger className="col-span-3">
-                      <SelectValue placeholder="Select hub" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {hubs.map((hub) => (
-                        <SelectItem key={hub.id} value={hub.id}>
-                          {hub.name || `Hub ${hub.id.slice(0, 8)}`}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
                 </div>
               </div>
               <DialogFooter>
