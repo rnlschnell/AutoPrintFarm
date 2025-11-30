@@ -29,19 +29,17 @@ const Settings = () => {
       </div>
 
       <Tabs defaultValue="general" className="space-y-8">
-        <TabsList>
-          <TabsTrigger value="general">General</TabsTrigger>
-          {profile?.role === 'admin' && (
-            <>
-              <TabsTrigger value="logs">System Logs</TabsTrigger>
-              <TabsTrigger value="users">User Management</TabsTrigger>
-              <TabsTrigger value="backup">Backup & Restore</TabsTrigger>
-            </>
-          )}
-        </TabsList>
+        {profile?.role === 'admin' && (
+          <TabsList>
+            <TabsTrigger value="general">General</TabsTrigger>
+            <TabsTrigger value="logs">System Logs</TabsTrigger>
+            <TabsTrigger value="users">User Management</TabsTrigger>
+            <TabsTrigger value="backup">Backup & Restore</TabsTrigger>
+          </TabsList>
+        )}
 
         <TabsContent value="general" className="space-y-8">
-          <div className="rounded-lg border p-6">
+          <div className="rounded-lg border bg-card p-6">
             <h2 className="text-xl font-semibold mb-4">General Settings</h2>
             <p className="text-muted-foreground mb-6">Configure general preferences for your print farm.</p>
 
@@ -63,7 +61,7 @@ const Settings = () => {
             </div>
           </div>
 
-          <div className="rounded-lg border p-6">
+          <div className="rounded-lg border bg-card p-6">
             <h2 className="text-xl font-semibold mb-4">Billing & Account</h2>
             <p className="text-muted-foreground mb-6">Manage your subscription, billing, and account details.</p>
 
@@ -179,17 +177,19 @@ const Settings = () => {
         </TabsContent>
 
         {profile?.role === 'admin' && (
-          <>
-            <TabsContent value="logs">
-              <LogsManagement />
-            </TabsContent>
-            <TabsContent value="users">
-              <UserManagement />
-            </TabsContent>
-            <TabsContent value="backup">
-              <BackupManagement />
-            </TabsContent>
-          </>
+          <TabsContent value="logs">
+            <LogsManagement />
+          </TabsContent>
+        )}
+        {profile?.role === 'admin' && (
+          <TabsContent value="users">
+            <UserManagement />
+          </TabsContent>
+        )}
+        {profile?.role === 'admin' && (
+          <TabsContent value="backup">
+            <BackupManagement />
+          </TabsContent>
         )}
       </Tabs>
 

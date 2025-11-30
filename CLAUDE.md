@@ -58,7 +58,7 @@ AutoPrintFarm/
 ```bash
 cd cloud
 npm install
-npm run dev                  # Local development server (wrangler dev)
+npx wrangler dev --ip 127.0.0.1  # Local development server (must use --ip 127.0.0.1)
 npm run deploy               # Deploy to Cloudflare
 wrangler d1 migrations apply printfarm  # Apply database migrations
 wrangler d1 execute printfarm --local --file=migrations/0001_initial.sql  # Run migration locally

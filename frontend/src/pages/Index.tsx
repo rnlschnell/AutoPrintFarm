@@ -22,7 +22,8 @@ import { useWorklistTasks } from "@/hooks/useWorklistTasks";
 import { useProductInventory } from "@/hooks/useProductInventory";
 import { useMaterialInventory } from "@/hooks/useMaterialInventory";
 import { useOrders } from "@/hooks/useOrders";
-import { usePrinterWebSocket } from "@/hooks/useWebSocket";
+import { useDashboardWebSocket } from "@/hooks/useWebSocket";
+import { useAuth } from "@/contexts/AuthContext";
 import { formatCurrency } from "@/lib/utils";
 import PrintControlButtons from "@/components/PrintControlButtons";
 
@@ -31,7 +32,8 @@ const Index = () => {
 
   // Fetch real data using hooks
   const { printers, loading: printersLoading } = usePrinters();
-  const { data: liveData, isConnected: wsConnected } = usePrinterWebSocket();
+  const { tenantId, session } = useAuth();
+  const { data: liveData, isConnected: wsConnected } = useDashboardWebSocket(tenantId || '', session?.token || '');
   const { printJobs: jobs, loading: jobsLoading } = usePrintJobs();
   const { tasks, loading: tasksLoading } = useWorklistTasks();
   const { productInventory: inventory, loading: inventoryLoading } = useProductInventory();

@@ -17,7 +17,7 @@ import { useState, useMemo, useEffect } from "react";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
 import { usePrinters, type Printer } from "@/hooks/usePrinters";
-import { usePrinterWebSocket, type LivePrinterData } from "@/hooks/useWebSocket";
+import { useDashboardWebSocket, type LivePrinterData } from "@/hooks/useWebSocket";
 import { formatTime, formatLayerProgress } from "@/lib/utils";
 
 interface PrinterDetailsModalProps {
@@ -27,7 +27,7 @@ interface PrinterDetailsModalProps {
 }
 
 const PrinterDetailsModal = ({ printer, isOpen, onClose }: PrinterDetailsModalProps) => {
-  const { tenantId } = useAuth();
+  const { tenantId, session } = useAuth();
   const [isEditing, setIsEditing] = useState(false);
   const [editedName, setEditedName] = useState("");
   const [editedModel, setEditedModel] = useState("");
@@ -52,7 +52,7 @@ const PrinterDetailsModal = ({ printer, isOpen, onClose }: PrinterDetailsModalPr
   const [lightOn, setLightOn] = useState(false);
   const { toast } = useToast();
   const { updatePrinter, deletePrinter, printers, toggleCleared } = usePrinters();
-  const { data: liveData } = usePrinterWebSocket();
+  const { data: liveData } = useDashboardWebSocket(tenantId || '', session?.token || '');
 
   // Always use the latest printer data from the printers array
   const currentPrinter = useMemo(() => {

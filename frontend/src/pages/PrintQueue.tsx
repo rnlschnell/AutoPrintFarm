@@ -11,8 +11,9 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { usePrintJobs } from "@/hooks/usePrintJobs";
-import { usePrinterWebSocket } from "@/hooks/useWebSocket";
+import { useDashboardWebSocket } from "@/hooks/useWebSocket";
 import { usePrinters } from "@/hooks/usePrinters";
+import { useAuth } from "@/contexts/AuthContext";
 import { MoreHorizontal, List, Kanban, Plus, Check } from "lucide-react";
 import {
   DropdownMenu,
@@ -126,7 +127,8 @@ const KanbanColumn = ({ title, jobs, status, onViewDetails, onCancelJob, onCompl
 
 const PrintQueue = () => {
   const { printJobs: jobs, loading, addPrintJob } = usePrintJobs();
-  const { data: liveData } = usePrinterWebSocket(); // Get live printer data
+  const { tenantId, session } = useAuth();
+  const { data: liveData } = useDashboardWebSocket(tenantId || '', session?.token || '');
   const { printers } = usePrinters(); // Get printer data for ID lookup
   const [viewMode, setViewMode] = useState<'table' | 'kanban'>('table');
 

@@ -243,15 +243,19 @@ export class DashboardBroadcast {
   async alarm(): Promise<void> {
     console.log("[DashboardBroadcast] Alarm triggered");
 
+    // Restore sessions from attachments first
+    this.ensureSessionsRestored();
+
     const websockets = this.state.getWebSockets();
-    const now = Date.now();
 
     // Check for unauthenticated connections that have timed out
     for (const ws of websockets) {
-      const tags = this.state.getTags(ws);
+      // Check if client has a valid session (authenticated)
+      // We use the session map instead of tags since tags can't be updated after acceptWebSocket
+      const session = this.clientSessions.get(ws);
 
-      // If still unauthenticated, close the connection
-      if (tags.includes("unauthenticated")) {
+      // If no session exists, the client hasn't authenticated yet
+      if (!session) {
         console.log("[DashboardBroadcast] Closing unauthenticated connection");
         this.sendAuthError(ws, "Authentication timeout");
         ws.close(4001, "Authentication timeout");
